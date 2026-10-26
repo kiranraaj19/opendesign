@@ -160,15 +160,13 @@ pub fn ui(ui: &mut egui::Ui, s: &mut Session) {
         let angle = i as f32 / count * std::f32::consts::TAU;
         let (sin, cos) = angle.sin_cos();
         let radius = 0.4;
-        let points = pattern
-            .polyline(od_core::document::TOLERANCE)
-            .into_iter()
-            .map(|p| {
-                // mm to m; pattern x runs along the ring tangent, y downward.
-                let u = (p.x - mid.x) / 1000.0;
-                let h = 1.15 - (p.y - mid.y) / 1000.0;
-                Vec3::new(radius * sin + u * cos, h, radius * cos - u * sin)
-            });
+        let outline = pattern.polyline(od_core::document::TOLERANCE);
+        let points = outline.iter().map(|p| {
+            // mm to m; pattern x runs along the ring tangent, y downward.
+            let u = (p.x - mid.x) / 1000.0;
+            let h = 1.15 - (p.y - mid.y) / 1000.0;
+            Vec3::new(radius * sin + u * cos, h, radius * cos - u * sin)
+        });
         let screen = cam.polyline(points);
         if screen.len() < 3 {
             continue;
