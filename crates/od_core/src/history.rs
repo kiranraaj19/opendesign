@@ -207,7 +207,7 @@ mod tests {
             Box::new(MovePattern::new(id, Vec2::new(5.0, -3.0))),
         );
         history.execute(&mut doc, Box::new(RenamePattern::new(id, "Left sleeve")));
-        assert_eq!(doc.patterns[0].outline[0], Vec2::new(5.0, -3.0));
+        assert_eq!(doc.patterns[0].outline[0].pos, Vec2::new(5.0, -3.0));
         assert_eq!(doc.patterns[0].name, "Left sleeve");
 
         history.undo(&mut doc);

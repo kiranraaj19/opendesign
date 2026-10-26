@@ -2,7 +2,10 @@
 
 use egui::{Key, KeyboardShortcut, Modifiers};
 use egui_dock::{DockArea, DockState, NodeIndex, Style, TabViewer};
-use od_core::{AddPattern, Command, DeletePattern, Document, History, PatternId, Vec2};
+use od_core::{
+    AddPattern, Axis, Command, DeletePattern, DeletePoint, Document, DuplicatePattern, History,
+    MirrorPattern, OutlinePoint, PatternId, SetPointKind, Vec2,
+};
 
 use crate::files::{Discard, FileState, RECENT_KEY};
 use crate::panels::{
@@ -36,13 +39,61 @@ const LAYOUT_KEY: &str = "dock_layout_v1";
 pub enum Tool {
     Select,
     Rectangle,
+    Pen,
+    EditPoints,
+    InternalLine,
+    Notch,
 }
 
 impl Tool {
+    /// Toolbar order, with button label, shortcut key and tooltip.
+    const BUTTONS: [(Tool, &'static str, Key, &'static str); 6] = [
+        (
+            Tool::Select,
+            "Select",
+            Key::V,
+            "Select and move patterns (V)",
+        ),
+        (
+            Tool::Rectangle,
+            "Rectangle",
+            Key::R,
+            "Drag in the 2D window to draw a rectangle pattern (R)",
+        ),
+        (
+            Tool::Pen,
+            "Pen",
+            Key::P,
+            "Click points to draft a pattern outline; Shift+click for a curve point (P)",
+        ),
+        (
+            Tool::EditPoints,
+            "Edit points",
+            Key::E,
+            "Drag, add, delete and curve outline points (E)",
+        ),
+        (
+            Tool::InternalLine,
+            "Internal line",
+            Key::L,
+            "Draw a line inside a pattern (L)",
+        ),
+        (
+            Tool::Notch,
+            "Notch",
+            Key::N,
+            "Add or remove notches on an outline (N)",
+        ),
+    ];
+
     pub fn name(self) -> &'static str {
         match self {
             Tool::Select => "Select / Move",
             Tool::Rectangle => "Rectangle",
+            Tool::Pen => "Pen",
+            Tool::EditPoints => "Edit points",
+            Tool::InternalLine => "Internal line",
+            Tool::Notch => "Notch",
         }
     }
 }
@@ -64,9 +115,15 @@ impl Session {
         self.history.execute(&mut self.doc, Box::new(command));
     }
 
-    /// Add a pattern and select it.
+    /// Add a straight-edged pattern and select it.
     pub fn add_pattern(&mut self, name: impl Into<String>, outline: Vec<Vec2>) {
         self.execute(AddPattern::new(name, outline));
+        self.selection = self.doc.patterns.last().map(|p| p.id);
+    }
+
+    /// Add a pattern with corner and curve points and select it.
+    pub fn add_outline(&mut self, name: impl Into<String>, outline: Vec<OutlinePoint>) {
+        self.execute(AddPattern::with_outline(name, outline));
         self.selection = self.doc.patterns.last().map(|p| p.id);
     }
 
@@ -78,9 +135,69 @@ impl Session {
         self.history.redo(&mut self.doc);
     }
 
+    /// Delete the selected point while editing points, else the pattern.
     pub fn delete_selected(&mut self) {
+        if let Some((id, index)) = self.canvas.selected_point.take() {
+            // An outline needs three points; keep the point selected if so.
+            if self.doc.pattern(id).is_some_and(|p| p.outline.len() > 3) {
+                self.execute(DeletePoint::new(id, index));
+            } else {
+                self.canvas.selected_point = Some((id, index));
+            }
+            return;
+        }
         if let Some(id) = self.selection.take() {
             self.execute(DeletePattern::new(id));
+        }
+    }
+
+    /// Switch the selected point between corner and curve.
+    pub fn toggle_selected_point(&mut self) {
+        let Some((id, index)) = self.canvas.selected_point else {
+            return;
+        };
+        if let Some(kind) = self
+            .doc
+            .pattern(id)
+            .and_then(|p| p.outline.get(index))
+            .map(|p| p.kind)
+        {
+            self.execute(SetPointKind::new(id, index, kind.toggled()));
+        }
+    }
+
+    /// Flip the selected pattern in place.
+    pub fn mirror_selected(&mut self, axis: Axis) {
+        if let Some(id) = self.selection {
+            self.execute(MirrorPattern::new(id, axis));
+        }
+    }
+
+    /// Copy the selected pattern, optionally mirrored, and select the copy.
+    pub fn duplicate_selected(&mut self, mirror: Option<Axis>) {
+        if let Some(id) = self.selection {
+            self.execute(DuplicatePattern::new(id, mirror));
+            self.selection = self.doc.patterns.last().map(|p| p.id);
+        }
+    }
+
+    /// Drop selections that undo or redo made stale.
+    fn fix_selection(&mut self) {
+        if self
+            .selection
+            .is_some_and(|id| self.doc.pattern(id).is_none())
+        {
+            self.selection = None;
+        }
+        if let Some((id, index)) = self.canvas.selected_point {
+            let valid = self.selection == Some(id)
+                && self
+                    .doc
+                    .pattern(id)
+                    .is_some_and(|p| index < p.outline.len());
+            if !valid {
+                self.canvas.selected_point = None;
+            }
         }
     }
 
@@ -147,21 +264,26 @@ impl OpenDesignApp {
         } else if shortcut(Modifiers::COMMAND, Key::Z) {
             s.undo();
         }
+        if shortcut(Modifiers::COMMAND, Key::D) {
+            s.duplicate_selected(None);
+        }
 
         // Single-key shortcuts must not fire while typing in a text field.
         if ctx.memory(|m| m.focused().is_some()) {
             return;
         }
         ctx.input(|i| {
-            if i.key_pressed(Key::V) {
-                s.tool = Tool::Select;
-            }
-            if i.key_pressed(Key::R) {
-                s.tool = Tool::Rectangle;
+            for (tool, _, key, _) in Tool::BUTTONS {
+                if i.key_pressed(key) {
+                    s.tool = tool;
+                }
             }
         });
         if ctx.input(|i| i.key_pressed(Key::Delete) || i.key_pressed(Key::Backspace)) {
             s.delete_selected();
+        }
+        if ctx.input(|i| i.key_pressed(Key::C)) {
+            s.toggle_selected_point();
         }
     }
 
@@ -250,6 +372,9 @@ impl OpenDesignApp {
                 }
             });
             ui.menu_button("View", |ui| {
+                ui.checkbox(&mut s.canvas.snap.grid, "Snap to grid");
+                ui.checkbox(&mut s.canvas.snap.points, "Snap to points");
+                ui.separator();
                 if ui.button("Reset layout").clicked() {
                     self.dock = default_layout();
                 }
@@ -267,10 +392,16 @@ impl OpenDesignApp {
     fn toolbar(&mut self, ui: &mut egui::Ui) {
         let s = &mut self.session;
         ui.horizontal(|ui| {
-            ui.selectable_value(&mut s.tool, Tool::Select, "Select")
-                .on_hover_text("Select and move patterns (V)");
-            ui.selectable_value(&mut s.tool, Tool::Rectangle, "Rectangle")
-                .on_hover_text("Drag in the 2D window to draw a rectangle pattern (R)");
+            for (tool, label, _, tip) in Tool::BUTTONS {
+                ui.selectable_value(&mut s.tool, tool, label)
+                    .on_hover_text(tip);
+            }
+            ui.separator();
+            let snap = &mut s.canvas.snap;
+            ui.toggle_value(&mut snap.grid, "Grid snap")
+                .on_hover_text("Snap drafted points to the grid");
+            ui.toggle_value(&mut snap.points, "Point snap")
+                .on_hover_text("Snap drafted points to existing points");
             ui.separator();
             if ui
                 .add_enabled(s.history.can_undo(), egui::Button::new("Undo"))
@@ -333,11 +464,8 @@ impl eframe::App for OpenDesignApp {
             self.handle_shortcuts(&ctx);
         }
 
-        // Undo can remove the selected pattern; drop a stale selection.
-        let s = &mut self.session;
-        if s.selection.is_some_and(|id| s.doc.pattern(id).is_none()) {
-            s.selection = None;
-        }
+        // Undo can remove the selected pattern or point.
+        self.session.fix_selection();
 
         egui::Panel::top("menu_bar").show(ui, |ui| self.menu_bar(ui));
         egui::Panel::top("toolbar").show(ui, |ui| self.toolbar(ui));
@@ -856,5 +984,437 @@ mod tests {
         h.key_press_modifiers(Modifiers::COMMAND, Key::Z);
         h.run();
         assert_eq!(h.state().session.doc.patterns[0].outline, before);
+    }
+
+    // ---- 2D drafting (Phase 3) ----
+
+    use crate::panels::pattern2d::Snap;
+    use egui::accesskit::Role;
+    use od_core::PointKind::{Corner, Curve};
+
+    /// Screen position of a document point (mm) in the 2D canvas.
+    fn screen(h: &Harness<'_, OpenDesignApp>, x: f32, y: f32) -> egui::Pos2 {
+        h.state().session.canvas.screen_pos(Vec2::new(x, y))
+    }
+
+    fn mouse(h: &Harness<'_, OpenDesignApp>, pos: egui::Pos2, pressed: bool, mods: Modifiers) {
+        h.event(egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: mods,
+        });
+    }
+
+    /// Press and release the primary button at `pos`, holding `mods`.
+    fn click_at(h: &mut Harness<'_, OpenDesignApp>, pos: egui::Pos2, mods: Modifiers) {
+        h.hover_at(pos);
+        h.run();
+        h.event(egui::Event::ModifiersChanged(mods));
+        for pressed in [true, false] {
+            mouse(h, pos, pressed, mods);
+            h.run();
+        }
+        h.event(egui::Event::ModifiersChanged(Modifiers::NONE));
+    }
+
+    fn double_click_at(h: &mut Harness<'_, OpenDesignApp>, pos: egui::Pos2) {
+        // The harness delivers one pointer event per quarter-second step,
+        // slower than a double click, so allow a slower one here. Earlier
+        // clicks must first age, or this would count as a triple click.
+        let set_delay = |h: &mut Harness<'_, OpenDesignApp>, secs| {
+            h.ctx
+                .options_mut(|o| o.input_options.max_double_click_delay = secs);
+        };
+        set_delay(h, 1.0);
+        h.run_steps(12);
+        h.hover_at(pos);
+        h.run();
+        for pressed in [true, false, true, false] {
+            mouse(h, pos, pressed, Modifiers::NONE);
+            h.step();
+        }
+        h.run();
+        set_delay(h, 0.3);
+    }
+
+    fn drag(h: &mut Harness<'_, OpenDesignApp>, from: egui::Pos2, to: egui::Pos2) {
+        h.drag_at(from);
+        h.run();
+        for t in [0.25, 0.5, 0.75, 1.0] {
+            h.hover_at(from + (to - from) * t);
+            h.run();
+        }
+        h.drop_at(to);
+        h.run();
+    }
+
+    fn draft(h: &Harness<'_, OpenDesignApp>) -> Vec<Vec2> {
+        h.state().session.canvas.draft_points()
+    }
+
+    fn last_step(h: &Harness<'_, OpenDesignApp>) -> String {
+        h.state().session.history.undo_label().unwrap_or_default()
+    }
+
+    fn assert_near(a: Vec2, b: Vec2) {
+        assert!(a.distance(b) < 0.05, "{a:?} vs {b:?}");
+    }
+
+    #[test]
+    fn pen_tool_drafts_a_curved_outline_closed_on_its_first_point() {
+        let mut h = harness();
+        click(&mut h, "Pen");
+        // Slightly off the grid points: grid snapping puts them back.
+        for (x, y) in [(0.0, 0.0), (200.0, 0.0), (200.0, 150.0)] {
+            let at = screen(&h, x, y) + egui::vec2(4.0, -3.0);
+            click_at(&mut h, at, Modifiers::NONE);
+        }
+        // Shift+click places a curve point.
+        let at = screen(&h, 0.0, 150.0);
+        click_at(&mut h, at, Modifiers::SHIFT);
+        assert_eq!(draft(&h).len(), 4);
+        assert_eq!(pattern_count(&h), 0, "not closed yet");
+
+        let first = screen(&h, 0.0, 0.0) + egui::vec2(3.0, 3.0);
+        click_at(&mut h, first, Modifiers::NONE);
+        let s = &h.state().session;
+        assert_eq!(s.doc.patterns.len(), 1);
+        let outline = &s.doc.patterns[0].outline;
+        let kinds: Vec<_> = outline.iter().map(|p| p.kind).collect();
+        assert_eq!(kinds, [Corner, Corner, Corner, Curve]);
+        assert_eq!(outline[1].pos, Vec2::new(200.0, 0.0));
+        assert!(s.canvas.draft_points().is_empty());
+        // The curve rounds off one corner of the 200 × 150 box.
+        let area = s.doc.patterns[0].area();
+        assert!(area < 30_000.0 && area > 20_000.0, "area {area}");
+        assert_eq!(s.history.done_labels(), ["Add Pattern 1"]);
+        h.get_by_label("Selected: Pattern 1");
+
+        press(&mut h, Modifiers::COMMAND, Key::Z);
+        assert_eq!(pattern_count(&h), 0, "the whole outline is one step");
+    }
+
+    #[test]
+    fn pen_tool_escape_cancels_and_enter_closes() {
+        let mut h = harness();
+        press(&mut h, Modifiers::NONE, Key::P);
+        assert_eq!(h.state().session.tool, Tool::Pen);
+        let triangle = [(0.0, 0.0), (300.0, 0.0), (150.0, 200.0)];
+        for (x, y) in triangle {
+            let at = screen(&h, x, y);
+            click_at(&mut h, at, Modifiers::NONE);
+        }
+        press(&mut h, Modifiers::NONE, Key::Escape);
+        assert!(draft(&h).is_empty());
+        assert_eq!(pattern_count(&h), 0);
+
+        for (x, y) in triangle {
+            let at = screen(&h, x, y);
+            click_at(&mut h, at, Modifiers::NONE);
+        }
+        press(&mut h, Modifiers::NONE, Key::Enter);
+        assert_eq!(pattern_count(&h), 1);
+        assert_eq!(h.state().session.doc.patterns[0].outline.len(), 3);
+    }
+
+    #[test]
+    fn snapping_to_grid_and_points_can_be_switched_off() {
+        let mut h = harness();
+        click(&mut h, "+ Skirt panel");
+        let corner = h.state().session.doc.patterns[0].outline[0].pos;
+        click(&mut h, "Pen");
+
+        // Grid: 50 mm at this zoom.
+        assert_eq!(h.state().session.canvas.grid_step(), 50.0);
+        let at = screen(&h, 50.0, 100.0) + egui::vec2(5.0, -4.0);
+        click_at(&mut h, at, Modifiers::NONE);
+        assert_eq!(draft(&h)[0], Vec2::new(50.0, 100.0));
+
+        // Points win over the grid: land exactly on the skirt's corner.
+        let at = screen(&h, corner.x, corner.y) + egui::vec2(5.0, 5.0);
+        click_at(&mut h, at, Modifiers::NONE);
+        assert_eq!(draft(&h)[1], corner);
+
+        // Both off: the click lands where it is.
+        click(&mut h, "Grid snap");
+        click(&mut h, "Point snap");
+        assert_eq!(
+            h.state().session.canvas.snap,
+            Snap {
+                grid: false,
+                points: false
+            }
+        );
+        let at = screen(&h, 50.0, 300.0) + egui::vec2(5.0, 5.0);
+        click_at(&mut h, at, Modifiers::NONE);
+        let zoom = h.state().session.canvas.zoom();
+        assert_near(
+            draft(&h)[2],
+            Vec2::new(50.0 + 5.0 / zoom, 300.0 + 5.0 / zoom),
+        );
+
+        // The View menu has the same switches.
+        click(&mut h, "View");
+        click(&mut h, "Snap to grid");
+        assert!(h.state().session.canvas.snap.grid);
+        press(&mut h, Modifiers::NONE, Key::Escape);
+
+        // Dragged points snap too.
+        press(&mut h, Modifiers::NONE, Key::Escape);
+        click(&mut h, "Edit points");
+        let p2 = h.state().session.doc.patterns[0].outline[2].pos;
+        let from = screen(&h, p2.x, p2.y);
+        let to = screen(&h, 300.0, 400.0) + egui::vec2(4.0, -3.0);
+        drag(&mut h, from, to);
+        assert_eq!(
+            h.state().session.doc.patterns[0].outline[2].pos,
+            Vec2::new(300.0, 400.0)
+        );
+    }
+
+    #[test]
+    fn dragging_a_point_is_one_undo_step() {
+        let mut h = harness();
+        click(&mut h, "+ Skirt panel");
+        press(&mut h, Modifiers::NONE, Key::E);
+        h.state_mut().session.canvas.snap = Snap {
+            grid: false,
+            points: false,
+        };
+        let before = h.state().session.doc.patterns[0].outline.clone();
+        let from = screen(&h, before[2].pos.x, before[2].pos.y);
+        drag(&mut h, from, from + egui::vec2(60.0, 30.0));
+
+        let s = &h.state().session;
+        let after = &s.doc.patterns[0].outline;
+        let zoom = s.canvas.zoom();
+        assert_near(
+            after[2].pos,
+            before[2].pos + Vec2::new(60.0 / zoom, 30.0 / zoom),
+        );
+        assert_eq!(after[0], before[0], "other points stay put");
+        assert_eq!(s.history.done_labels(), ["Add Skirt panel", "Move point"]);
+        assert_eq!(s.canvas.selected_point, Some((s.doc.patterns[0].id, 2)));
+
+        press(&mut h, Modifiers::COMMAND, Key::Z);
+        assert_eq!(h.state().session.doc.patterns[0].outline, before);
+    }
+
+    #[test]
+    fn edit_points_inserts_curves_and_deletes_points() {
+        let mut h = harness();
+        click(&mut h, "+ Skirt panel");
+        click(&mut h, "Edit points");
+        let original = h.state().session.doc.patterns[0].outline.clone();
+        let id = h.state().session.doc.patterns[0].id;
+        // The top edge runs from point 0 to point 1; its middle is x = 0.
+        let top = original[0].pos.lerp(original[1].pos, 0.5);
+
+        let at = screen(&h, top.x, top.y);
+        double_click_at(&mut h, at);
+        let outline = &h.state().session.doc.patterns[0].outline;
+        assert_eq!(outline.len(), 5);
+        assert_near(outline[1].pos, top);
+        assert_eq!(outline[1].kind, Corner);
+        assert_eq!(last_step(&h), "Insert point");
+        assert_eq!(h.state().session.canvas.selected_point, Some((id, 1)));
+
+        press(&mut h, Modifiers::NONE, Key::C);
+        assert_eq!(h.state().session.doc.patterns[0].outline[1].kind, Curve);
+        // Double-clicking the point switches it back.
+        double_click_at(&mut h, at);
+        assert_eq!(h.state().session.doc.patterns[0].outline[1].kind, Corner);
+        assert_eq!(last_step(&h), "Change point type");
+
+        press(&mut h, Modifiers::NONE, Key::Delete);
+        assert_eq!(
+            pattern_count(&h),
+            1,
+            "Delete removes the point, not the pattern"
+        );
+        assert_eq!(h.state().session.doc.patterns[0].outline.len(), 4);
+        assert_eq!(last_step(&h), "Delete point");
+
+        for _ in 0..4 {
+            press(&mut h, Modifiers::COMMAND, Key::Z);
+        }
+        assert_eq!(h.state().session.doc.patterns[0].outline, original);
+    }
+
+    #[test]
+    fn library_blocks_are_curved_tshirt_pieces() {
+        let mut h = harness();
+        for block in ["+ Front bodice", "+ Back bodice", "+ Sleeve"] {
+            click(&mut h, block);
+        }
+        let doc = &h.state().session.doc;
+        for p in &doc.patterns {
+            assert!(
+                p.outline.iter().any(|q| q.kind == Curve),
+                "{} has curves",
+                p.name
+            );
+            // Concave necklines and armholes still fill exactly.
+            let poly = p.polyline(od_core::document::TOLERANCE);
+            let tris = od_core::geometry::triangulate(&poly);
+            let covered: f32 = tris
+                .iter()
+                .map(|t| od_core::geometry::area(&t.map(|i| poly[i as usize])))
+                .sum();
+            assert!((covered - p.area()).abs() < p.area() * 1e-3, "{}", p.name);
+        }
+        // The front neckline dips lower than the back's.
+        let neck_depth = |p: &od_core::Pattern| {
+            let (min, max) = p.bounds().unwrap();
+            let centre = (min.x + max.x) * 0.5;
+            p.polyline(0.1)
+                .iter()
+                .filter(|v| (v.x - centre).abs() < 2.0 && v.y < min.y + 200.0)
+                .map(|v| v.y - min.y)
+                .fold(0.0_f32, f32::max)
+        };
+        let (front, back) = (&doc.patterns[0], &doc.patterns[1]);
+        assert!(neck_depth(front) > 80.0, "front {}", neck_depth(front));
+        assert!(neck_depth(back) < 30.0, "back {}", neck_depth(back));
+    }
+
+    /// Draft half a T-shirt front by hand, mark it up, mirror it into a
+    /// whole front, then save and reload it.
+    #[test]
+    fn draft_a_tshirt_front_end_to_end() {
+        let path = temp_dir("tshirt").join("tshirt.odproj");
+        let mut h = harness();
+
+        click(&mut h, "Pen");
+        // Left half, centre front on x = 0: (x, y, curve point?).
+        let half = [
+            (0.0, 100.0, false), // centre front neck
+            (-50.0, 100.0, true),
+            (-100.0, 0.0, false),   // neck point
+            (-200.0, 50.0, false),  // shoulder
+            (-200.0, 200.0, true),  // armhole
+            (-250.0, 200.0, false), // underarm
+            (-250.0, 650.0, false),
+            (0.0, 650.0, false),
+        ];
+        for (x, y, curve) in half {
+            let mods = if curve {
+                Modifiers::SHIFT
+            } else {
+                Modifiers::NONE
+            };
+            let at = screen(&h, x, y);
+            click_at(&mut h, at, mods);
+        }
+        let at = screen(&h, 0.0, 100.0);
+        click_at(&mut h, at, Modifiers::NONE);
+        assert_eq!(pattern_count(&h), 1);
+        let id = h.state().session.doc.patterns[0].id;
+
+        // A notch halfway down the side seam.
+        click(&mut h, "Notch");
+        let at = screen(&h, -250.0, 400.0);
+        click_at(&mut h, at, Modifiers::NONE);
+        assert_eq!(h.state().session.doc.patterns[0].notches.len(), 1);
+
+        // An internal line, e.g. a pocket placement.
+        click(&mut h, "Internal line");
+        for (x, y) in [(-150.0, 300.0), (-100.0, 450.0)] {
+            let at = screen(&h, x, y);
+            click_at(&mut h, at, Modifiers::NONE);
+        }
+        press(&mut h, Modifiers::NONE, Key::Enter);
+        assert_eq!(
+            h.state().session.doc.patterns[0].internal_lines[0].points,
+            [Vec2::new(-150.0, 300.0), Vec2::new(-100.0, 450.0)]
+        );
+
+        // Seam allowance and grainline from Properties: one step per drag.
+        let fields: Vec<egui::Pos2> = h
+            .get_all_by_role(Role::SpinButton)
+            .map(|n| n.rect().center())
+            .collect();
+        assert_eq!(fields.len(), 2);
+        drag(&mut h, fields[0], fields[0] + egui::vec2(40.0, 0.0));
+        assert_eq!(last_step(&h), "Set seam allowance");
+        let allowance = h.state().session.doc.patterns[0].seam_allowance;
+        assert!(allowance > 15.0, "allowance {allowance}");
+        drag(&mut h, fields[1], fields[1] + egui::vec2(30.0, 0.0));
+        assert_eq!(last_step(&h), "Set grainline");
+        assert!(h.state().session.doc.patterns[0].grain_angle > 5.0);
+
+        // Unfold along centre front.
+        click(&mut h, "Mirrored copy");
+        let s = &h.state().session;
+        assert_eq!(s.doc.patterns.len(), 2);
+        let (left, right) = (&s.doc.patterns[0], &s.doc.patterns[1]);
+        assert_eq!(right.name, "Pattern 1 (mirrored)");
+        let (min, max) = right.bounds().unwrap();
+        assert_near(Vec2::new(min.x, max.x), Vec2::new(0.0, 250.0));
+        assert!((left.area() - right.area()).abs() < 1.0);
+        assert_eq!(right.notches, left.notches);
+
+        let labels = s.history.done_labels();
+        assert_eq!(
+            labels,
+            [
+                "Add Pattern 1",
+                "Add notch",
+                "Add internal line",
+                "Set seam allowance",
+                "Set grainline",
+                "Duplicate mirrored",
+            ]
+        );
+
+        // Save, reload, and get exactly the same document.
+        h.state_mut().files.path = Some(path.clone());
+        press(&mut h, Modifiers::COMMAND, Key::S);
+        let loaded = od_core::project::load(&path).unwrap();
+        assert_eq!(loaded, h.state().session.doc);
+        assert_eq!(loaded.pattern(id).unwrap().outline[1].kind, Curve);
+    }
+
+    #[test]
+    fn notch_tool_toggles_notches() {
+        let mut h = harness();
+        click(&mut h, "+ Skirt panel");
+        click(&mut h, "Notch");
+        let top = {
+            let o = &h.state().session.doc.patterns[0].outline;
+            o[0].pos.lerp(o[1].pos, 0.5)
+        };
+        let at = screen(&h, top.x, top.y) + egui::vec2(0.0, 3.0);
+        click_at(&mut h, at, Modifiers::NONE);
+        let notches = h.state().session.doc.patterns[0].notches.clone();
+        assert_eq!(notches.len(), 1);
+        // The skirt's outline starts at its top-left corner, 300 mm wide.
+        assert!((notches[0].at - 150.0).abs() < 0.5, "at {}", notches[0].at);
+
+        click_at(&mut h, at, Modifiers::NONE);
+        assert!(h.state().session.doc.patterns[0].notches.is_empty());
+        assert_eq!(last_step(&h), "Remove notch");
+        press(&mut h, Modifiers::COMMAND, Key::Z);
+        assert_eq!(h.state().session.doc.patterns[0].notches, notches);
+    }
+
+    #[test]
+    fn flips_and_duplicate_undo_exactly() {
+        let mut h = harness();
+        click(&mut h, "+ Sleeve");
+        let before = h.state().session.doc.clone();
+        click(&mut h, "Flip left-right");
+        click(&mut h, "Flip up-down");
+        let flipped = &h.state().session.doc.patterns[0];
+        assert_ne!(flipped.outline, before.patterns[0].outline);
+        assert_eq!(flipped.bounds(), before.patterns[0].bounds());
+        press(&mut h, Modifiers::COMMAND, Key::D);
+        assert_eq!(pattern_count(&h), 2);
+        h.get_by_label("Selected: Sleeve (copy)");
+        for _ in 0..3 {
+            press(&mut h, Modifiers::COMMAND, Key::Z);
+        }
+        assert_eq!(h.state().session.doc.patterns, before.patterns);
     }
 }

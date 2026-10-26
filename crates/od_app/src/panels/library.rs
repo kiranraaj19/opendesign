@@ -1,39 +1,76 @@
 //! Library: starter pattern blocks now; avatars and fabrics later.
 
-use od_core::{geometry, Vec2};
+use od_core::{geometry, OutlinePoint, PointKind, Vec2};
 
 use crate::app::Session;
 
-/// Convex starter blocks in millimetres, origin at the top-left.
-const BLOCKS: [(&str, &[(f32, f32)]); 4] = [
+use PointKind::{Corner as C, Curve as Q};
+
+/// A named outline: `(x, y, kind)` points in millimetres.
+type Block = (&'static str, &'static [(f32, f32, PointKind)]);
+
+/// Starter blocks, origin at the top-left. `Q` points are curve control
+/// points: the outline bends towards them.
+const BLOCKS: [Block; 4] = [
     (
+        // T-shirt front, both halves: scooped neckline, curved armholes.
         "Front bodice",
         &[
-            (0.0, 40.0),
-            (150.0, 0.0),
-            (350.0, 0.0),
-            (500.0, 40.0),
-            (480.0, 620.0),
-            (20.0, 620.0),
+            (40.0, 50.0, C),   // left shoulder
+            (180.0, 0.0, C),   // left neck point
+            (185.0, 95.0, Q),  // front neckline...
+            (335.0, 95.0, Q),  // ...through centre front at (260, 95)
+            (340.0, 0.0, C),   // right neck point
+            (480.0, 50.0, C),  // right shoulder
+            (468.0, 215.0, Q), // right armhole
+            (520.0, 230.0, C), // right underarm
+            (520.0, 700.0, C), // right hem
+            (0.0, 700.0, C),   // left hem
+            (0.0, 230.0, C),   // left underarm
+            (52.0, 215.0, Q),  // left armhole
         ],
     ),
     (
+        // T-shirt back: the same with a shallow back neck.
         "Back bodice",
-        &[(0.0, 20.0), (500.0, 20.0), (480.0, 620.0), (20.0, 620.0)],
+        &[
+            (40.0, 50.0, C),
+            (180.0, 0.0, C),
+            (185.0, 25.0, Q),
+            (335.0, 25.0, Q),
+            (340.0, 0.0, C),
+            (480.0, 50.0, C),
+            (468.0, 215.0, Q),
+            (520.0, 230.0, C),
+            (520.0, 700.0, C),
+            (0.0, 700.0, C),
+            (0.0, 230.0, C),
+            (52.0, 215.0, Q),
+        ],
     ),
     (
+        // Short sleeve: an S-shaped cap, hollow at the underarms and
+        // rounded over the shoulder, tapering to the hem.
         "Sleeve",
         &[
-            (60.0, 550.0),
-            (0.0, 180.0),
-            (250.0, 0.0),
-            (500.0, 180.0),
-            (440.0, 550.0),
+            (0.0, 130.0, C),
+            (80.0, 125.0, Q),
+            (120.0, 0.0, Q),
+            (320.0, 0.0, Q),
+            (360.0, 125.0, Q),
+            (440.0, 130.0, C),
+            (410.0, 330.0, C),
+            (30.0, 330.0, C),
         ],
     ),
     (
         "Skirt panel",
-        &[(100.0, 0.0), (400.0, 0.0), (500.0, 650.0), (0.0, 650.0)],
+        &[
+            (100.0, 0.0, C),
+            (400.0, 0.0, C),
+            (500.0, 650.0, C),
+            (0.0, 650.0, C),
+        ],
     ),
 ];
 
@@ -51,11 +88,18 @@ pub fn ui(ui: &mut egui::Ui, s: &mut Session) {
                     // don't stack exactly on top of each other.
                     let step = (s.doc.patterns.len() % 8) as f32 * 40.0;
                     let center = s.canvas.view_center() + Vec2::new(step, step);
-                    let outline: Vec<Vec2> = points.iter().map(|&(x, y)| Vec2::new(x, y)).collect();
-                    let (min, max) = geometry::bounds(&outline).unwrap_or_default();
+                    let positions: Vec<Vec2> =
+                        points.iter().map(|&(x, y, _)| Vec2::new(x, y)).collect();
+                    let (min, max) = geometry::bounds(&positions).unwrap_or_default();
                     let shift = center - (min + max) * 0.5;
-                    let outline = outline.into_iter().map(|p| p + shift).collect();
-                    s.add_pattern(name, outline);
+                    let outline = points
+                        .iter()
+                        .map(|&(x, y, kind)| OutlinePoint {
+                            pos: Vec2::new(x, y) + shift,
+                            kind,
+                        })
+                        .collect();
+                    s.add_outline(name, outline);
                 }
             }
         });

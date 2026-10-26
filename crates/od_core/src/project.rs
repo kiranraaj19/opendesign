@@ -1,8 +1,11 @@
 //! Project files (`.odproj`): a versioned JSON wrapper around a [`Document`].
 //!
 //! ```json
-//! { "format": "opendesign-project", "version": 1, "document": { ... } }
+//! { "format": "opendesign-project", "version": 2, "document": { ... } }
 //! ```
+//!
+//! Older versions are upgraded on load by the `migrate_*` steps below, so a
+//! file is always saved in the current version.
 
 use std::fmt;
 use std::fs;
@@ -16,7 +19,11 @@ use crate::document::{Document, PatternId};
 pub const EXTENSION: &str = "odproj";
 pub const FORMAT: &str = "opendesign-project";
 /// Bump when the document layout changes incompatibly, and add a migration.
-pub const VERSION: u32 = 1;
+///
+/// - 1: outlines are plain point lists.
+/// - 2: outline points carry a kind (corner or curve); patterns gain seam
+///   allowance, grainline, notches and internal lines.
+pub const VERSION: u32 = 2;
 
 #[derive(Debug)]
 pub enum ProjectError {
@@ -69,9 +76,24 @@ struct Header {
     version: u32,
 }
 
-#[derive(Deserialize)]
-struct FileIn {
-    document: Document,
+/// Upgrade a version 1 document to version 2 in place.
+fn migrate_v1(doc: &mut serde_json::Value) {
+    use serde_json::{json, Value};
+    let Some(patterns) = doc.get_mut("patterns").and_then(Value::as_array_mut) else {
+        return; // leave it for deserialisation to report
+    };
+    for pattern in patterns.iter_mut().filter_map(Value::as_object_mut) {
+        if let Some(outline) = pattern.get_mut("outline").and_then(Value::as_array_mut) {
+            for point in outline.iter_mut().filter_map(Value::as_object_mut) {
+                point.insert("kind".into(), json!("corner"));
+            }
+        }
+        // Old patterns had no allowance; keep them looking as they did.
+        pattern.insert("seam_allowance".into(), json!(0.0));
+        pattern.insert("grain_angle".into(), json!(0.0));
+        pattern.insert("notches".into(), json!([]));
+        pattern.insert("internal_lines".into(), json!([]));
+    }
 }
 
 pub fn to_json(doc: &Document) -> String {
@@ -98,9 +120,16 @@ pub fn from_json(text: &str) -> Result<Document, ProjectError> {
     if header.version > VERSION {
         return Err(ProjectError::UnsupportedVersion(header.version));
     }
-    let mut doc = serde_json::from_str::<FileIn>(text)
-        .map_err(ProjectError::Malformed)?
-        .document;
+    let mut file: serde_json::Value =
+        serde_json::from_str(text).map_err(ProjectError::Malformed)?;
+    let mut body = file
+        .get_mut("document")
+        .map(serde_json::Value::take)
+        .unwrap_or_default();
+    if header.version < 2 {
+        migrate_v1(&mut body);
+    }
+    let mut doc: Document = serde_json::from_value(body).map_err(ProjectError::Malformed)?;
     doc.validate().map_err(ProjectError::DuplicateId)?;
     Ok(doc)
 }
@@ -177,13 +206,90 @@ mod tests {
             Err(ProjectError::NotAProject)
         ));
         assert!(matches!(
-            from_json(&good.replace("\"version\": 1", "\"version\": 99")),
+            from_json(&good.replace("\"version\": 2", "\"version\": 99")),
             Err(ProjectError::UnsupportedVersion(99))
         ));
         let dup = good.replace("\"id\": 2", "\"id\": 1");
         assert!(matches!(
             from_json(&dup),
             Err(ProjectError::DuplicateId(PatternId(1)))
+        ));
+    }
+
+    #[test]
+    fn curves_and_markings_round_trip() {
+        use crate::command::{AddInternalLine, AddNotch, SetPointKind};
+        use crate::document::PointKind;
+        let mut doc = sample();
+        let id = doc.patterns[0].id;
+        SetPointKind::new(id, 1, PointKind::Curve).apply(&mut doc);
+        AddNotch::new(id, 250.0).apply(&mut doc);
+        AddInternalLine::new(id, vec![Vec2::new(1.0, 2.0), Vec2::new(3.0, 4.0)]).apply(&mut doc);
+        doc.patterns[0].grain_angle = 45.0;
+        doc.patterns[0].seam_allowance = 7.5;
+
+        let text = to_json(&doc);
+        assert!(text.contains("\"version\": 2"));
+        assert!(text.contains("\"kind\": \"curve\""));
+        assert_eq!(from_json(&text).unwrap(), doc);
+    }
+
+    /// A file exactly as Phase 2 (format version 1) wrote it.
+    const V1_FILE: &str = r#"{
+  "format": "opendesign-project",
+  "version": 1,
+  "document": {
+    "name": "Old shirt",
+    "patterns": [
+      {
+        "id": 4,
+        "name": "Front",
+        "outline": [
+          { "x": 0.0, "y": 0.0 },
+          { "x": 500.0, "y": 0.0 },
+          { "x": 500.0, "y": 600.0 },
+          { "x": 0.0, "y": 600.0 }
+        ]
+      }
+    ],
+    "next_id": 5
+  }
+}"#;
+
+    #[test]
+    fn version_1_files_load_as_corner_outlines() {
+        use crate::document::{OutlinePoint, Pattern};
+        let mut doc = from_json(V1_FILE).unwrap();
+        assert_eq!(doc.name, "Old shirt");
+        let expected = Pattern {
+            seam_allowance: 0.0,
+            ..Pattern::new(
+                PatternId(4),
+                "Front",
+                rectangle(Vec2::ZERO, Vec2::new(500.0, 600.0))
+                    .into_iter()
+                    .map(OutlinePoint::corner)
+                    .collect(),
+            )
+        };
+        assert_eq!(doc.patterns, [expected]);
+        assert_eq!(doc.patterns[0].area(), 300_000.0);
+        assert_eq!(doc.allocate_id(), PatternId(5));
+
+        // Saving writes the current version, which loads back the same.
+        let resaved = to_json(&doc);
+        assert!(resaved.contains("\"version\": 2"));
+        assert_eq!(from_json(&resaved).unwrap(), doc);
+    }
+
+    #[test]
+    fn version_1_problems_are_still_reported() {
+        let extra = V1_FILE.replace("\"next_id\": 5", "\"next_id\": 5, \"extra\": 1");
+        assert!(from_json(&extra).is_ok(), "unknown fields are ignored");
+        let broken = V1_FILE.replace("\"x\": 500.0", "\"x\": \"wide\"");
+        assert!(matches!(
+            from_json(&broken),
+            Err(ProjectError::Malformed(_))
         ));
     }
 
