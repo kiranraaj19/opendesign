@@ -41,7 +41,18 @@ without this step.
 | Undo / redo | `Ctrl+Z` / `Ctrl+Y` (or `Ctrl+Shift+Z`) |
 | Pan / zoom 2D | Right-drag / scroll |
 | Orbit / zoom 3D | Drag / scroll |
+| Rearrange panels | Drag a tab to another panel edge |
 | Reset panels, theme | View menu |
+
+Panel layout and theme are remembered between sessions (eframe stores them in
+`%APPDATA%\OpenDesign\data\app.ron` on Windows). View → Reset layout restores
+the default arrangement.
+
+### Smart App Control
+
+If Windows Smart App Control is on, it can block freshly built, unsigned
+`opendesign.exe` files ("An Application Control policy has blocked this file").
+Code-signing the binary is the long-term fix for releases.
 
 ## Layout
 
@@ -51,7 +62,7 @@ crates/
   od_app/    egui + egui_dock desktop app.
     src/app.rs           Shell: menus, toolbar, status bar, dock layout, UI tests
     src/panels/          One module per dockable tab
-    src/theme.rs         Canvas colour tokens (light/dark)
+    src/theme.rs         Design tokens (light/dark) for widgets and canvases
 ```
 
 Every edit is a `Command` (`apply` + `undo`) run through `History`, so a new
@@ -68,7 +79,8 @@ without opening a window.
 
 ## Roadmap
 
-1. App shell ✅
+1. App shell ✅ docked panels, menus, toolbar, status bar, token-based
+   light/dark theme, layout and theme remembered between sessions
 2. Core architecture: commands and undo ✅, save/load next
 3. 2D pattern editor: points, curves, notches, seam allowance
 4. 3D viewport on wgpu, avatar loading

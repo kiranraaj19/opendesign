@@ -92,7 +92,7 @@ pub fn ui(ui: &mut egui::Ui, s: &mut Session) {
 
     // Background and grid.
     painter.rect_filled(rect, 0.0, pal.canvas_bg);
-    draw_grid(&painter, rect, &s.canvas, &pal);
+    draw_grid(&painter, rect, &s.canvas, pal);
 
     // Patterns, with the in-progress move shown as an offset preview.
     for pattern in &s.doc.patterns {

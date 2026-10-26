@@ -7,8 +7,9 @@ use od_core::{AddPattern, Command, DeletePattern, Document, History, PatternId, 
 use crate::panels::{
     self, pattern2d::Canvas2D, properties::PropertiesState, viewport3d::Viewport3D,
 };
+use crate::theme;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum Tab {
     Viewport3D,
     Pattern2D,
@@ -16,6 +17,19 @@ pub enum Tab {
     Properties,
     History,
 }
+
+impl Tab {
+    pub const ALL: [Tab; 5] = [
+        Tab::Viewport3D,
+        Tab::Pattern2D,
+        Tab::Library,
+        Tab::Properties,
+        Tab::History,
+    ];
+}
+
+/// Storage key for the dock layout. Bump the suffix if `Tab` changes shape.
+const LAYOUT_KEY: &str = "dock_layout_v1";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Tool {
@@ -83,9 +97,10 @@ pub struct OpenDesignApp {
 }
 
 impl OpenDesignApp {
-    pub fn new(_cc: &eframe::CreationContext<'_>) -> Self {
+    pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
+        theme::install(&cc.egui_ctx);
         Self {
-            dock: default_layout(),
+            dock: restore_layout(cc.storage),
             session: Session {
                 doc: Document::default(),
                 history: History::new(),
@@ -280,6 +295,11 @@ impl eframe::App for OpenDesignApp {
                 ui.label(format!("Version {}", env!("CARGO_PKG_VERSION")));
             });
     }
+
+    // eframe also saves egui's memory, which holds the theme preference.
+    fn save(&mut self, storage: &mut dyn eframe::Storage) {
+        eframe::set_value(storage, LAYOUT_KEY, &self.dock);
+    }
 }
 
 impl TabViewer for Session {
@@ -328,6 +348,15 @@ fn default_layout() -> DockState<Tab> {
     dock
 }
 
+/// The layout saved last session, or the default if there is none or it is
+/// missing a tab (e.g. saved by an older version).
+fn restore_layout(storage: Option<&dyn eframe::Storage>) -> DockState<Tab> {
+    storage
+        .and_then(|s| eframe::get_value::<DockState<Tab>>(s, LAYOUT_KEY))
+        .filter(|dock| Tab::ALL.iter().all(|tab| dock.find_tab(tab).is_some()))
+        .unwrap_or_else(default_layout)
+}
+
 /// Drive the real app headlessly: clicks and keys go through egui exactly as
 /// they would from a mouse and keyboard, no window or GPU needed.
 #[cfg(test)]
@@ -345,6 +374,93 @@ mod tests {
 
     fn pattern_count(h: &Harness<'_, OpenDesignApp>) -> usize {
         h.state().session.doc.patterns.len()
+    }
+
+    /// In-memory stand-in for eframe's on-disk storage.
+    #[derive(Default)]
+    struct MemStorage(std::collections::HashMap<String, String>);
+
+    impl eframe::Storage for MemStorage {
+        fn get_string(&self, key: &str) -> Option<String> {
+            self.0.get(key).cloned()
+        }
+        fn set_string(&mut self, key: &str, value: String) {
+            self.0.insert(key.to_owned(), value);
+        }
+        fn remove_string(&mut self, key: &str) {
+            self.0.remove(key);
+        }
+        fn flush(&mut self) {}
+    }
+
+    /// Where every tab sits, for comparing layouts.
+    fn positions(dock: &DockState<Tab>) -> Vec<Option<egui_dock::TabPath>> {
+        Tab::ALL.iter().map(|tab| dock.find_tab(tab)).collect()
+    }
+
+    /// All tabs stacked in one node: clearly different from the default.
+    fn stacked_layout() -> DockState<Tab> {
+        DockState::new(Tab::ALL.to_vec())
+    }
+
+    #[test]
+    fn saved_layout_is_restored_next_launch() {
+        let mut h = harness();
+        h.state_mut().dock = stacked_layout();
+        let mut storage = MemStorage::default();
+        eframe::App::save(h.state_mut(), &mut storage);
+
+        let restored = restore_layout(Some(&storage));
+        assert_eq!(positions(&restored), positions(&stacked_layout()));
+    }
+
+    #[test]
+    fn unusable_saved_layout_falls_back_to_default() {
+        let default = positions(&default_layout());
+        assert_eq!(positions(&restore_layout(None)), default);
+
+        let mut storage = MemStorage::default();
+        eframe::Storage::set_string(&mut storage, LAYOUT_KEY, "not a layout".into());
+        assert_eq!(positions(&restore_layout(Some(&storage))), default);
+
+        // A layout from an older version without the History tab.
+        let old = DockState::new(vec![Tab::Viewport3D, Tab::Pattern2D, Tab::Library]);
+        eframe::set_value(&mut storage, LAYOUT_KEY, &old);
+        assert_eq!(positions(&restore_layout(Some(&storage))), default);
+    }
+
+    #[test]
+    fn view_menu_resets_layout() {
+        let mut h = harness();
+        h.state_mut().dock = stacked_layout();
+        h.run();
+        h.get_by_label("View").click();
+        h.run();
+        h.get_by_label("Reset layout").click();
+        h.run();
+        assert_eq!(positions(&h.state().dock), positions(&default_layout()));
+    }
+
+    #[test]
+    fn theme_switch_uses_tokens() {
+        let mut h = harness();
+        h.get_by_label("View").click();
+        h.run();
+        h.get_by_label("☀ Light").click();
+        h.run();
+        assert_eq!(
+            h.ctx.global_style().visuals.panel_fill,
+            theme::LIGHT.panel_bg
+        );
+
+        h.get_by_label("View").click();
+        h.run();
+        h.get_by_label("🌙 Dark").click();
+        h.run();
+        assert_eq!(
+            h.ctx.global_style().visuals.panel_fill,
+            theme::DARK.panel_bg
+        );
     }
 
     #[test]
