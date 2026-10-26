@@ -1,0 +1,19 @@
+[package]
+name = "od_app"
+description = "OpenDesign desktop application"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "opendesign"
+path = "src/main.rs"
+
+[dependencies]
+eframe = "0.36"
+egui = "0.36"
+egui_dock = "0.21.1"
+od_core = { path = "../od_core" }
+
+[dev-dependencies]
+egui_kittest = { version = "0.36", features = ["eframe"] }
