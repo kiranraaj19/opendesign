@@ -3,8 +3,9 @@
 Open-source 3D garment design: draw flat patterns in 2D, sew them, and drape
 them on an avatar in 3D.
 
-This is the starter app shell (Phases 1–2 of the roadmap): docked panels,
-a 2D pattern canvas, a placeholder 3D view, and undo/redo for every change.
+Phases 1–4 of the roadmap are in: docked panels, project files, 2D pattern
+drafting with curves, a GPU-rendered 3D view with sized avatars, and undo/redo
+for every change. Sewing and cloth simulation come next.
 
 ![OpenDesign app shell](docs/screenshot.jpg)
 
@@ -50,7 +51,11 @@ without this step.
 | Delete | `Del` (the selected point when editing points), or the button in Properties |
 | Undo / redo | `Ctrl+Z` / `Ctrl+Y` (or `Ctrl+Shift+Z`) |
 | Pan / zoom 2D | Right-drag / scroll |
-| Orbit / zoom 3D | Drag / scroll |
+| Orbit / pan / zoom 3D | Drag / right- or middle-drag / scroll; double-click or Frame to fit everything |
+| 3D camera presets | Front, Back, Left, Right, Top buttons above the 3D view |
+| Select a pattern in 3D | Click it (the avatar blocks patterns behind it) |
+| Change avatar | Library -> Avatars: Female, Male, Kid, or Load avatar file (OBJ/glTF, Y up) |
+| Avatar size | Avatar size button in the 3D view: height, chest, waist, hip |
 | Rearrange panels | Drag a tab to another panel edge |
 | Reset panels, theme | View menu |
 
@@ -110,7 +115,9 @@ without opening a window.
 3. 2D pattern drafting ✅ pen and edit-points tools, curve points, snapping
    with live length/angle, seam allowance, notches, internal lines,
    grainline, flip/mirror/duplicate, T-shirt blocks, project format v2
-4. 3D viewport on wgpu, avatar loading
+4. 3D viewport ✅ wgpu renderer (lit, depth-tested, floor grid, contact
+   shadow), orbit camera with presets, procedural sized avatars, OBJ/glTF
+   avatar loading, patterns placed around the avatar, click-to-select in 3D
 5. Sewing
 6. Cloth simulation
 7. Fabrics and materials
