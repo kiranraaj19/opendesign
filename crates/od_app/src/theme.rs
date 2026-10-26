@@ -23,6 +23,7 @@ pub struct Palette {
     pub selected: Color32,
     pub preview: Color32,
     pub avatar: Color32,
+    pub warning: Color32,
 }
 
 pub const DARK: Palette = Palette {
@@ -43,6 +44,7 @@ pub const DARK: Palette = Palette {
     selected: Color32::from_rgb(0xFF, 0xB0, 0x3B),
     preview: Color32::from_rgb(0x6E, 0xE7, 0xB7),
     avatar: Color32::from_rgb(0x9C, 0x8F, 0x84),
+    warning: Color32::from_rgb(0xF4, 0x56, 0x56),
 };
 
 pub const LIGHT: Palette = Palette {
@@ -63,6 +65,7 @@ pub const LIGHT: Palette = Palette {
     selected: Color32::from_rgb(0xD9, 0x77, 0x06),
     preview: Color32::from_rgb(0x05, 0x96, 0x69),
     avatar: Color32::from_rgb(0x8A, 0x7A, 0x6C),
+    warning: Color32::from_rgb(0xDC, 0x26, 0x26),
 };
 
 pub fn palette(dark: bool) -> &'static Palette {

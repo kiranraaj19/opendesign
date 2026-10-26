@@ -93,6 +93,40 @@ pub struct SewingLine {
     pub b: SeamEdge,
 }
 
+/// How much two sewn edges may differ in length, as a fraction of the
+/// shorter one, before it is flagged as a construction problem (easing and
+/// gathers aside, a seam this far off will pucker or strain badly once the
+/// garment is draped).
+pub const LENGTH_MISMATCH_TOLERANCE: f32 = 0.03;
+
+impl SewingLine {
+    /// The lengths in mm of edges `a` and `b`. `None` if either referenced
+    /// pattern no longer exists.
+    fn edge_lengths(&self, doc: &Document) -> Option<(f32, f32)> {
+        let len = |e: &SeamEdge| {
+            doc.pattern(e.pattern)
+                .map(|p| p.segment_length(e.start, e.end, TOLERANCE))
+        };
+        Some((len(&self.a)?, len(&self.b)?))
+    }
+
+    /// Difference in length between the two sewn edges, in mm. Positive
+    /// means `a` is longer than `b`. `None` if either referenced pattern no
+    /// longer exists.
+    pub fn length_mismatch(&self, doc: &Document) -> Option<f32> {
+        self.edge_lengths(doc).map(|(a, b)| a - b)
+    }
+
+    /// Whether the two edges differ in length by more than
+    /// [`LENGTH_MISMATCH_TOLERANCE`] of the shorter one.
+    pub fn is_length_mismatched(&self, doc: &Document) -> bool {
+        self.edge_lengths(doc).is_some_and(|(a, b)| {
+            let shorter = a.min(b);
+            shorter > 0.0 && (a - b).abs() / shorter > LENGTH_MISMATCH_TOLERANCE
+        })
+    }
+}
+
 /// Mirror axis through a pattern.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Axis {
@@ -666,5 +700,83 @@ mod tests {
         assert_eq!(p.segment_length(2, 3, TOLERANCE), 50.0);
         let curved = p.segment_length(0, 2, TOLERANCE);
         assert!(curved > 100.0, "{curved} should be longer than the chord");
+    }
+
+    fn doc_with_two_rects(sizes: [(f32, f32); 2]) -> Document {
+        let mut doc = Document::new("Test");
+        for (i, (w, h)) in sizes.into_iter().enumerate() {
+            doc.patterns.push(Pattern::new(
+                PatternId(i as u64 + 1),
+                format!("Panel {i}"),
+                geometry::rectangle(Vec2::ZERO, Vec2::new(w, h))
+                    .into_iter()
+                    .map(OutlinePoint::corner)
+                    .collect(),
+            ));
+        }
+        doc
+    }
+
+    #[test]
+    fn matching_edges_are_not_mismatched() {
+        let doc = doc_with_two_rects([(100.0, 50.0), (100.0, 80.0)]);
+        // The 100 mm sides of each rectangle (edge 0: index 0 to 1).
+        let seam = SewingLine {
+            id: SewingLineId(1),
+            a: SeamEdge {
+                pattern: PatternId(1),
+                start: 0,
+                end: 1,
+            },
+            b: SeamEdge {
+                pattern: PatternId(2),
+                start: 0,
+                end: 1,
+            },
+        };
+        assert_eq!(seam.length_mismatch(&doc), Some(0.0));
+        assert!(!seam.is_length_mismatched(&doc));
+    }
+
+    #[test]
+    fn differing_edges_are_flagged_as_mismatched() {
+        let doc = doc_with_two_rects([(100.0, 50.0), (80.0, 50.0)]);
+        // The 50 mm sides of the first rectangle (edge 1: index 1 to 2)
+        // against the 80 mm side of the second (edge 0: index 0 to 1).
+        let seam = SewingLine {
+            id: SewingLineId(1),
+            a: SeamEdge {
+                pattern: PatternId(1),
+                start: 1,
+                end: 2,
+            },
+            b: SeamEdge {
+                pattern: PatternId(2),
+                start: 0,
+                end: 1,
+            },
+        };
+        assert_eq!(seam.length_mismatch(&doc), Some(-30.0));
+        assert!(seam.is_length_mismatched(&doc));
+    }
+
+    #[test]
+    fn mismatch_is_none_for_a_missing_pattern() {
+        let doc = doc_with_two_rects([(100.0, 50.0), (100.0, 50.0)]);
+        let seam = SewingLine {
+            id: SewingLineId(1),
+            a: SeamEdge {
+                pattern: PatternId(1),
+                start: 0,
+                end: 1,
+            },
+            b: SeamEdge {
+                pattern: PatternId(99),
+                start: 0,
+                end: 1,
+            },
+        };
+        assert_eq!(seam.length_mismatch(&doc), None);
+        assert!(!seam.is_length_mismatched(&doc));
     }
 }

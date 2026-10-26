@@ -790,26 +790,47 @@ fn draw_pattern(
 }
 
 /// Highlight sewn edges along their outlines, and the edge waiting for its
-/// match while using the sew tool.
+/// match while using the sew tool. A seam whose two edges differ in length
+/// by more than [`od_core::document::LENGTH_MISMATCH_TOLERANCE`] is drawn in
+/// a warning colour, with the difference labelled.
 fn draw_sewing_lines(painter: &egui::Painter, rect: Rect, s: &Session, pal: &theme::Palette) {
     let to_screen = |p: Vec2| s.canvas.to_screen(rect, p);
-    let draw_edge = |edge: &SeamEdge, stroke: Stroke| {
-        let Some(pattern) = s.doc.pattern(edge.pattern) else {
-            return;
-        };
-        let points: Vec<Pos2> = pattern
-            .segment_points(edge.start, edge.end, TOLERANCE)
+    let edge_points = |edge: &SeamEdge| -> Vec<Pos2> {
+        s.doc
+            .pattern(edge.pattern)
+            .map(|pattern| pattern.segment_points(edge.start, edge.end, TOLERANCE))
+            .unwrap_or_default()
             .into_iter()
             .map(to_screen)
-            .collect();
+            .collect()
+    };
+    let draw_edge = |edge: &SeamEdge, stroke: Stroke| {
+        let points = edge_points(edge);
         if points.len() >= 2 {
             painter.add(Shape::line(points, stroke));
         }
     };
-    let seam_stroke = Stroke::new(3.0, pal.accent);
     for line in &s.doc.sewing_lines {
-        draw_edge(&line.a, seam_stroke);
-        draw_edge(&line.b, seam_stroke);
+        let mismatch = line.length_mismatch(&s.doc);
+        if line.is_length_mismatched(&s.doc) {
+            let stroke = Stroke::new(3.0, pal.warning);
+            draw_edge(&line.a, stroke);
+            draw_edge(&line.b, stroke);
+            let a_points = edge_points(&line.a);
+            if let (Some(mismatch), Some(&mid)) = (mismatch, a_points.get(a_points.len() / 2)) {
+                painter.text(
+                    mid + Px::new(8.0, -8.0),
+                    Align2::LEFT_BOTTOM,
+                    format!("seam mismatch: {:+.0} mm", mismatch),
+                    FontId::proportional(12.0),
+                    pal.warning,
+                );
+            }
+        } else {
+            let stroke = Stroke::new(3.0, pal.accent);
+            draw_edge(&line.a, stroke);
+            draw_edge(&line.b, stroke);
+        }
     }
     if let Some(pending) = &s.canvas.sew_pending {
         draw_edge(pending, Stroke::new(3.0, pal.selected));
