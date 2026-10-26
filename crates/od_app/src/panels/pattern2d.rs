@@ -7,8 +7,9 @@ use egui::{
 };
 use od_core::document::TOLERANCE;
 use od_core::{
-    geometry, AddInternalLine, AddNotch, Document, InsertPoint, MovePattern, MovePoint,
-    OutlinePoint, Pattern, PatternId, PatternValue, PointKind, RemoveNotch, SetPointKind, Vec2,
+    geometry, AddInternalLine, AddNotch, AddSewingLine, Document, InsertPoint, MovePattern,
+    MovePoint, OutlinePoint, Pattern, PatternId, PatternValue, PointKind, RemoveNotch,
+    RemoveSewingLine, SeamEdge, SetPointKind, Vec2,
 };
 
 use crate::app::{Session, Tool};
@@ -60,6 +61,8 @@ pub struct Canvas2D {
     cursor: Option<(Vec2, Option<Snapped>)>,
     /// Outline point selected with the edit-points tool.
     pub selected_point: Option<(PatternId, usize)>,
+    /// First edge picked with the sew tool, waiting for a second to match.
+    sew_pending: Option<SeamEdge>,
 }
 
 enum Drag {
@@ -93,6 +96,7 @@ impl Default for Canvas2D {
             draft_owner: None,
             cursor: None,
             selected_point: None,
+            sew_pending: None,
         }
     }
 }
@@ -298,6 +302,7 @@ pub fn ui(ui: &mut egui::Ui, s: &mut Session) {
         Tool::Pen | Tool::InternalLine => handle_draft(ui, &response, rect, s, typing),
         Tool::EditPoints => handle_edit_points(&response, rect, s),
         Tool::Notch => handle_notch(&response, rect, s),
+        Tool::Sew => handle_sew(&response, rect, s),
     }
 
     // Background and grid.
@@ -307,6 +312,7 @@ pub fn ui(ui: &mut egui::Ui, s: &mut Session) {
     for pattern in &s.doc.patterns {
         draw_pattern(&painter, rect, s, pattern, pal);
     }
+    draw_sewing_lines(&painter, rect, s, pal);
     draw_overlays(&painter, rect, s, pal);
 
     let hint = match s.tool {
@@ -322,6 +328,10 @@ pub fn ui(ui: &mut egui::Ui, s: &mut Session) {
             "Click inside a pattern to draw a line · Enter or double-click finishes · Esc cancels"
         }
         Tool::Notch => "Click an outline to add a notch · click a notch to remove it",
+        Tool::Sew => match s.canvas.sew_pending {
+            Some(_) => "Click the matching edge on another pattern (or the same one) to sew · Esc cancels",
+            None => "Click an edge to start a seam · click a sewn edge to unsew it",
+        },
     };
     painter.text(
         rect.left_top() + Px::new(10.0, 8.0),
@@ -609,6 +619,54 @@ fn handle_notch(response: &egui::Response, rect: Rect, s: &mut Session) {
     }
 }
 
+/// Click an outline edge to pick it for sewing; click a second edge to sew
+/// it to the first; click an already-sewn edge to unsew it.
+fn handle_sew(response: &egui::Response, rect: Rect, s: &mut Session) {
+    if response.ctx.input(|i| i.key_pressed(Key::Escape)) {
+        s.canvas.sew_pending = None;
+    }
+    if !response.clicked() {
+        return;
+    }
+    let Some(p) = response
+        .interact_pointer_pos()
+        .map(|p| s.canvas.to_doc(rect, p))
+    else {
+        return;
+    };
+    let Some(hit) = s.canvas.edge_at(&s.doc, s.selection, p) else {
+        return;
+    };
+    let Some(pattern) = s.doc.pattern(hit.id) else {
+        return;
+    };
+    s.selection = Some(hit.id);
+    let (start, end) = pattern.segment_at(hit.param);
+    let edge = SeamEdge {
+        pattern: hit.id,
+        start,
+        end,
+    };
+
+    // Clicking an edge that is already sewn unsews it.
+    let sewn = s
+        .doc
+        .sewing_lines
+        .iter()
+        .find(|sl| sl.a == edge || sl.b == edge);
+    if let Some(sewn) = sewn {
+        s.canvas.sew_pending = None;
+        s.execute(RemoveSewingLine::new(sewn.id));
+        return;
+    }
+
+    match s.canvas.sew_pending.take() {
+        Some(first) if first == edge => {} // clicked the same edge again: cancel
+        Some(first) => s.execute(AddSewingLine::new(first, edge)),
+        None => s.canvas.sew_pending = Some(edge),
+    }
+}
+
 /// The pattern as it should look this frame, with any drag in progress.
 fn previewed<'a>(s: &Session, pattern: &'a Pattern) -> std::borrow::Cow<'a, Pattern> {
     match &s.canvas.drag {
@@ -728,6 +786,33 @@ fn draw_pattern(
     // editing points.
     if selected || s.tool == Tool::EditPoints {
         draw_handles(painter, rect, s, &pattern, pal);
+    }
+}
+
+/// Highlight sewn edges along their outlines, and the edge waiting for its
+/// match while using the sew tool.
+fn draw_sewing_lines(painter: &egui::Painter, rect: Rect, s: &Session, pal: &theme::Palette) {
+    let to_screen = |p: Vec2| s.canvas.to_screen(rect, p);
+    let draw_edge = |edge: &SeamEdge, stroke: Stroke| {
+        let Some(pattern) = s.doc.pattern(edge.pattern) else {
+            return;
+        };
+        let points: Vec<Pos2> = pattern
+            .segment_points(edge.start, edge.end, TOLERANCE)
+            .into_iter()
+            .map(to_screen)
+            .collect();
+        if points.len() >= 2 {
+            painter.add(Shape::line(points, stroke));
+        }
+    };
+    let seam_stroke = Stroke::new(3.0, pal.accent);
+    for line in &s.doc.sewing_lines {
+        draw_edge(&line.a, seam_stroke);
+        draw_edge(&line.b, seam_stroke);
+    }
+    if let Some(pending) = &s.canvas.sew_pending {
+        draw_edge(pending, Stroke::new(3.0, pal.selected));
     }
 }
 

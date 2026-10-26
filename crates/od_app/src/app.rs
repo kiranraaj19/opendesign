@@ -43,11 +43,12 @@ pub enum Tool {
     EditPoints,
     InternalLine,
     Notch,
+    Sew,
 }
 
 impl Tool {
     /// Toolbar order, with button label, shortcut key and tooltip.
-    const BUTTONS: [(Tool, &'static str, Key, &'static str); 6] = [
+    const BUTTONS: [(Tool, &'static str, Key, &'static str); 7] = [
         (
             Tool::Select,
             "Select",
@@ -84,6 +85,12 @@ impl Tool {
             Key::N,
             "Add or remove notches on an outline (N)",
         ),
+        (
+            Tool::Sew,
+            "Sew",
+            Key::S,
+            "Click two edges to sew them together; click a sewn edge to unsew it (S)",
+        ),
     ];
 
     pub fn name(self) -> &'static str {
@@ -94,6 +101,7 @@ impl Tool {
             Tool::EditPoints => "Edit points",
             Tool::InternalLine => "Internal line",
             Tool::Notch => "Notch",
+            Tool::Sew => "Sew",
         }
     }
 }

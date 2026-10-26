@@ -1,7 +1,7 @@
 //! Project files (`.odproj`): a versioned JSON wrapper around a [`Document`].
 //!
 //! ```json
-//! { "format": "opendesign-project", "version": 2, "document": { ... } }
+//! { "format": "opendesign-project", "version": 3, "document": { ... } }
 //! ```
 //!
 //! Older versions are upgraded on load by the `migrate_*` steps below, so a
@@ -23,7 +23,8 @@ pub const FORMAT: &str = "opendesign-project";
 /// - 1: outlines are plain point lists.
 /// - 2: outline points carry a kind (corner or curve); patterns gain seam
 ///   allowance, grainline, notches and internal lines.
-pub const VERSION: u32 = 2;
+/// - 3: the document gains sewing lines.
+pub const VERSION: u32 = 3;
 
 #[derive(Debug)]
 pub enum ProjectError {
@@ -96,6 +97,16 @@ fn migrate_v1(doc: &mut serde_json::Value) {
     }
 }
 
+/// Upgrade a version 2 document to version 3 in place: nothing was sewn yet.
+fn migrate_v2(doc: &mut serde_json::Value) {
+    use serde_json::json;
+    let Some(object) = doc.as_object_mut() else {
+        return; // leave it for deserialisation to report
+    };
+    object.insert("sewing_lines".into(), json!([]));
+    object.insert("next_sewing_id".into(), json!(1));
+}
+
 pub fn to_json(doc: &Document) -> String {
     let file = FileOut {
         format: FORMAT,
@@ -128,6 +139,9 @@ pub fn from_json(text: &str) -> Result<Document, ProjectError> {
         .unwrap_or_default();
     if header.version < 2 {
         migrate_v1(&mut body);
+    }
+    if header.version < 3 {
+        migrate_v2(&mut body);
     }
     let mut doc: Document = serde_json::from_value(body).map_err(ProjectError::Malformed)?;
     doc.validate().map_err(ProjectError::DuplicateId)?;
@@ -206,7 +220,7 @@ mod tests {
             Err(ProjectError::NotAProject)
         ));
         assert!(matches!(
-            from_json(&good.replace("\"version\": 2", "\"version\": 99")),
+            from_json(&good.replace("\"version\": 3", "\"version\": 99")),
             Err(ProjectError::UnsupportedVersion(99))
         ));
         let dup = good.replace("\"id\": 2", "\"id\": 1");
@@ -229,7 +243,7 @@ mod tests {
         doc.patterns[0].seam_allowance = 7.5;
 
         let text = to_json(&doc);
-        assert!(text.contains("\"version\": 2"));
+        assert!(text.contains("\"version\": 3"));
         assert!(text.contains("\"kind\": \"curve\""));
         assert_eq!(from_json(&text).unwrap(), doc);
     }
@@ -278,7 +292,63 @@ mod tests {
 
         // Saving writes the current version, which loads back the same.
         let resaved = to_json(&doc);
-        assert!(resaved.contains("\"version\": 2"));
+        assert!(resaved.contains("\"version\": 3"));
+        assert_eq!(from_json(&resaved).unwrap(), doc);
+    }
+
+    /// A file exactly as Phase 3/4 (format version 2) wrote it: no sewing.
+    const V2_FILE: &str = r#"{
+  "format": "opendesign-project",
+  "version": 2,
+  "document": {
+    "name": "Old shirt",
+    "patterns": [
+      {
+        "id": 4,
+        "name": "Front",
+        "outline": [
+          { "x": 0.0, "y": 0.0, "kind": "corner" },
+          { "x": 500.0, "y": 0.0, "kind": "corner" },
+          { "x": 500.0, "y": 600.0, "kind": "corner" },
+          { "x": 0.0, "y": 600.0, "kind": "corner" }
+        ],
+        "seam_allowance": 10.0,
+        "grain_angle": 0.0,
+        "notches": [],
+        "internal_lines": []
+      }
+    ],
+    "next_id": 5
+  }
+}"#;
+
+    #[test]
+    fn version_2_files_load_with_no_sewing_lines() {
+        let mut doc = from_json(V2_FILE).unwrap();
+        assert_eq!(doc.name, "Old shirt");
+        assert!(doc.sewing_lines.is_empty());
+
+        // A seam added after loading gets a fresh id, not one colliding
+        // with anything the old file might have implied.
+        let id = doc.patterns[0].id;
+        let mut sew = crate::command::AddSewingLine::new(
+            crate::document::SeamEdge {
+                pattern: id,
+                start: 0,
+                end: 1,
+            },
+            crate::document::SeamEdge {
+                pattern: id,
+                start: 2,
+                end: 3,
+            },
+        );
+        sew.apply(&mut doc);
+        assert_eq!(doc.sewing_lines.len(), 1);
+
+        // Saving writes the current version, which loads back the same.
+        let resaved = to_json(&doc);
+        assert!(resaved.contains("\"version\": 3"));
         assert_eq!(from_json(&resaved).unwrap(), doc);
     }
 

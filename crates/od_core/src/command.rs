@@ -3,7 +3,7 @@
 
 use crate::document::{
     normalize_degrees, Axis, Document, InternalLine, Notch, OutlinePoint, Pattern, PatternId,
-    PointKind,
+    PointKind, SeamEdge, SewingLine, SewingLineId,
 };
 use crate::geometry::Vec2;
 
@@ -622,6 +622,77 @@ impl Command for DuplicatePattern {
     }
 }
 
+/// Sew two edges together.
+pub struct AddSewingLine {
+    a: SeamEdge,
+    b: SeamEdge,
+    /// Assigned on first apply so redo recreates the same id.
+    id: Option<SewingLineId>,
+}
+
+impl AddSewingLine {
+    pub fn new(a: SeamEdge, b: SeamEdge) -> Self {
+        Self { a, b, id: None }
+    }
+
+    /// Id of the created seam, available after the command has run.
+    pub fn id(&self) -> Option<SewingLineId> {
+        self.id
+    }
+}
+
+impl Command for AddSewingLine {
+    fn label(&self) -> String {
+        "Sew edges".into()
+    }
+
+    fn apply(&mut self, doc: &mut Document) {
+        let id = *self.id.get_or_insert_with(|| doc.allocate_sewing_id());
+        doc.sewing_lines.push(SewingLine {
+            id,
+            a: self.a,
+            b: self.b,
+        });
+    }
+
+    fn undo(&mut self, doc: &mut Document) {
+        if let Some(id) = self.id {
+            doc.sewing_lines.retain(|s| s.id != id);
+        }
+    }
+}
+
+pub struct RemoveSewingLine {
+    id: SewingLineId,
+    /// The removed seam and its position, kept for undo.
+    removed: Option<(usize, SewingLine)>,
+}
+
+impl RemoveSewingLine {
+    pub fn new(id: SewingLineId) -> Self {
+        Self { id, removed: None }
+    }
+}
+
+impl Command for RemoveSewingLine {
+    fn label(&self) -> String {
+        "Unsew edges".into()
+    }
+
+    fn apply(&mut self, doc: &mut Document) {
+        if let Some(index) = doc.sewing_lines.iter().position(|s| s.id == self.id) {
+            self.removed = Some((index, doc.sewing_lines.remove(index)));
+        }
+    }
+
+    fn undo(&mut self, doc: &mut Document) {
+        if let Some((index, line)) = self.removed.take() {
+            doc.sewing_lines
+                .insert(index.min(doc.sewing_lines.len()), line);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -818,5 +889,43 @@ mod tests {
             let (min, max) = copy.bounds().unwrap();
             assert_eq!((min.x, max.x), (100.0, 200.0));
         });
+    }
+
+    #[test]
+    fn sewing_lines_round_trip() {
+        let (mut doc, id) = doc_with_rect();
+        let mut add2 = AddPattern::new("Panel 2", rectangle(Vec2::ZERO, Vec2::new(100.0, 50.0)));
+        add2.apply(&mut doc);
+        let id2 = add2.id().unwrap();
+        // Ids handed out stay used after undo, by design (as for patterns),
+        // so compare the sewing lines rather than the whole document.
+        let before = doc.sewing_lines.clone();
+
+        let a = SeamEdge {
+            pattern: id,
+            start: 0,
+            end: 1,
+        };
+        let b = SeamEdge {
+            pattern: id2,
+            start: 2,
+            end: 3,
+        };
+        let mut sew = AddSewingLine::new(a, b);
+        sew.apply(&mut doc);
+        let seam_id = sew.id().unwrap();
+        assert_eq!(doc.sewing_lines.len(), 1);
+        assert_eq!(doc.sewing_lines[0].a, a);
+        assert_eq!(doc.sewing_lines[0].b, b);
+        sew.undo(&mut doc);
+        assert_eq!(doc.sewing_lines, before);
+        sew.apply(&mut doc);
+        assert_eq!(doc.sewing_lines[0].id, seam_id);
+
+        let mut remove = RemoveSewingLine::new(seam_id);
+        remove.apply(&mut doc);
+        assert!(doc.sewing_lines.is_empty());
+        remove.undo(&mut doc);
+        assert_eq!(doc.sewing_lines[0].id, seam_id);
     }
 }

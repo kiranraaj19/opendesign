@@ -69,6 +69,30 @@ pub struct InternalLine {
     pub points: Vec<Vec2>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct SewingLineId(pub u64);
+
+/// One side of a seam: a corner-to-corner run of a pattern's outline (see
+/// [`Pattern::segment_at`]). `end` is the outline index that closes the run;
+/// it may be `>= outline.len()` when the run wraps past the end of the
+/// array, in the same way [`FlatPoint::param`] wraps are represented
+/// elsewhere.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct SeamEdge {
+    pub pattern: PatternId,
+    pub start: usize,
+    pub end: usize,
+}
+
+/// A seam: two edges, on the same or different patterns, sewn together.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SewingLine {
+    pub id: SewingLineId,
+    pub a: SeamEdge,
+    pub b: SeamEdge,
+}
+
 /// Mirror axis through a pattern.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Axis {
@@ -193,6 +217,82 @@ impl Pattern {
             line.points.iter_mut().for_each(|p| *p += delta);
         }
     }
+
+    /// Indices of the outline's corner points, in outline order.
+    fn corner_indices(&self) -> Vec<usize> {
+        (0..self.outline.len())
+            .filter(|&i| self.outline[i].kind == PointKind::Corner)
+            .collect()
+    }
+
+    /// The corner-to-corner span of the outline that outline parameter
+    /// `param` (see [`FlatPoint::param`]) falls on: the previous corner
+    /// point up to the next one, carrying along any curve points between
+    /// them. This is the natural unit to sew a seam to, since a curved
+    /// edge is one span even though it is several outline points.
+    ///
+    /// `end` may be `>= outline.len()` if the span wraps past the end of
+    /// the array; a pattern with no corners (all curve points) is one span,
+    /// the whole outline.
+    pub fn segment_at(&self, param: f32) -> (usize, usize) {
+        let n = self.outline.len();
+        let corners = self.corner_indices();
+        let Some(&base) = corners.first() else {
+            return (0, n);
+        };
+        let rel = |i: usize| (i as f32 - base as f32).rem_euclid(n as f32);
+        let p_rel = (param - base as f32).rem_euclid(n as f32);
+        // The corner with the greatest `rel` not past `p_rel` starts the span.
+        let best = corners
+            .iter()
+            .copied()
+            .filter(|&c| rel(c) <= p_rel)
+            .max_by(|&a, &b| rel(a).total_cmp(&rel(b)))
+            .unwrap_or(base);
+        let idx = corners.iter().position(|&c| c == best).unwrap();
+        let next = corners[(idx + 1) % corners.len()];
+        let end = if next as f32 <= best as f32 {
+            next + n
+        } else {
+            next
+        };
+        (best, end)
+    }
+
+    /// The flattened points of the outline between outline parameters
+    /// `start` and `end` (as returned by [`Pattern::segment_at`]), in
+    /// travel order.
+    pub fn segment_points(&self, start: usize, end: usize, tolerance: f32) -> Vec<Vec2> {
+        let n = self.outline.len();
+        if n == 0 || end <= start {
+            return Vec::new();
+        }
+        let nf = n as f32;
+        // Three laps of the flattened outline's parameters, so a window
+        // anywhere within one lap of `start..end` is contiguous in the
+        // combined, sorted list regardless of where the outline itself
+        // happens to wrap.
+        let mut pts: Vec<(f32, Vec2)> = self
+            .flatten(tolerance)
+            .into_iter()
+            .flat_map(|f| [-nf, 0.0, nf].map(|shift| (f.param + shift, f.pos)))
+            .collect();
+        pts.sort_by(|a, b| a.0.total_cmp(&b.0));
+        let (s, e) = (start as f32, end as f32);
+        pts.into_iter()
+            .filter(|&(param, _)| param >= s - 1e-3 && param <= e + 1e-3)
+            .map(|(_, pos)| pos)
+            .collect()
+    }
+
+    /// Length in mm of the outline between outline parameters `start` and
+    /// `end`. Used to check that two sewn edges are a comparable length.
+    pub fn segment_length(&self, start: usize, end: usize, tolerance: f32) -> f32 {
+        self.segment_points(start, end, tolerance)
+            .windows(2)
+            .map(|w| w[0].distance(w[1]))
+            .sum()
+    }
 }
 
 /// An angle in degrees brought into -180..180.
@@ -299,7 +399,9 @@ fn quad(out: &mut Vec<FlatPoint>, a: (Vec2, f32), c: (Vec2, f32), b: (Vec2, f32)
 pub struct Document {
     pub name: String,
     pub patterns: Vec<Pattern>,
+    pub sewing_lines: Vec<SewingLine>,
     next_id: u64,
+    next_sewing_id: u64,
 }
 
 impl Default for Document {
@@ -313,7 +415,9 @@ impl Document {
         Self {
             name: name.into(),
             patterns: Vec::new(),
+            sewing_lines: Vec::new(),
             next_id: 1,
+            next_sewing_id: 1,
         }
     }
 
@@ -327,6 +431,8 @@ impl Document {
         }
         let max = ids.last().map_or(0, |id| id.0);
         self.next_id = self.next_id.max(max + 1);
+        let smax = self.sewing_lines.iter().map(|s| s.id.0).max().unwrap_or(0);
+        self.next_sewing_id = self.next_sewing_id.max(smax + 1);
         Ok(())
     }
 
@@ -334,6 +440,13 @@ impl Document {
     pub fn allocate_id(&mut self) -> PatternId {
         let id = PatternId(self.next_id);
         self.next_id += 1;
+        id
+    }
+
+    /// Reserve a fresh sewing line id. Ids are never reused, even after undo.
+    pub fn allocate_sewing_id(&mut self) -> SewingLineId {
+        let id = SewingLineId(self.next_sewing_id);
+        self.next_sewing_id += 1;
         id
     }
 
@@ -495,5 +608,63 @@ mod tests {
         assert_eq!(normalize_degrees(190.0), -170.0);
         assert_eq!(normalize_degrees(-0.0), 0.0);
         assert_eq!(normalize_degrees(360.0), 0.0);
+    }
+
+    /// A 100 × 50 rectangle with a curve point part way along the top edge
+    /// (indices: 0 corner, 1 curve, 2 corner, 3 corner, 4 corner).
+    fn rect_with_curve() -> Pattern {
+        pattern(&[
+            (0.0, 0.0, C),
+            (50.0, -10.0, Q),
+            (100.0, 0.0, C),
+            (100.0, 50.0, C),
+            (0.0, 50.0, C),
+        ])
+    }
+
+    #[test]
+    fn segment_at_spans_a_whole_curved_edge() {
+        let p = rect_with_curve();
+        // Anywhere from the first corner up to (not including) the next
+        // corner is the same span, curve point and all.
+        assert_eq!(p.segment_at(0.0), (0, 2));
+        assert_eq!(p.segment_at(0.5), (0, 2));
+        assert_eq!(p.segment_at(1.9), (0, 2));
+        // The last edge wraps past the end of the array.
+        assert_eq!(p.segment_at(4.0), (4, 5));
+        assert_eq!(p.segment_at(4.5), (4, 5));
+    }
+
+    #[test]
+    fn segment_at_with_no_corners_is_the_whole_outline() {
+        let p = pattern(&[(0.0, 0.0, Q), (100.0, 0.0, Q), (50.0, 50.0, Q)]);
+        assert_eq!(p.segment_at(1.3), (0, 3));
+    }
+
+    #[test]
+    fn segment_points_cover_only_the_requested_span() {
+        let p = rect_with_curve();
+        let straight = p.segment_points(2, 3, TOLERANCE);
+        assert_eq!(
+            straight,
+            vec![Vec2::new(100.0, 0.0), Vec2::new(100.0, 50.0)]
+        );
+        // The curved span starts and ends at the same points as the plain
+        // outline, with extra points for the bend in between.
+        let curved = p.segment_points(0, 2, TOLERANCE);
+        assert_eq!(curved.first(), Some(&Vec2::new(0.0, 0.0)));
+        assert_eq!(curved.last(), Some(&Vec2::new(100.0, 0.0)));
+        assert!(curved.len() > 2, "the curve should be subdivided");
+        // A span that wraps past the end of the array still joins up.
+        let wrapped = p.segment_points(4, 5, TOLERANCE);
+        assert_eq!(wrapped, vec![Vec2::new(0.0, 50.0), Vec2::new(0.0, 0.0)]);
+    }
+
+    #[test]
+    fn segment_length_matches_a_straight_edge_and_exceeds_the_chord_on_a_curve() {
+        let p = rect_with_curve();
+        assert_eq!(p.segment_length(2, 3, TOLERANCE), 50.0);
+        let curved = p.segment_length(0, 2, TOLERANCE);
+        assert!(curved > 100.0, "{curved} should be longer than the chord");
     }
 }
