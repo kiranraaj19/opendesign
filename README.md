@@ -37,10 +37,17 @@ without this step.
 | New / Open / Save / Save As | `Ctrl+N` / `Ctrl+O` / `Ctrl+S` / `Ctrl+Shift+S`, or File menu |
 | Reopen a recent project | File → Open Recent, or drag an `.odproj` onto the window |
 | Quit | `Ctrl+Q` (asks first if there are unsaved changes) |
-| Add a starter block | Library → `+ Front bodice` etc. |
+| Add a starter block | Library → `+ Front bodice` etc. (T-shirt front, back, sleeve) |
 | Draw a rectangle pattern | Rectangle tool (`R`), drag in the 2D window |
+| Draft an outline | Pen tool (`P`): click points, `Shift`+click for a curve point; click the first point or `Enter` to close, `Esc` cancels |
+| Edit points | Edit points tool (`E`): drag a point; double-click an edge to add one, a point to curve it; `C` toggles curve, `Del` deletes |
+| Snap to grid / points | Toolbar `Grid snap` / `Point snap`, or View menu; length and angle show while drawing |
+| Seam allowance, grainline | Properties: drag or type the value |
+| Notches | Notch tool (`N`): click an outline to add, click a notch to remove |
+| Internal lines | Internal line tool (`L`): click inside a pattern, `Enter` or double-click to finish |
+| Flip, mirror, duplicate | Properties → Symmetry; `Ctrl+D` duplicates |
 | Select / move | Select tool (`V`), click or drag a pattern |
-| Delete | `Del`, or the button in Properties |
+| Delete | `Del` (the selected point when editing points), or the button in Properties |
 | Undo / redo | `Ctrl+Z` / `Ctrl+Y` (or `Ctrl+Shift+Z`) |
 | Pan / zoom 2D | Right-drag / scroll |
 | Orbit / zoom 3D | Drag / scroll |
@@ -100,7 +107,9 @@ without opening a window.
    light/dark theme, layout and theme remembered between sessions
 2. Core and save/load ✅ commands and undo, `.odproj` files, unsaved-changes
    tracking and prompts, recent files, drag-and-drop open
-3. 2D pattern editor: points, curves, notches, seam allowance
+3. 2D pattern drafting ✅ pen and edit-points tools, curve points, snapping
+   with live length/angle, seam allowance, notches, internal lines,
+   grainline, flip/mirror/duplicate, T-shirt blocks, project format v2
 4. 3D viewport on wgpu, avatar loading
 5. Sewing
 6. Cloth simulation
