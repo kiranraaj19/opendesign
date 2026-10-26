@@ -1,6 +1,7 @@
 //! Library: starter pattern blocks now; avatars and fabrics later.
 
 use od_core::{geometry, Vec2};
+use od_render::avatar::AvatarKind;
 
 use crate::app::Session;
 
@@ -60,7 +61,7 @@ pub fn ui(ui: &mut egui::Ui, s: &mut Session) {
             }
         });
 
-    placeholder_section(ui, "Avatars", &["Female", "Male", "Kid"], "Phase 4");
+    avatars(ui, s);
     placeholder_section(
         ui,
         "Fabrics",
@@ -68,6 +69,31 @@ pub fn ui(ui: &mut egui::Ui, s: &mut Session) {
         "Phase 7",
     );
     placeholder_section(ui, "Trims", &["Buttons", "Zippers"], "Phase 10");
+}
+
+/// Preset mannequins, or a model from a file, for the 3D window.
+fn avatars(ui: &mut egui::Ui, s: &mut Session) {
+    egui::CollapsingHeader::new("Avatars")
+        .default_open(true)
+        .show(ui, |ui| {
+            let avatar = &mut s.viewport.avatar;
+            for kind in AvatarKind::ALL {
+                if ui
+                    .selectable_label(avatar.kind() == Some(kind), kind.label())
+                    .on_hover_text("Use this avatar in the 3D window")
+                    .clicked()
+                {
+                    avatar.set_preset(kind);
+                }
+            }
+            if ui
+                .button("Load avatar file…")
+                .on_hover_text("OBJ or glTF, Y up; sizes in m, cm or mm")
+                .clicked()
+            {
+                s.viewport.load_avatar_dialog();
+            }
+        });
 }
 
 fn placeholder_section(ui: &mut egui::Ui, title: &str, items: &[&str], phase: &str) {

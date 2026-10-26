@@ -43,7 +43,11 @@ without this step.
 | Delete | `Del`, or the button in Properties |
 | Undo / redo | `Ctrl+Z` / `Ctrl+Y` (or `Ctrl+Shift+Z`) |
 | Pan / zoom 2D | Right-drag / scroll |
-| Orbit / zoom 3D | Drag / scroll |
+| Orbit / pan / zoom 3D | Drag / right- or middle-drag / scroll; double-click or Frame to fit everything |
+| 3D camera presets | Front, Back, Left, Right, Top buttons above the 3D view |
+| Select a pattern in 3D | Click it (the avatar blocks patterns behind it) |
+| Change avatar | Library -> Avatars: Female, Male, Kid, or Load avatar file (OBJ/glTF, Y up) |
+| Avatar size | Avatar size button in the 3D view: height, chest, waist, hip |
 | Rearrange panels | Drag a tab to another panel edge |
 | Reset panels, theme | View menu |
 
@@ -101,7 +105,9 @@ without opening a window.
 2. Core and save/load ✅ commands and undo, `.odproj` files, unsaved-changes
    tracking and prompts, recent files, drag-and-drop open
 3. 2D pattern editor: points, curves, notches, seam allowance
-4. 3D viewport on wgpu, avatar loading
+4. 3D viewport ✅ wgpu renderer (lit, depth-tested, floor grid, contact
+   shadow), orbit camera with presets, procedural sized avatars, OBJ/glTF
+   avatar loading, patterns placed around the avatar, click-to-select in 3D
 5. Sewing
 6. Cloth simulation
 7. Fabrics and materials

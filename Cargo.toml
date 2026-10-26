@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/od_core", "crates/od_app"]
+members = ["crates/od_core", "crates/od_render", "crates/od_app"]
 
 [workspace.package]
 version = "0.1.0"

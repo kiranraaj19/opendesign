@@ -111,7 +111,7 @@ impl OpenDesignApp {
                 selection: None,
                 tool: Tool::Select,
                 canvas: Canvas2D::default(),
-                viewport: Viewport3D::default(),
+                viewport: Viewport3D::new(cc.wgpu_render_state.as_ref()),
                 props: PropertiesState::default(),
             },
             files: FileState::with_recent(
