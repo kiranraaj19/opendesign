@@ -14,6 +14,7 @@ eframe = { version = "0.36", features = ["persistence"] }
 egui = "0.36"
 egui_dock = { version = "0.21.1", features = ["serde"] }
 od_core = { path = "../od_core" }
+rfd = "0.17.2"
 serde = { version = "1", features = ["derive"] }
 
 [dev-dependencies]

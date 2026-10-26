@@ -4,6 +4,7 @@ use egui::{Key, KeyboardShortcut, Modifiers};
 use egui_dock::{DockArea, DockState, NodeIndex, Style, TabViewer};
 use od_core::{AddPattern, Command, DeletePattern, Document, History, PatternId, Vec2};
 
+use crate::files::{Discard, FileState, RECENT_KEY};
 use crate::panels::{
     self, pattern2d::Canvas2D, properties::PropertiesState, viewport3d::Viewport3D,
 };
@@ -83,16 +84,19 @@ impl Session {
         }
     }
 
-    pub fn new_document(&mut self) {
-        self.doc = Document::default();
+    /// Replace the document, e.g. after File → New or Open.
+    pub fn load_document(&mut self, doc: Document) {
+        self.doc = doc;
         self.history.clear();
         self.selection = None;
+        self.props = PropertiesState::default();
     }
 }
 
 pub struct OpenDesignApp {
     dock: DockState<Tab>,
     session: Session,
+    files: FileState,
     show_about: bool,
 }
 
@@ -110,19 +114,37 @@ impl OpenDesignApp {
                 viewport: Viewport3D::default(),
                 props: PropertiesState::default(),
             },
+            files: FileState::with_recent(
+                cc.storage
+                    .and_then(|s| eframe::get_value(s, RECENT_KEY))
+                    .unwrap_or_default(),
+            ),
             show_about: false,
         }
     }
 
     fn handle_shortcuts(&mut self, ctx: &egui::Context) {
-        let s = &mut self.session;
-        let redo_shift = KeyboardShortcut::new(Modifiers::COMMAND | Modifiers::SHIFT, Key::Z);
-        let redo = KeyboardShortcut::new(Modifiers::COMMAND, Key::Y);
-        let undo = KeyboardShortcut::new(Modifiers::COMMAND, Key::Z);
-        // Check Ctrl+Shift+Z before Ctrl+Z so the shorter one doesn't swallow it.
-        if ctx.input_mut(|i| i.consume_shortcut(&redo_shift) || i.consume_shortcut(&redo)) {
+        let (s, files) = (&mut self.session, &mut self.files);
+        let shortcut =
+            |mods, key| ctx.input_mut(|i| i.consume_shortcut(&KeyboardShortcut::new(mods, key)));
+        // Longer chords first, so Ctrl+S doesn't swallow Ctrl+Shift+S.
+        if shortcut(Modifiers::COMMAND | Modifiers::SHIFT, Key::S) {
+            files.save_as(s);
+        } else if shortcut(Modifiers::COMMAND, Key::S) {
+            files.save(s);
+        } else if shortcut(Modifiers::COMMAND, Key::N) {
+            files.request(s, ctx, Discard::New);
+        } else if shortcut(Modifiers::COMMAND, Key::O) {
+            files.request(s, ctx, Discard::Open(None));
+        } else if shortcut(Modifiers::COMMAND, Key::Q) {
+            files.request(s, ctx, Discard::Quit);
+        }
+
+        if shortcut(Modifiers::COMMAND | Modifiers::SHIFT, Key::Z)
+            || shortcut(Modifiers::COMMAND, Key::Y)
+        {
             s.redo();
-        } else if ctx.input_mut(|i| i.consume_shortcut(&undo)) {
+        } else if shortcut(Modifiers::COMMAND, Key::Z) {
             s.undo();
         }
 
@@ -145,14 +167,48 @@ impl OpenDesignApp {
 
     fn menu_bar(&mut self, ui: &mut egui::Ui) {
         egui::MenuBar::new().ui(ui, |ui| {
-            let s = &mut self.session;
+            let (s, files) = (&mut self.session, &mut self.files);
             ui.menu_button("File", |ui| {
-                if ui.button("New").clicked() {
-                    s.new_document();
+                let ctx = ui.ctx().clone();
+                let item = |label, keys| egui::Button::new(label).shortcut_text(keys);
+                if ui.add(item("New", "Ctrl+N")).clicked() {
+                    files.request(s, &ctx, Discard::New);
+                }
+                if ui.add(item("Open…", "Ctrl+O")).clicked() {
+                    files.request(s, &ctx, Discard::Open(None));
+                }
+                ui.add_enabled_ui(!files.recent.is_empty(), |ui| {
+                    ui.menu_button("Open Recent", |ui| {
+                        let mut chosen = None;
+                        for path in &files.recent {
+                            let name = path.file_name().unwrap_or_default().to_string_lossy();
+                            if ui
+                                .button(name)
+                                .on_hover_text(path.display().to_string())
+                                .clicked()
+                            {
+                                chosen = Some(path.clone());
+                            }
+                        }
+                        ui.separator();
+                        if ui.button("Clear recent").clicked() {
+                            files.recent.clear();
+                        }
+                        if let Some(path) = chosen {
+                            files.request(s, &ctx, Discard::Open(Some(path)));
+                        }
+                    });
+                });
+                ui.separator();
+                if ui.add(item("Save", "Ctrl+S")).clicked() {
+                    files.save(s);
+                }
+                if ui.add(item("Save As…", "Ctrl+Shift+S")).clicked() {
+                    files.save_as(s);
                 }
                 ui.separator();
-                if ui.button("Quit").clicked() {
-                    ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
+                if ui.add(item("Quit", "Ctrl+Q")).clicked() {
+                    files.request(s, &ctx, Discard::Quit);
                 }
             });
             ui.menu_button("Edit", |ui| {
@@ -255,7 +311,13 @@ impl OpenDesignApp {
             ui.separator();
             ui.label(format!("{} patterns", s.doc.patterns.len()));
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.weak(&s.doc.name);
+                match &self.files.path {
+                    Some(path) => ui.weak(path.display().to_string()),
+                    None => ui.weak("Not saved yet"),
+                };
+                if s.history.is_dirty() {
+                    ui.label("Unsaved changes");
+                }
             });
         });
     }
@@ -264,7 +326,12 @@ impl OpenDesignApp {
 impl eframe::App for OpenDesignApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
-        self.handle_shortcuts(&ctx);
+        self.files.intercept_close(&self.session, &ctx);
+        // While a dialog is up, the document must not change underneath it.
+        if !self.files.is_blocking() {
+            self.files.handle_dropped(&mut self.session, &ctx);
+            self.handle_shortcuts(&ctx);
+        }
 
         // Undo can remove the selected pattern; drop a stale selection.
         let s = &mut self.session;
@@ -294,11 +361,15 @@ impl eframe::App for OpenDesignApp {
                 ui.label("OpenDesign: open-source 3D garment design.");
                 ui.label(format!("Version {}", env!("CARGO_PKG_VERSION")));
             });
+
+        self.files.dialogs(&mut self.session, &ctx);
+        self.files.update_title(&self.session, &ctx);
     }
 
     // eframe also saves egui's memory, which holds the theme preference.
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
         eframe::set_value(storage, LAYOUT_KEY, &self.dock);
+        eframe::set_value(storage, RECENT_KEY, &self.files.recent);
     }
 }
 
@@ -439,6 +510,207 @@ mod tests {
         h.get_by_label("Reset layout").click();
         h.run();
         assert_eq!(positions(&h.state().dock), positions(&default_layout()));
+    }
+
+    // ---- Files (Phase 2) ----
+
+    use crate::files::window_title;
+    use std::path::{Path, PathBuf};
+
+    /// A fresh, empty directory for one test.
+    fn temp_dir(test: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("od_app_{}_{test}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn click(h: &mut Harness<'_, OpenDesignApp>, label: &str) {
+        h.get_by_label(label).click();
+        h.run();
+    }
+
+    fn press(h: &mut Harness<'_, OpenDesignApp>, mods: Modifiers, key: Key) {
+        h.key_press_modifiers(mods, key);
+        h.run();
+    }
+
+    fn open_recent(h: &mut Harness<'_, OpenDesignApp>, file_name: &str) {
+        click(h, "File");
+        click(h, "Open Recent ⏵");
+        click(h, file_name);
+    }
+
+    fn dirty(h: &Harness<'_, OpenDesignApp>) -> bool {
+        h.state().session.history.is_dirty()
+    }
+
+    #[test]
+    fn save_close_reopen_keeps_document_and_editing_continues() {
+        let path = temp_dir("reopen").join("shirt.odproj");
+
+        // First session: make something and save it.
+        let mut first = harness();
+        click(&mut first, "+ Front bodice");
+        click(&mut first, "+ Sleeve");
+        assert!(dirty(&first));
+        first.state_mut().files.path = Some(path.clone());
+        press(&mut first, Modifiers::COMMAND, Key::S);
+        assert!(path.exists());
+        assert!(!dirty(&first));
+        assert_eq!(window_title(&first.state().session), "shirt - OpenDesign");
+        let saved = first.state().session.doc.clone();
+        drop(first);
+
+        // Second session: reopen it from Open Recent.
+        let mut second = harness();
+        second.state_mut().files.recent = vec![path.clone()];
+        open_recent(&mut second, "shirt.odproj");
+        assert_eq!(second.state().session.doc, saved);
+        assert_eq!(second.state().files.path.as_deref(), Some(path.as_path()));
+        assert!(!dirty(&second));
+
+        // Editing and undo carry on normally.
+        click(&mut second, "+ Skirt panel");
+        assert_eq!(pattern_count(&second), 3);
+        assert_eq!(
+            window_title(&second.state().session),
+            "shirt * - OpenDesign"
+        );
+        press(&mut second, Modifiers::COMMAND, Key::Z);
+        assert_eq!(pattern_count(&second), 2);
+        assert!(!dirty(&second), "undo back to the saved state");
+    }
+
+    #[test]
+    fn new_with_unsaved_changes_asks_first() {
+        let mut h = harness();
+        click(&mut h, "+ Back bodice");
+
+        press(&mut h, Modifiers::COMMAND, Key::N);
+        h.get_by_label("Save changes?");
+        click(&mut h, "Cancel");
+        assert!(h.query_by_label("Save changes?").is_none());
+        assert_eq!(pattern_count(&h), 1, "cancel keeps the work");
+
+        press(&mut h, Modifiers::COMMAND, Key::N);
+        click(&mut h, "Don't save");
+        assert_eq!(pattern_count(&h), 0);
+        assert!(!dirty(&h));
+    }
+
+    #[test]
+    fn save_in_the_prompt_saves_then_continues() {
+        let path = temp_dir("prompt_save").join("coat.odproj");
+        let mut h = harness();
+        h.state_mut().files.path = Some(path.clone());
+        click(&mut h, "+ Front bodice");
+
+        press(&mut h, Modifiers::COMMAND, Key::N);
+        click(&mut h, "Save");
+        assert_eq!(od_core::project::load(&path).unwrap().patterns.len(), 1);
+        assert_eq!(pattern_count(&h), 0, "then the new document");
+        assert_eq!(h.state().files.path, None);
+    }
+
+    #[test]
+    fn unchanged_document_is_replaced_without_asking() {
+        let mut h = harness();
+        press(&mut h, Modifiers::COMMAND, Key::N);
+        assert!(h.query_by_label("Save changes?").is_none());
+    }
+
+    #[test]
+    fn closing_the_window_with_unsaved_changes_asks_first() {
+        let mut h = harness();
+        click(&mut h, "+ Sleeve");
+        let request_close = |h: &mut Harness<'_, OpenDesignApp>| {
+            h.input_mut()
+                .viewports
+                .entry(egui::ViewportId::ROOT)
+                .or_default()
+                .events
+                .push(egui::ViewportEvent::Close);
+            h.run();
+        };
+
+        request_close(&mut h);
+        h.get_by_label("Save changes?");
+        click(&mut h, "Cancel");
+        assert!(!h.state().files.quitting, "cancel keeps the window open");
+
+        request_close(&mut h);
+        click(&mut h, "Don't save");
+        assert!(h.state().files.quitting);
+    }
+
+    #[test]
+    fn missing_recent_file_shows_error_and_is_forgotten() {
+        let gone = temp_dir("missing").join("gone.odproj");
+        let mut h = harness();
+        h.state_mut().files.recent = vec![gone];
+        open_recent(&mut h, "gone.odproj");
+        h.get_by_label("Something went wrong");
+        assert!(h.state().files.recent.is_empty());
+        click(&mut h, "OK");
+        assert!(h.query_by_label("Something went wrong").is_none());
+    }
+
+    #[test]
+    fn damaged_file_shows_error_and_keeps_current_work() {
+        let path = temp_dir("damaged").join("broken.odproj");
+        std::fs::write(&path, "{ this is not a project").unwrap();
+        let mut h = harness();
+        click(&mut h, "+ Sleeve");
+        h.state_mut().files.recent = vec![path];
+        open_recent(&mut h, "broken.odproj");
+        click(&mut h, "Don't save");
+        h.get_by_label("Something went wrong");
+        assert_eq!(
+            pattern_count(&h),
+            1,
+            "failed open leaves the document alone"
+        );
+    }
+
+    #[derive(Debug)]
+    struct DroppedPath(PathBuf);
+
+    impl egui::DroppedFile for DroppedPath {
+        fn path(&self) -> &Path {
+            &self.0
+        }
+        fn bytes(&self) -> Result<Vec<u8>, String> {
+            std::fs::read(&self.0).map_err(|e| e.to_string())
+        }
+    }
+
+    #[test]
+    fn dropping_a_project_file_opens_it() {
+        let path = temp_dir("drop").join("dropped.odproj");
+        let mut doc = Document::new("dropped");
+        let outline = od_core::geometry::rectangle(Vec2::ZERO, Vec2::new(300.0, 80.0));
+        AddPattern::new("Yoke", outline).apply(&mut doc);
+        od_core::project::save(&doc, &path).unwrap();
+
+        let mut h = harness();
+        h.input_mut()
+            .dropped_files
+            .push(std::sync::Arc::new(DroppedPath(path.clone())));
+        h.run();
+        assert_eq!(h.state().session.doc.patterns[0].name, "Yoke");
+        assert_eq!(h.state().files.path.as_deref(), Some(path.as_path()));
+    }
+
+    #[test]
+    fn recent_files_are_saved_for_next_launch() {
+        let mut h = harness();
+        let recent = vec![PathBuf::from("a.odproj"), PathBuf::from("b.odproj")];
+        h.state_mut().files.recent = recent.clone();
+        let mut storage = MemStorage::default();
+        eframe::App::save(h.state_mut(), &mut storage);
+        let stored: Vec<PathBuf> = eframe::get_value(&storage, RECENT_KEY).unwrap();
+        assert_eq!(stored, recent);
     }
 
     #[test]

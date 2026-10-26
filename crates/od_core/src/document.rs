@@ -1,12 +1,15 @@
 //! The document: everything that is saved in a project file.
 
+use serde::{Deserialize, Serialize};
+
 use crate::geometry::{self, Vec2};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(transparent)]
 pub struct PatternId(pub u64);
 
 /// A flat garment piece, drawn in the 2D window and draped in 3D.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Pattern {
     pub id: PatternId,
     pub name: String,
@@ -32,7 +35,7 @@ impl Pattern {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Document {
     pub name: String,
     pub patterns: Vec<Pattern>,
@@ -52,6 +55,19 @@ impl Document {
             patterns: Vec::new(),
             next_id: 1,
         }
+    }
+
+    /// Check a document read from a file: ids must be unique, and new ids
+    /// must not collide with existing ones even if the file says otherwise.
+    pub(crate) fn validate(&mut self) -> Result<(), PatternId> {
+        let mut ids: Vec<PatternId> = self.patterns.iter().map(|p| p.id).collect();
+        ids.sort();
+        if let Some(pair) = ids.windows(2).find(|w| w[0] == w[1]) {
+            return Err(pair[0]);
+        }
+        let max = ids.last().map_or(0, |id| id.0);
+        self.next_id = self.next_id.max(max + 1);
+        Ok(())
     }
 
     /// Reserve a fresh id. Ids are never reused, even after undo.

@@ -7,6 +7,7 @@ pub mod command;
 pub mod document;
 pub mod geometry;
 pub mod history;
+pub mod project;
 
 pub use command::{AddPattern, Command, DeletePattern, MovePattern, RenamePattern};
 pub use document::{Document, Pattern, PatternId};

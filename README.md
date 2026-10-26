@@ -34,6 +34,9 @@ without this step.
 
 | Action | How |
 |---|---|
+| New / Open / Save / Save As | `Ctrl+N` / `Ctrl+O` / `Ctrl+S` / `Ctrl+Shift+S`, or File menu |
+| Reopen a recent project | File → Open Recent, or drag an `.odproj` onto the window |
+| Quit | `Ctrl+Q` (asks first if there are unsaved changes) |
 | Add a starter block | Library → `+ Front bodice` etc. |
 | Draw a rectangle pattern | Rectangle tool (`R`), drag in the 2D window |
 | Select / move | Select tool (`V`), click or drag a pattern |
@@ -48,19 +51,33 @@ Panel layout and theme are remembered between sessions (eframe stores them in
 `%APPDATA%\OpenDesign\data\app.ron` on Windows). View → Reset layout restores
 the default arrangement.
 
+### Project files
+
+Projects are saved as `.odproj`: versioned JSON
+(`{"format": "opendesign-project", "version": 1, "document": {...}}`).
+Saves go through a temporary file and a rename, so a crash mid-save never
+leaves a half-written project. The title bar shows `*` and the status bar
+says "Unsaved changes" until you save; New, Open, Quit and closing the window
+ask before discarding them.
+
 ### Smart App Control
 
-If Windows Smart App Control is on, it can block freshly built, unsigned
-`opendesign.exe` files ("An Application Control policy has blocked this file").
-Code-signing the binary is the long-term fix for releases.
+If Windows Smart App Control is on, it blocks freshly built, unsigned programs
+("An Application Control policy has blocked this file"). That includes
+`opendesign.exe` and the build scripts Cargo compiles, so native Windows builds
+fail. Building in WSL still works (`cargo test --workspace`), and
+`cargo check --target x86_64-pc-windows-gnu` there type-checks the Windows
+build. Code-signing the binary is the long-term fix for releases.
 
 ## Layout
 
 ```
 crates/
-  od_core/   Document model, commands, undo/redo history, 2D geometry. No UI.
+  od_core/   Document model, commands, undo/redo history, 2D geometry,
+             project file format (project.rs). No UI.
   od_app/    egui + egui_dock desktop app.
     src/app.rs           Shell: menus, toolbar, status bar, dock layout, UI tests
+    src/files.rs         Open/save, recent files, unsaved-changes prompt
     src/panels/          One module per dockable tab
     src/theme.rs         Design tokens (light/dark) for widgets and canvases
 ```
@@ -81,7 +98,8 @@ without opening a window.
 
 1. App shell ✅ docked panels, menus, toolbar, status bar, token-based
    light/dark theme, layout and theme remembered between sessions
-2. Core architecture: commands and undo ✅, save/load next
+2. Core and save/load ✅ commands and undo, `.odproj` files, unsaved-changes
+   tracking and prompts, recent files, drag-and-drop open
 3. 2D pattern editor: points, curves, notches, seam allowance
 4. 3D viewport on wgpu, avatar loading
 5. Sewing

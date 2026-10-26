@@ -3,10 +3,23 @@
 use crate::command::Command;
 use crate::document::Document;
 
-#[derive(Default)]
 pub struct History {
     undo: Vec<Box<dyn Command>>,
     redo: Vec<Box<dyn Command>>,
+    /// Undo-stack depth when the document was last saved, or `None` once
+    /// that state can no longer be reached by undo/redo.
+    saved_depth: Option<usize>,
+}
+
+impl Default for History {
+    /// A fresh history matches its (new or just-loaded) document: not dirty.
+    fn default() -> Self {
+        Self {
+            undo: Vec::new(),
+            redo: Vec::new(),
+            saved_depth: Some(0),
+        }
+    }
 }
 
 impl History {
@@ -16,9 +29,24 @@ impl History {
 
     /// Apply `command` and record it. Clears the redo stack.
     pub fn execute(&mut self, doc: &mut Document, mut command: Box<dyn Command>) {
+        // If the saved state was undone, it lived on the redo stack we're
+        // about to discard.
+        if self.saved_depth.is_some_and(|d| self.undo.len() < d) {
+            self.saved_depth = None;
+        }
         command.apply(doc);
         self.undo.push(command);
         self.redo.clear();
+    }
+
+    /// Record that the document as it is now has been saved.
+    pub fn mark_saved(&mut self) {
+        self.saved_depth = Some(self.undo.len());
+    }
+
+    /// True when the document differs from the last save.
+    pub fn is_dirty(&self) -> bool {
+        self.saved_depth != Some(self.undo.len())
     }
 
     /// Returns `false` when there is nothing to undo.
@@ -67,9 +95,9 @@ impl History {
         self.redo.iter().rev().map(|c| c.label()).collect()
     }
 
+    /// Forget all steps, e.g. for a new or just-opened document.
     pub fn clear(&mut self) {
-        self.undo.clear();
-        self.redo.clear();
+        *self = Self::default();
     }
 }
 
@@ -82,6 +110,52 @@ mod tests {
     fn add(doc: &mut Document, history: &mut History, name: &str) {
         let outline = rectangle(Vec2::ZERO, Vec2::new(10.0, 10.0));
         history.execute(doc, Box::new(AddPattern::new(name, outline)));
+    }
+
+    #[test]
+    fn dirty_follows_undo_and_redo_around_the_save() {
+        let (mut doc, mut history) = (Document::default(), History::new());
+        assert!(!history.is_dirty(), "new document starts clean");
+
+        add(&mut doc, &mut history, "A");
+        assert!(history.is_dirty());
+        history.mark_saved();
+        assert!(!history.is_dirty());
+
+        add(&mut doc, &mut history, "B");
+        assert!(history.is_dirty());
+        history.undo(&mut doc);
+        assert!(!history.is_dirty(), "back at the saved state");
+        history.undo(&mut doc);
+        assert!(history.is_dirty());
+        history.redo(&mut doc);
+        assert!(!history.is_dirty());
+    }
+
+    #[test]
+    fn new_edit_after_undoing_past_the_save_stays_dirty() {
+        let (mut doc, mut history) = (Document::default(), History::new());
+        add(&mut doc, &mut history, "A");
+        add(&mut doc, &mut history, "B");
+        history.mark_saved();
+        history.undo(&mut doc);
+        history.undo(&mut doc);
+        // This discards the redo stack holding the saved state.
+        add(&mut doc, &mut history, "C");
+        add(&mut doc, &mut history, "D");
+        assert!(
+            history.is_dirty(),
+            "same depth as the save, different content"
+        );
+    }
+
+    #[test]
+    fn clear_makes_history_clean() {
+        let (mut doc, mut history) = (Document::default(), History::new());
+        add(&mut doc, &mut history, "A");
+        history.clear();
+        assert!(!history.is_dirty());
+        assert!(!history.can_undo());
     }
 
     #[test]
