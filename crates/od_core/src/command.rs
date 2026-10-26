@@ -3,7 +3,7 @@
 
 use crate::document::{
     normalize_degrees, Axis, Document, InternalLine, Notch, OutlinePoint, Pattern, PatternId,
-    PointKind, SeamEdge, SewingLine, SewingLineId,
+    PointKind, SeamEdge, SeamPoint, SewingLine, SewingLineId, Tack, TackId,
 };
 use crate::geometry::Vec2;
 
@@ -693,6 +693,76 @@ impl Command for RemoveSewingLine {
     }
 }
 
+/// Pin two outline points together with a tack.
+pub struct AddTack {
+    a: SeamPoint,
+    b: SeamPoint,
+    /// Assigned on first apply so redo recreates the same id.
+    id: Option<TackId>,
+}
+
+impl AddTack {
+    pub fn new(a: SeamPoint, b: SeamPoint) -> Self {
+        Self { a, b, id: None }
+    }
+
+    /// Id of the created tack, available after the command has run.
+    pub fn id(&self) -> Option<TackId> {
+        self.id
+    }
+}
+
+impl Command for AddTack {
+    fn label(&self) -> String {
+        "Add tack".into()
+    }
+
+    fn apply(&mut self, doc: &mut Document) {
+        let id = *self.id.get_or_insert_with(|| doc.allocate_tack_id());
+        doc.tacks.push(Tack {
+            id,
+            a: self.a,
+            b: self.b,
+        });
+    }
+
+    fn undo(&mut self, doc: &mut Document) {
+        if let Some(id) = self.id {
+            doc.tacks.retain(|t| t.id != id);
+        }
+    }
+}
+
+pub struct RemoveTack {
+    id: TackId,
+    /// The removed tack and its position, kept for undo.
+    removed: Option<(usize, Tack)>,
+}
+
+impl RemoveTack {
+    pub fn new(id: TackId) -> Self {
+        Self { id, removed: None }
+    }
+}
+
+impl Command for RemoveTack {
+    fn label(&self) -> String {
+        "Remove tack".into()
+    }
+
+    fn apply(&mut self, doc: &mut Document) {
+        if let Some(index) = doc.tacks.iter().position(|t| t.id == self.id) {
+            self.removed = Some((index, doc.tacks.remove(index)));
+        }
+    }
+
+    fn undo(&mut self, doc: &mut Document) {
+        if let Some((index, tack)) = self.removed.take() {
+            doc.tacks.insert(index.min(doc.tacks.len()), tack);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -927,5 +997,36 @@ mod tests {
         assert!(doc.sewing_lines.is_empty());
         remove.undo(&mut doc);
         assert_eq!(doc.sewing_lines[0].id, seam_id);
+    }
+
+    #[test]
+    fn tacks_round_trip() {
+        let (mut doc, id) = doc_with_rect();
+        let before = doc.tacks.clone();
+
+        let a = SeamPoint {
+            pattern: id,
+            index: 0,
+        };
+        let b = SeamPoint {
+            pattern: id,
+            index: 2,
+        };
+        let mut tack = AddTack::new(a, b);
+        tack.apply(&mut doc);
+        let tack_id = tack.id().unwrap();
+        assert_eq!(doc.tacks.len(), 1);
+        assert_eq!(doc.tacks[0].a, a);
+        assert_eq!(doc.tacks[0].b, b);
+        tack.undo(&mut doc);
+        assert_eq!(doc.tacks, before);
+        tack.apply(&mut doc);
+        assert_eq!(doc.tacks[0].id, tack_id);
+
+        let mut remove = RemoveTack::new(tack_id);
+        remove.apply(&mut doc);
+        assert!(doc.tacks.is_empty());
+        remove.undo(&mut doc);
+        assert_eq!(doc.tacks[0].id, tack_id);
     }
 }

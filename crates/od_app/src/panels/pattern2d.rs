@@ -7,9 +7,9 @@ use egui::{
 };
 use od_core::document::TOLERANCE;
 use od_core::{
-    geometry, AddInternalLine, AddNotch, AddSewingLine, Document, InsertPoint, MovePattern,
-    MovePoint, OutlinePoint, Pattern, PatternId, PatternValue, PointKind, RemoveNotch,
-    RemoveSewingLine, SeamEdge, SetPointKind, Vec2,
+    geometry, AddInternalLine, AddNotch, AddSewingLine, AddTack, Document, InsertPoint,
+    MovePattern, MovePoint, OutlinePoint, Pattern, PatternId, PatternValue, PointKind, RemoveNotch,
+    RemoveSewingLine, RemoveTack, SeamEdge, SeamPoint, SetPointKind, Vec2,
 };
 
 use crate::app::{Session, Tool};
@@ -61,8 +61,17 @@ pub struct Canvas2D {
     cursor: Option<(Vec2, Option<Snapped>)>,
     /// Outline point selected with the edit-points tool.
     pub selected_point: Option<(PatternId, usize)>,
-    /// First edge picked with the sew tool, waiting for a second to match.
-    sew_pending: Option<SeamEdge>,
+    /// First edge or point picked with the sew tool, waiting for a second
+    /// to match.
+    sew_pending: Option<SewPick>,
+}
+
+/// What the sew tool has picked so far: a whole edge to sew, or an exact
+/// outline point to tack.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum SewPick {
+    Edge(SeamEdge),
+    Point(SeamPoint),
 }
 
 enum Drag {
@@ -329,8 +338,10 @@ pub fn ui(ui: &mut egui::Ui, s: &mut Session) {
         }
         Tool::Notch => "Click an outline to add a notch · click a notch to remove it",
         Tool::Sew => match s.canvas.sew_pending {
-            Some(_) => "Click the matching edge on another pattern (or the same one) to sew · Esc cancels",
-            None => "Click an edge to start a seam · click a sewn edge to unsew it",
+            Some(_) => "Click the matching edge or point to finish · Esc cancels",
+            None => {
+                "Click an edge to sew, or an exact point to tack · click a sewn edge or tack to remove it"
+            }
         },
     };
     painter.text(
@@ -620,7 +631,10 @@ fn handle_notch(response: &egui::Response, rect: Rect, s: &mut Session) {
 }
 
 /// Click an outline edge to pick it for sewing; click a second edge to sew
-/// it to the first; click an already-sewn edge to unsew it.
+/// it to the first; click an already-sewn edge to unsew it. Clicking an
+/// exact outline point (rather than along an edge) picks it for a tack
+/// instead: a point-to-point stitch, for dart tips and single alignment
+/// marks that shouldn't imply a whole sewn seam.
 fn handle_sew(response: &egui::Response, rect: Rect, s: &mut Session) {
     if response.ctx.input(|i| i.key_pressed(Key::Escape)) {
         s.canvas.sew_pending = None;
@@ -634,36 +648,60 @@ fn handle_sew(response: &egui::Response, rect: Rect, s: &mut Session) {
     else {
         return;
     };
+
+    if let Some((id, index)) = s.canvas.point_at(&s.doc, s.selection, p) {
+        handle_sew_pick(s, id, SewPick::Point(SeamPoint { pattern: id, index }));
+        return;
+    }
     let Some(hit) = s.canvas.edge_at(&s.doc, s.selection, p) else {
         return;
     };
     let Some(pattern) = s.doc.pattern(hit.id) else {
         return;
     };
-    s.selection = Some(hit.id);
     let (start, end) = pattern.segment_at(hit.param);
     let edge = SeamEdge {
         pattern: hit.id,
         start,
         end,
     };
+    handle_sew_pick(s, hit.id, SewPick::Edge(edge));
+}
 
-    // Clicking an edge that is already sewn unsews it.
-    let sewn = s
-        .doc
-        .sewing_lines
-        .iter()
-        .find(|sl| sl.a == edge || sl.b == edge);
-    if let Some(sewn) = sewn {
-        s.canvas.sew_pending = None;
-        s.execute(RemoveSewingLine::new(sewn.id));
-        return;
+/// Handle one click of the sew tool once it has worked out what was picked:
+/// unsew an existing match, complete a pending pick into a seam or tack, or
+/// start a new pending pick.
+fn handle_sew_pick(s: &mut Session, pattern: PatternId, pick: SewPick) {
+    s.selection = Some(pattern);
+    match pick {
+        SewPick::Edge(edge) => {
+            let sewn = s
+                .doc
+                .sewing_lines
+                .iter()
+                .find(|sl| sl.a == edge || sl.b == edge);
+            if let Some(sewn) = sewn {
+                s.canvas.sew_pending = None;
+                s.execute(RemoveSewingLine::new(sewn.id));
+                return;
+            }
+        }
+        SewPick::Point(point) => {
+            let tacked = s.doc.tacks.iter().find(|t| t.a == point || t.b == point);
+            if let Some(tacked) = tacked {
+                s.canvas.sew_pending = None;
+                s.execute(RemoveTack::new(tacked.id));
+                return;
+            }
+        }
     }
 
-    match s.canvas.sew_pending.take() {
-        Some(first) if first == edge => {} // clicked the same edge again: cancel
-        Some(first) => s.execute(AddSewingLine::new(first, edge)),
-        None => s.canvas.sew_pending = Some(edge),
+    match (s.canvas.sew_pending.take(), pick) {
+        (Some(first), second) if first == second => {} // clicked the same spot again: cancel
+        (Some(SewPick::Edge(a)), SewPick::Edge(b)) => s.execute(AddSewingLine::new(a, b)),
+        (Some(SewPick::Point(a)), SewPick::Point(b)) => s.execute(AddTack::new(a, b)),
+        // Mixing an edge pick with a point pick starts over with the new one.
+        (_, pick) => s.canvas.sew_pending = Some(pick),
     }
 }
 
@@ -810,6 +848,23 @@ fn draw_sewing_lines(painter: &egui::Painter, rect: Rect, s: &Session, pal: &the
             painter.add(Shape::line(points, stroke));
         }
     };
+    let tack_radius = s.canvas.px(5.0);
+    let draw_point = |point: &SeamPoint, color: Color32| {
+        let Some(pos) = s
+            .doc
+            .pattern(point.pattern)
+            .and_then(|pat| pat.outline.get(point.index))
+            .map(|op| to_screen(op.pos))
+        else {
+            return;
+        };
+        painter.circle_filled(pos, tack_radius, color);
+        painter.circle_stroke(pos, tack_radius, Stroke::new(1.5, pal.canvas_bg));
+    };
+    for tack in &s.doc.tacks {
+        draw_point(&tack.a, pal.accent);
+        draw_point(&tack.b, pal.accent);
+    }
     for line in &s.doc.sewing_lines {
         let mismatch = line.length_mismatch(&s.doc);
         if line.is_length_mismatched(&s.doc) {
@@ -832,8 +887,10 @@ fn draw_sewing_lines(painter: &egui::Painter, rect: Rect, s: &Session, pal: &the
             draw_edge(&line.b, stroke);
         }
     }
-    if let Some(pending) = &s.canvas.sew_pending {
-        draw_edge(pending, Stroke::new(3.0, pal.selected));
+    match &s.canvas.sew_pending {
+        Some(SewPick::Edge(edge)) => draw_edge(edge, Stroke::new(3.0, pal.selected)),
+        Some(SewPick::Point(point)) => draw_point(point, pal.selected),
+        None => {}
     }
 }
 

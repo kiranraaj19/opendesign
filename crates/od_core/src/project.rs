@@ -1,7 +1,7 @@
 //! Project files (`.odproj`): a versioned JSON wrapper around a [`Document`].
 //!
 //! ```json
-//! { "format": "opendesign-project", "version": 3, "document": { ... } }
+//! { "format": "opendesign-project", "version": 4, "document": { ... } }
 //! ```
 //!
 //! Older versions are upgraded on load by the `migrate_*` steps below, so a
@@ -24,7 +24,8 @@ pub const FORMAT: &str = "opendesign-project";
 /// - 2: outline points carry a kind (corner or curve); patterns gain seam
 ///   allowance, grainline, notches and internal lines.
 /// - 3: the document gains sewing lines.
-pub const VERSION: u32 = 3;
+/// - 4: the document gains tacks.
+pub const VERSION: u32 = 4;
 
 #[derive(Debug)]
 pub enum ProjectError {
@@ -107,6 +108,17 @@ fn migrate_v2(doc: &mut serde_json::Value) {
     object.insert("next_sewing_id".into(), json!(1));
 }
 
+/// Upgrade a version 3 document to version 4 in place: nothing was tacked
+/// yet.
+fn migrate_v3(doc: &mut serde_json::Value) {
+    use serde_json::json;
+    let Some(object) = doc.as_object_mut() else {
+        return; // leave it for deserialisation to report
+    };
+    object.insert("tacks".into(), json!([]));
+    object.insert("next_tack_id".into(), json!(1));
+}
+
 pub fn to_json(doc: &Document) -> String {
     let file = FileOut {
         format: FORMAT,
@@ -142,6 +154,9 @@ pub fn from_json(text: &str) -> Result<Document, ProjectError> {
     }
     if header.version < 3 {
         migrate_v2(&mut body);
+    }
+    if header.version < 4 {
+        migrate_v3(&mut body);
     }
     let mut doc: Document = serde_json::from_value(body).map_err(ProjectError::Malformed)?;
     doc.validate().map_err(ProjectError::DuplicateId)?;
@@ -220,7 +235,7 @@ mod tests {
             Err(ProjectError::NotAProject)
         ));
         assert!(matches!(
-            from_json(&good.replace("\"version\": 3", "\"version\": 99")),
+            from_json(&good.replace("\"version\": 4", "\"version\": 99")),
             Err(ProjectError::UnsupportedVersion(99))
         ));
         let dup = good.replace("\"id\": 2", "\"id\": 1");
@@ -243,7 +258,7 @@ mod tests {
         doc.patterns[0].seam_allowance = 7.5;
 
         let text = to_json(&doc);
-        assert!(text.contains("\"version\": 3"));
+        assert!(text.contains("\"version\": 4"));
         assert!(text.contains("\"kind\": \"curve\""));
         assert_eq!(from_json(&text).unwrap(), doc);
     }
@@ -292,7 +307,7 @@ mod tests {
 
         // Saving writes the current version, which loads back the same.
         let resaved = to_json(&doc);
-        assert!(resaved.contains("\"version\": 3"));
+        assert!(resaved.contains("\"version\": 4"));
         assert_eq!(from_json(&resaved).unwrap(), doc);
     }
 
@@ -348,7 +363,60 @@ mod tests {
 
         // Saving writes the current version, which loads back the same.
         let resaved = to_json(&doc);
-        assert!(resaved.contains("\"version\": 3"));
+        assert!(resaved.contains("\"version\": 4"));
+        assert_eq!(from_json(&resaved).unwrap(), doc);
+    }
+
+    /// A file exactly as the first Phase 5 commit (format version 3) wrote
+    /// it: sewing, but no tacks.
+    const V3_FILE: &str = r#"{
+  "format": "opendesign-project",
+  "version": 3,
+  "document": {
+    "name": "Old shirt",
+    "patterns": [
+      {
+        "id": 4,
+        "name": "Front",
+        "outline": [
+          { "x": 0.0, "y": 0.0, "kind": "corner" },
+          { "x": 500.0, "y": 0.0, "kind": "corner" },
+          { "x": 500.0, "y": 600.0, "kind": "corner" },
+          { "x": 0.0, "y": 600.0, "kind": "corner" }
+        ],
+        "seam_allowance": 10.0,
+        "grain_angle": 0.0,
+        "notches": [],
+        "internal_lines": []
+      }
+    ],
+    "sewing_lines": [],
+    "next_id": 5,
+    "next_sewing_id": 1
+  }
+}"#;
+
+    #[test]
+    fn version_3_files_load_with_no_tacks() {
+        let mut doc = from_json(V3_FILE).unwrap();
+        assert!(doc.tacks.is_empty());
+
+        let id = doc.patterns[0].id;
+        let mut tack = crate::command::AddTack::new(
+            crate::document::SeamPoint {
+                pattern: id,
+                index: 0,
+            },
+            crate::document::SeamPoint {
+                pattern: id,
+                index: 2,
+            },
+        );
+        tack.apply(&mut doc);
+        assert_eq!(doc.tacks.len(), 1);
+
+        let resaved = to_json(&doc);
+        assert!(resaved.contains("\"version\": 4"));
         assert_eq!(from_json(&resaved).unwrap(), doc);
     }
 

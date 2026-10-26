@@ -10,14 +10,14 @@ pub mod history;
 pub mod project;
 
 pub use command::{
-    AddInternalLine, AddNotch, AddPattern, AddSewingLine, Command, DeletePattern, DeletePoint,
-    DuplicatePattern, InsertPoint, MirrorPattern, MovePattern, MovePoint, PatternValue,
-    RemoveInternalLine, RemoveNotch, RemoveSewingLine, RenamePattern, SetPatternValue,
-    SetPointKind,
+    AddInternalLine, AddNotch, AddPattern, AddSewingLine, AddTack, Command, DeletePattern,
+    DeletePoint, DuplicatePattern, InsertPoint, MirrorPattern, MovePattern, MovePoint,
+    PatternValue, RemoveInternalLine, RemoveNotch, RemoveSewingLine, RemoveTack, RenamePattern,
+    SetPatternValue, SetPointKind,
 };
 pub use document::{
     Axis, Document, InternalLine, Notch, OutlinePoint, Pattern, PatternId, PointKind, SeamEdge,
-    SewingLine, SewingLineId,
+    SeamPoint, SewingLine, SewingLineId, Tack, TackId,
 };
 pub use geometry::Vec2;
 pub use history::History;

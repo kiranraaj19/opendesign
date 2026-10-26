@@ -99,6 +99,27 @@ pub struct SewingLine {
 /// garment is draped).
 pub const LENGTH_MISMATCH_TOLERANCE: f32 = 0.03;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct TackId(pub u64);
+
+/// A single outline point, referenced by a [`Tack`].
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct SeamPoint {
+    pub pattern: PatternId,
+    pub index: usize,
+}
+
+/// A point-to-point stitch: pins two outline points together (a dart tip, a
+/// single alignment mark) without implying a sewn edge between them, the
+/// way a [`SewingLine`] does.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Tack {
+    pub id: TackId,
+    pub a: SeamPoint,
+    pub b: SeamPoint,
+}
+
 impl SewingLine {
     /// The lengths in mm of edges `a` and `b`. `None` if either referenced
     /// pattern no longer exists.
@@ -434,8 +455,10 @@ pub struct Document {
     pub name: String,
     pub patterns: Vec<Pattern>,
     pub sewing_lines: Vec<SewingLine>,
+    pub tacks: Vec<Tack>,
     next_id: u64,
     next_sewing_id: u64,
+    next_tack_id: u64,
 }
 
 impl Default for Document {
@@ -450,8 +473,10 @@ impl Document {
             name: name.into(),
             patterns: Vec::new(),
             sewing_lines: Vec::new(),
+            tacks: Vec::new(),
             next_id: 1,
             next_sewing_id: 1,
+            next_tack_id: 1,
         }
     }
 
@@ -467,6 +492,8 @@ impl Document {
         self.next_id = self.next_id.max(max + 1);
         let smax = self.sewing_lines.iter().map(|s| s.id.0).max().unwrap_or(0);
         self.next_sewing_id = self.next_sewing_id.max(smax + 1);
+        let tmax = self.tacks.iter().map(|t| t.id.0).max().unwrap_or(0);
+        self.next_tack_id = self.next_tack_id.max(tmax + 1);
         Ok(())
     }
 
@@ -481,6 +508,13 @@ impl Document {
     pub fn allocate_sewing_id(&mut self) -> SewingLineId {
         let id = SewingLineId(self.next_sewing_id);
         self.next_sewing_id += 1;
+        id
+    }
+
+    /// Reserve a fresh tack id. Ids are never reused, even after undo.
+    pub fn allocate_tack_id(&mut self) -> TackId {
+        let id = TackId(self.next_tack_id);
+        self.next_tack_id += 1;
         id
     }
 
