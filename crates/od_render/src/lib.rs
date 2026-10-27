@@ -6,6 +6,7 @@
 
 pub mod avatar;
 pub mod camera;
+pub mod export;
 pub mod gpu;
 pub mod import;
 pub mod mesh;

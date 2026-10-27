@@ -337,6 +337,40 @@ impl OpenDesignApp {
                     files.save_as(s);
                 }
                 ui.separator();
+                ui.menu_button("Export", |ui| {
+                    ui.add_enabled_ui(crate::export::garment_mesh(s).is_some(), |ui| {
+                        if ui
+                            .button("Draped garment as OBJ…")
+                            .on_hover_text(
+                                "Drape the garment first (3D garment view) to export its mesh.",
+                            )
+                            .clicked()
+                        {
+                            if let Some(err) = crate::export::export_obj(s) {
+                                files.error = Some(err);
+                            }
+                        }
+                        if ui
+                            .button("Draped garment as glTF (.glb)…")
+                            .on_hover_text(
+                                "Drape the garment first (3D garment view) to export its mesh.",
+                            )
+                            .clicked()
+                        {
+                            if let Some(err) = crate::export::export_gltf(s) {
+                                files.error = Some(err);
+                            }
+                        }
+                    });
+                    ui.add_enabled_ui(!s.doc.patterns.is_empty(), |ui| {
+                        if ui.button("Patterns as DXF (AAMA)…").clicked() {
+                            if let Some(err) = crate::export::export_dxf(s) {
+                                files.error = Some(err);
+                            }
+                        }
+                    });
+                });
+                ui.separator();
                 if ui.add(item("Quit", "Ctrl+Q")).clicked() {
                     files.request(s, &ctx, Discard::Quit);
                 }

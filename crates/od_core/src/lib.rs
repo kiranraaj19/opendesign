@@ -5,6 +5,7 @@
 
 pub mod command;
 pub mod document;
+pub mod dxf;
 pub mod geometry;
 pub mod history;
 pub mod project;
