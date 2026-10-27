@@ -8,6 +8,7 @@ use od_core::{
 };
 
 use crate::files::{Discard, FileState, RECENT_KEY};
+use crate::i18n::{self, Key as TKey, Locale};
 use crate::panels::{
     self, pattern2d::Canvas2D, properties::PropertiesState, viewport3d::Viewport3D,
 };
@@ -34,6 +35,9 @@ impl Tab {
 
 /// Storage key for the dock layout. Bump the suffix if `Tab` changes shape.
 const LAYOUT_KEY: &str = "dock_layout_v1";
+
+/// Storage key for the UI language preference (see `crate::i18n`).
+const LOCALE_KEY: &str = "locale_v1";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Tool {
@@ -223,6 +227,7 @@ pub struct OpenDesignApp {
     session: Session,
     files: FileState,
     show_about: bool,
+    locale: Locale,
 }
 
 impl OpenDesignApp {
@@ -245,6 +250,10 @@ impl OpenDesignApp {
                     .unwrap_or_default(),
             ),
             show_about: false,
+            locale: cc
+                .storage
+                .and_then(|s| eframe::get_value(s, LOCALE_KEY))
+                .unwrap_or_default(),
         }
     }
 
@@ -296,19 +305,21 @@ impl OpenDesignApp {
     }
 
     fn menu_bar(&mut self, ui: &mut egui::Ui) {
+        let locale = self.locale;
+        let tr = |key| i18n::t(locale, key);
         egui::MenuBar::new().ui(ui, |ui| {
             let (s, files) = (&mut self.session, &mut self.files);
-            ui.menu_button("File", |ui| {
+            ui.menu_button(tr(TKey::MenuFile), |ui| {
                 let ctx = ui.ctx().clone();
                 let item = |label, keys| egui::Button::new(label).shortcut_text(keys);
-                if ui.add(item("New", "Ctrl+N")).clicked() {
+                if ui.add(item(tr(TKey::New), "Ctrl+N")).clicked() {
                     files.request(s, &ctx, Discard::New);
                 }
-                if ui.add(item("Open…", "Ctrl+O")).clicked() {
+                if ui.add(item(tr(TKey::Open), "Ctrl+O")).clicked() {
                     files.request(s, &ctx, Discard::Open(None));
                 }
                 ui.add_enabled_ui(!files.recent.is_empty(), |ui| {
-                    ui.menu_button("Open Recent", |ui| {
+                    ui.menu_button(tr(TKey::OpenRecent), |ui| {
                         let mut chosen = None;
                         for path in &files.recent {
                             let name = path.file_name().unwrap_or_default().to_string_lossy();
@@ -321,7 +332,7 @@ impl OpenDesignApp {
                             }
                         }
                         ui.separator();
-                        if ui.button("Clear recent").clicked() {
+                        if ui.button(tr(TKey::ClearRecent)).clicked() {
                             files.recent.clear();
                         }
                         if let Some(path) = chosen {
@@ -330,10 +341,10 @@ impl OpenDesignApp {
                     });
                 });
                 ui.separator();
-                if ui.add(item("Save", "Ctrl+S")).clicked() {
+                if ui.add(item(tr(TKey::Save), "Ctrl+S")).clicked() {
                     files.save(s);
                 }
-                if ui.add(item("Save As…", "Ctrl+Shift+S")).clicked() {
+                if ui.add(item(tr(TKey::SaveAs), "Ctrl+Shift+S")).clicked() {
                     files.save_as(s);
                 }
                 ui.separator();
@@ -371,15 +382,17 @@ impl OpenDesignApp {
                     });
                 });
                 ui.separator();
-                if ui.add(item("Quit", "Ctrl+Q")).clicked() {
+                if ui.add(item(tr(TKey::Quit), "Ctrl+Q")).clicked() {
                     files.request(s, &ctx, Discard::Quit);
                 }
             });
-            ui.menu_button("Edit", |ui| {
+            ui.menu_button(tr(TKey::MenuEdit), |ui| {
                 let undo = s
                     .history
                     .undo_label()
-                    .map_or("Undo".into(), |l| format!("Undo {l}"));
+                    .map_or(tr(TKey::Undo).to_owned(), |l| {
+                        format!("{} {l}", tr(TKey::Undo))
+                    });
                 if ui
                     .add_enabled(
                         s.history.can_undo(),
@@ -392,7 +405,9 @@ impl OpenDesignApp {
                 let redo = s
                     .history
                     .redo_label()
-                    .map_or("Redo".into(), |l| format!("Redo {l}"));
+                    .map_or(tr(TKey::Redo).to_owned(), |l| {
+                        format!("{} {l}", tr(TKey::Redo))
+                    });
                 if ui
                     .add_enabled(
                         s.history.can_redo(),
@@ -406,14 +421,14 @@ impl OpenDesignApp {
                 if ui
                     .add_enabled(
                         s.selection.is_some(),
-                        egui::Button::new("Delete").shortcut_text("Del"),
+                        egui::Button::new(tr(TKey::Delete)).shortcut_text("Del"),
                     )
                     .clicked()
                 {
                     s.delete_selected();
                 }
             });
-            ui.menu_button("View", |ui| {
+            ui.menu_button(tr(TKey::MenuView), |ui| {
                 ui.checkbox(&mut s.canvas.snap.grid, "Snap to grid");
                 ui.checkbox(&mut s.canvas.snap.points, "Snap to points");
                 ui.separator();
@@ -422,8 +437,19 @@ impl OpenDesignApp {
                 }
                 ui.separator();
                 egui::widgets::global_theme_preference_buttons(ui);
+                ui.separator();
+                ui.menu_button(tr(TKey::Language), |ui| {
+                    for candidate in Locale::ALL {
+                        if ui
+                            .selectable_label(self.locale == candidate, candidate.display_name())
+                            .clicked()
+                        {
+                            self.locale = candidate;
+                        }
+                    }
+                });
             });
-            ui.menu_button("Help", |ui| {
+            ui.menu_button(tr(TKey::MenuHelp), |ui| {
                 if ui.button("About OpenDesign").clicked() {
                     self.show_about = true;
                 }
@@ -536,6 +562,7 @@ impl eframe::App for OpenDesignApp {
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
         eframe::set_value(storage, LAYOUT_KEY, &self.dock);
         eframe::set_value(storage, RECENT_KEY, &self.files.recent);
+        eframe::set_value(storage, LOCALE_KEY, &self.locale);
     }
 }
 
@@ -676,6 +703,39 @@ mod tests {
         h.get_by_label("Reset layout").click();
         h.run();
         assert_eq!(positions(&h.state().dock), positions(&default_layout()));
+    }
+
+    // ---- Localisation (Phase 13) ----
+
+    #[test]
+    fn language_picker_switches_menu_labels() {
+        let mut h = harness();
+        assert_eq!(h.state().locale, Locale::En);
+
+        h.get_by_label("View").click();
+        h.run();
+        h.get_by_label("Language ⏵").click();
+        h.run();
+        h.get_by_label("Français").click();
+        h.run();
+        assert_eq!(h.state().locale, Locale::Fr);
+
+        // Close the (now French) View menu, then the File menu label
+        // itself should read "Fichier" — proving the switch reaches the
+        // top-level menu bar, not just the picker's own submenu.
+        h.run();
+        assert!(h.query_by_label("Fichier").is_some());
+        assert!(h.query_by_label("File").is_none());
+
+        // Switch back: English is what every other UI test in this
+        // module relies on via literal labels like "File"/"Save".
+        h.get_by_label("Affichage").click();
+        h.run();
+        h.get_by_label("Langue ⏵").click();
+        h.run();
+        h.get_by_label("English").click();
+        h.run();
+        assert_eq!(h.state().locale, Locale::En);
     }
 
     // ---- Files (Phase 2) ----

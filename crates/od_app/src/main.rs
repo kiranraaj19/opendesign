@@ -4,6 +4,7 @@
 mod app;
 mod export;
 mod files;
+mod i18n;
 mod panels;
 mod theme;
 

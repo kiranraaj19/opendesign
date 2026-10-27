@@ -8,6 +8,8 @@ pub mod document;
 pub mod dxf;
 pub mod geometry;
 pub mod history;
+#[cfg(feature = "python-plugins")]
+pub mod plugin;
 pub mod project;
 
 pub use command::{
