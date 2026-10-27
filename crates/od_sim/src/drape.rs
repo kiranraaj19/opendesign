@@ -37,6 +37,7 @@ impl Drape {
         let scene = cloth::build(doc, placements, config);
         let mut world = World::new(scene.particles);
         world.distance_constraints = scene.structural;
+        world.distance_constraints.extend(scene.bending);
         world.distance_constraints.extend(scene.stitches);
         Self {
             world,

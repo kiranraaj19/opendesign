@@ -23,6 +23,11 @@ pub struct ClothConfig {
     /// weight it by the Voronoi area the particle covers.
     pub particle_mass: f32,
     pub structural_compliance: f32,
+    /// Compliance of the cross-edge constraint that resists folding at
+    /// each interior triangle edge (see [`bending_pairs`]). Real cloth
+    /// bends far more easily than it stretches, so this is softer than
+    /// `structural_compliance`.
+    pub bending_compliance: f32,
     pub stitch_compliance: f32,
 }
 
@@ -31,6 +36,7 @@ impl Default for ClothConfig {
         Self {
             particle_mass: 0.01,
             structural_compliance: 1e-7,
+            bending_compliance: 1e-5,
             stitch_compliance: 1e-7,
         }
     }
@@ -43,6 +49,7 @@ impl Default for ClothConfig {
 pub struct ClothScene {
     pub particles: Vec<Particle>,
     pub structural: Vec<DistanceConstraint>,
+    pub bending: Vec<DistanceConstraint>,
     pub stitches: Vec<DistanceConstraint>,
     pub pattern_ranges: Vec<(PatternId, Range<usize>)>,
     /// Each pattern's triangulated faces, as indices local to its own
@@ -79,6 +86,26 @@ fn points_in_range(flat: &[FlatPoint], outline_len: usize, start: f32, end: f32)
     matches.sort_by(|a, b| a.0.total_cmp(&b.0));
     matches.dedup_by_key(|&mut (_, i)| i);
     matches.into_iter().map(|(_, i)| i).collect()
+}
+
+/// For each edge shared by exactly two of `faces` (i.e. not on the
+/// boundary), the pair of vertices opposite it in those two triangles —
+/// the vertices a bending constraint should span to resist folding along
+/// that edge. Local indices, into whatever `faces` indexes.
+fn bending_pairs(faces: &[[u32; 3]]) -> Vec<(u32, u32)> {
+    let mut opposite: HashMap<(u32, u32), Vec<u32>> = HashMap::new();
+    for &[a, b, c] in faces {
+        for (x, y, opp) in [(a, b, c), (b, c, a), (c, a, b)] {
+            opposite.entry((x.min(y), x.max(y))).or_default().push(opp);
+        }
+    }
+    opposite
+        .into_values()
+        .filter_map(|opps| match opps.as_slice() {
+            [p, q] if p != q => Some((*p, *q)),
+            _ => None,
+        })
+        .collect()
 }
 
 /// One side of a seam, as the particles it touches in travel order along
@@ -163,6 +190,7 @@ pub fn build(
     let mut particles = Vec::new();
     let mut structural_edges: BTreeSet<(usize, usize)> = BTreeSet::new();
     let mut structural = Vec::new();
+    let mut bending = Vec::new();
     let mut pattern_ranges = Vec::new();
     let mut pattern_faces = Vec::new();
     let mut layouts: HashMap<PatternId, PatternLayout> = HashMap::new();
@@ -195,6 +223,16 @@ pub fn build(
                     ));
                 }
             }
+        }
+        for (p, q) in bending_pairs(&faces) {
+            let (ga, gb) = (offset + p as usize, offset + q as usize);
+            let rest_length = world[p as usize].distance(world[q as usize]);
+            bending.push(DistanceConstraint::new(
+                ga.min(gb),
+                ga.max(gb),
+                rest_length,
+                config.bending_compliance,
+            ));
         }
         pattern_faces.push((*id, faces));
 
@@ -245,6 +283,7 @@ pub fn build(
     ClothScene {
         particles,
         structural,
+        bending,
         stitches,
         pattern_ranges,
         pattern_faces,
@@ -254,6 +293,7 @@ pub fn build(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::xpbd::World;
     use od_core::document::{
         OutlinePoint, PatternId as Pid, SeamPoint, SewingLine, SewingLineId, Tack, TackId,
     };
@@ -295,7 +335,50 @@ mod tests {
         assert_eq!(scene.pattern_faces[0].1.len(), 2, "a quad is 2 triangles");
         // A quad triangulates into 2 triangles sharing a diagonal: 5 unique edges.
         assert_eq!(scene.structural.len(), 5);
+        // One bending constraint, across the diagonal, between the quad's
+        // other two corners.
+        assert_eq!(scene.bending.len(), 1);
         assert!(scene.stitches.is_empty());
+    }
+
+    #[test]
+    fn bending_constraint_resists_folding() {
+        let mut doc = Document::new("test");
+        doc.patterns.push(rectangle(1, "panel", 300.0, 300.0));
+        let placements = placements_for(&doc);
+        let scene = build(&doc, &placements, &ClothConfig::default());
+
+        // Pin one edge (corners 0, 1) and let gravity fold the rest down;
+        // measure how far the opposite corner (3) sags after settling.
+        let sag = |include_bending: bool| -> f32 {
+            let mut world = World::new(scene.particles.clone());
+            world.distance_constraints = scene.structural.clone();
+            if include_bending {
+                world.distance_constraints.extend(scene.bending.clone());
+            }
+            world.particles[0].inv_mass = 0.0;
+            world.particles[1].inv_mass = 0.0;
+            for _ in 0..180 {
+                world.step(1.0 / 60.0, 8, &[]);
+            }
+            scene.particles[3].position.y - world.particles[3].position.y
+        };
+
+        let with_bending = sag(true);
+        let without_bending = sag(false);
+        assert!(
+            with_bending < without_bending,
+            "bending should resist folding: {with_bending} vs {without_bending}"
+        );
+    }
+
+    #[test]
+    fn bending_pairs_span_the_quads_other_diagonal() {
+        // Earcut splits a convex quad along one diagonal into two
+        // triangles; the two corners NOT on that diagonal are the pair a
+        // bending constraint should connect.
+        let pairs = bending_pairs(&[[0, 1, 2], [0, 2, 3]]);
+        assert_eq!(pairs, vec![(1, 3)]);
     }
 
     #[test]
