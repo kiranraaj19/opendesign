@@ -7,6 +7,8 @@ pub mod command;
 pub mod document;
 pub mod geometry;
 pub mod history;
+#[cfg(feature = "python-plugins")]
+pub mod plugin;
 pub mod project;
 
 pub use command::{

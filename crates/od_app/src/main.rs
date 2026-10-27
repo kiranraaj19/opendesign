@@ -3,6 +3,7 @@
 
 mod app;
 mod files;
+mod i18n;
 mod panels;
 mod theme;
 

@@ -10,3 +10,11 @@ earcutr = "0.5"
 kurbo = "0.13"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
+pyo3 = { version = "0.23", features = ["auto-initialize"], optional = true }
+
+[features]
+# Off by default: pulls in pyo3, which embeds a Python interpreter and
+# needs a `python3` dev install plus (on Windows) linking against
+# python3.dll. See crates/od_core/src/plugin.rs for why this is kept
+# feature-gated rather than always-on.
+python-plugins = ["pyo3"]
