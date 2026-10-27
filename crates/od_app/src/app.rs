@@ -3,8 +3,9 @@
 use egui::{Key, KeyboardShortcut, Modifiers};
 use egui_dock::{DockArea, DockState, NodeIndex, Style, TabViewer};
 use od_core::{
-    AddPattern, Axis, Command, DeletePattern, DeletePoint, Document, DuplicatePattern, History,
-    MirrorPattern, OutlinePoint, PatternId, SetPointKind, Vec2,
+    AddPattern, AddTack, Axis, Command, DeletePattern, DeletePoint, Document, DuplicatePattern,
+    History, MirrorPattern, OutlinePoint, PatternId, RemoveSewingLine, RemoveTack, SetPointKind,
+    SewingLine, SewingLineId, TackId, TackPoint, TackTarget, Vec2,
 };
 
 use crate::files::{Discard, FileState, RECENT_KEY};
@@ -50,11 +51,12 @@ pub enum Tool {
     Sew,
     Topstitch,
     Trim,
+    Tack,
 }
 
 impl Tool {
     /// Toolbar order, with button label, shortcut key and tooltip.
-    const BUTTONS: [(Tool, &'static str, Key, &'static str); 9] = [
+    const BUTTONS: [(Tool, &'static str, Key, &'static str); 10] = [
         (
             Tool::Select,
             "Select",
@@ -109,6 +111,12 @@ impl Tool {
             Key::B,
             "Click to place a button; Shift+click for a snap; click a trim to remove it (B)",
         ),
+        (
+            Tool::Tack,
+            "Tack",
+            Key::K,
+            "Hold a point on a pattern to another pattern, or to the avatar in the 3D view (K)",
+        ),
     ];
 
     pub fn name(self) -> &'static str {
@@ -122,7 +130,39 @@ impl Tool {
             Tool::Sew => "Sew",
             Tool::Topstitch => "Topstitch",
             Tool::Trim => "Trim",
+            Tool::Tack => "Tack",
         }
+    }
+}
+
+/// Check sewing length: flag seams whose sides differ by more than a
+/// percentage of the shorter one.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SeamCheck {
+    pub enabled: bool,
+    pub percent: f32,
+}
+
+impl Default for SeamCheck {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            percent: od_core::document::LENGTH_MISMATCH_TOLERANCE * 100.0,
+        }
+    }
+}
+
+impl SeamCheck {
+    /// Should `line` be flagged?
+    pub fn flags(&self, doc: &Document, line: &SewingLine) -> bool {
+        self.enabled && line.is_mismatched_by(doc, self.percent / 100.0)
+    }
+
+    /// Seams to flag, in document order.
+    pub fn flagged<'a>(&'a self, doc: &'a Document) -> impl Iterator<Item = &'a SewingLine> + 'a {
+        doc.sewing_lines
+            .iter()
+            .filter(move |line| self.flags(doc, line))
     }
 }
 
@@ -132,6 +172,12 @@ pub struct Session {
     pub doc: Document,
     pub history: History,
     pub selection: Option<PatternId>,
+    /// A selected seam or tack. Selecting one clears the others.
+    pub selected_seam: Option<SewingLineId>,
+    pub selected_tack: Option<TackId>,
+    /// Where a tack being placed starts, in the 2D or 3D view.
+    pub tack_start: Option<TackPoint>,
+    pub seam_check: SeamCheck,
     pub tool: Tool,
     pub canvas: Canvas2D,
     pub viewport: Viewport3D,
@@ -167,7 +213,24 @@ impl Session {
         self.history.redo(&mut self.doc);
     }
 
-    /// Delete the selected point while editing points, else the pattern.
+    /// The Tack tool picked `target`: start a tack there, or finish the
+    /// one already started. Tacks start on a pattern, not the avatar.
+    pub fn tack_to(&mut self, target: TackTarget) {
+        match (self.tack_start.take(), target) {
+            (None, TackTarget::Pattern(start)) => self.tack_start = Some(start),
+            (None, TackTarget::Avatar(_)) => {}
+            (Some(start), target) => {
+                self.execute(AddTack::new(start, target));
+                // A new tack goes last; select it so it shows in Properties.
+                self.selected_tack = self.doc.tacks.last().map(|t| t.id);
+                self.selected_seam = None;
+                self.selection = None;
+            }
+        }
+    }
+
+    /// Delete the selected point while editing points, else the selected
+    /// tack, seam or pattern.
     pub fn delete_selected(&mut self) {
         if let Some((id, index)) = self.canvas.selected_point.take() {
             // An outline needs three points; keep the point selected if so.
@@ -176,6 +239,14 @@ impl Session {
             } else {
                 self.canvas.selected_point = Some((id, index));
             }
+            return;
+        }
+        if let Some(id) = self.selected_tack.take() {
+            self.execute(RemoveTack::new(id));
+            return;
+        }
+        if let Some(id) = self.selected_seam.take() {
+            self.execute(RemoveSewingLine::new(id));
             return;
         }
         if let Some(id) = self.selection.take() {
@@ -221,6 +292,24 @@ impl Session {
         {
             self.selection = None;
         }
+        if self
+            .selected_seam
+            .is_some_and(|id| self.doc.sewing_line(id).is_none())
+        {
+            self.selected_seam = None;
+        }
+        if self
+            .selected_tack
+            .is_some_and(|id| self.doc.tack(id).is_none())
+        {
+            self.selected_tack = None;
+        }
+        if self
+            .tack_start
+            .is_some_and(|t| self.doc.pattern(t.pattern).is_none())
+        {
+            self.tack_start = None;
+        }
         if let Some((id, index)) = self.canvas.selected_point {
             let valid = self.selection == Some(id)
                 && self
@@ -239,6 +328,9 @@ impl Session {
         self.doc = doc;
         self.history.clear();
         self.selection = None;
+        self.selected_seam = None;
+        self.selected_tack = None;
+        self.tack_start = None;
         self.props = PropertiesState::default();
     }
 
@@ -267,6 +359,10 @@ impl OpenDesignApp {
                 doc: Document::default(),
                 history: History::new(),
                 selection: None,
+                selected_seam: None,
+                selected_tack: None,
+                tack_start: None,
+                seam_check: Default::default(),
                 tool: Tool::Select,
                 canvas: Canvas2D::default(),
                 viewport: Viewport3D::new(cc.wgpu_render_state.as_ref()),
@@ -492,7 +588,9 @@ impl OpenDesignApp {
                 ui.separator();
                 if ui
                     .add_enabled(
-                        s.selection.is_some(),
+                        s.selection.is_some()
+                            || s.selected_seam.is_some()
+                            || s.selected_tack.is_some(),
                         egui::Button::new(tr(TKey::Delete)).shortcut_text("Del"),
                     )
                     .clicked()
@@ -503,6 +601,20 @@ impl OpenDesignApp {
             ui.menu_button(tr(TKey::MenuView), |ui| {
                 ui.checkbox(&mut s.canvas.snap.grid, "Snap to grid");
                 ui.checkbox(&mut s.canvas.snap.points, "Snap to points");
+                ui.separator();
+                ui.checkbox(&mut s.seam_check.enabled, "Check sewing length")
+                    .on_hover_text("Show seams whose two sides differ in length in the warning colour");
+                ui.add_enabled_ui(s.seam_check.enabled, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.label("Tolerance");
+                        ui.add(
+                            egui::DragValue::new(&mut s.seam_check.percent)
+                                .range(0.0..=50.0)
+                                .speed(0.1)
+                                .suffix(" %"),
+                        );
+                    });
+                });
                 ui.separator();
                 if ui.button("Reset layout").clicked() {
                     self.dock = default_layout();
@@ -563,22 +675,45 @@ impl OpenDesignApp {
         });
     }
 
-    fn status_bar(&self, ui: &mut egui::Ui) {
-        let s = &self.session;
+    fn status_bar(&mut self, ui: &mut egui::Ui) {
+        let (s, files) = (&mut self.session, &self.files);
         ui.horizontal(|ui| {
             ui.label(format!("Tool: {}", s.tool.name()));
             ui.separator();
-            let selected = s
-                .selection
-                .and_then(|id| s.doc.pattern(id))
-                .map_or("Nothing selected".to_owned(), |p| {
-                    format!("Selected: {}", p.name)
-                });
+            let pattern = s.selection.and_then(|id| s.doc.pattern(id));
+            let selected = match (pattern, s.selected_seam, s.selected_tack) {
+                (Some(p), _, _) => format!("Selected: {}", p.name),
+                (None, Some(_), _) => "Selected: seam".to_owned(),
+                (None, None, Some(_)) => "Selected: tack".to_owned(),
+                (None, None, None) => "Nothing selected".to_owned(),
+            };
             ui.label(selected);
             ui.separator();
             ui.label(format!("{} patterns", s.doc.patterns.len()));
+            ui.separator();
+            ui.label(format!("{} seams", s.doc.sewing_lines.len()));
+            ui.separator();
+            ui.label(format!("{} tacks", s.doc.tacks.len()));
+            let flagged: Vec<SewingLineId> = s.seam_check.flagged(&s.doc).map(|l| l.id).collect();
+            if let Some(&first) = flagged.first() {
+                ui.separator();
+                let text = match flagged.len() {
+                    1 => "1 seam differs in length".to_owned(),
+                    n => format!("{n} seams differ in length"),
+                };
+                let pal = theme::palette(ui.visuals().dark_mode);
+                if ui
+                    .link(egui::RichText::new(text).color(pal.warning))
+                    .on_hover_text("Select the first one")
+                    .clicked()
+                {
+                    s.selected_seam = Some(first);
+                    s.selected_tack = None;
+                    s.selection = None;
+                }
+            }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                match &self.files.path {
+                match &files.path {
                     Some(path) => ui.weak(path.display().to_string()),
                     None => ui.weak("Not saved yet"),
                 };
@@ -1670,7 +1805,7 @@ mod tests {
 
     // ---- Sewing (Phase 5) ----
 
-    use od_core::{SeamEdge, SeamPoint};
+    use od_core::{SeamEdge, TackPoint, TackTarget};
 
     /// Midpoint of outline edge `i -> i + 1` of `patterns[index]`, in doc
     /// space.
@@ -1700,7 +1835,8 @@ mod tests {
                 vec![SeamEdge {
                     pattern: id0,
                     start: 0.0,
-                    end: 1.0
+                    end: 1.0,
+                    forward: true,
                 }],
                 vec![]
             ])
@@ -1719,7 +1855,8 @@ mod tests {
             vec![SeamEdge {
                 pattern: id0,
                 start: 0.0,
-                end: 1.0
+                end: 1.0,
+                forward: true,
             }]
         );
         assert_eq!(
@@ -1727,7 +1864,8 @@ mod tests {
             vec![SeamEdge {
                 pattern: id1,
                 start: 0.0,
-                end: 1.0
+                end: 1.0,
+                forward: true,
             }]
         );
         assert_eq!(last_step(&h), "Sew edges");
@@ -1822,9 +1960,9 @@ mod tests {
         click_at(&mut h, at, Modifiers::NONE);
         assert_eq!(
             h.state().session.canvas.sew_pending_point(),
-            Some(SeamPoint {
+            Some(TackPoint {
                 pattern: id,
-                index: 0
+                at: p0
             })
         );
         let at = screen(&h, p2.x, p2.y);
@@ -1834,17 +1972,17 @@ mod tests {
         assert_eq!(doc.tacks.len(), 1);
         assert_eq!(
             doc.tacks[0].a,
-            SeamPoint {
+            TackPoint {
                 pattern: id,
-                index: 0
+                at: p0
             }
         );
         assert_eq!(
             doc.tacks[0].b,
-            SeamPoint {
+            TackTarget::Pattern(TackPoint {
                 pattern: id,
-                index: 2
-            }
+                at: p2
+            })
         );
         assert_eq!(last_step(&h), "Add tack");
 
@@ -1923,5 +2061,176 @@ mod tests {
             h.state().session.doc.pattern(front).unwrap().fabric,
             od_core::Fabric::silk()
         );
+    }
+
+    // ---- Sewing and tacks ported from claude/phase5-sewing ----
+
+    /// Two 200 × 150 panels, 100 mm apart, and the Sew tool. Outlines run
+    /// (x0,0) (x0+200,0) (x0+200,150) (x0,150).
+    fn sewing_harness() -> Harness<'static, OpenDesignApp> {
+        let mut h = harness();
+        {
+            let s = &mut h.state_mut().session;
+            s.add_pattern(
+                "Left",
+                od_core::geometry::rectangle(Vec2::ZERO, Vec2::new(200.0, 150.0)),
+            );
+            s.add_pattern(
+                "Right",
+                od_core::geometry::rectangle(Vec2::new(300.0, 0.0), Vec2::new(500.0, 150.0)),
+            );
+            s.selection = None;
+        }
+        h.run();
+        press(&mut h, Modifiers::NONE, Key::S);
+        assert_eq!(h.state().session.tool, Tool::Sew);
+        h
+    }
+
+    fn click_mm(h: &mut Harness<'_, OpenDesignApp>, x: f32, y: f32) {
+        let at = screen(h, x, y);
+        click_at(h, at, Modifiers::NONE);
+    }
+
+    fn drag_mm(h: &mut Harness<'_, OpenDesignApp>, from: (f32, f32), to: (f32, f32)) {
+        let (from, to) = (screen(h, from.0, from.1), screen(h, to.0, to.1));
+        drag(h, from, to);
+    }
+
+    /// Sew Left's right edge to Right's left edge, both picked near the top.
+    fn sew_side_seam(h: &mut Harness<'_, OpenDesignApp>) -> od_core::SewingLineId {
+        click_mm(h, 200.0, 25.0);
+        press(h, Modifiers::NONE, Key::Tab);
+        click_mm(h, 300.0, 25.0);
+        press(h, Modifiers::NONE, Key::Enter);
+        h.state().session.doc.sewing_lines[0].id
+    }
+
+    #[test]
+    fn picking_edges_near_matching_ends_sews_them_untwisted() {
+        let mut h = sewing_harness();
+        let id = sew_side_seam(&mut h);
+        let s = &h.state().session;
+        let line = s.doc.sewing_line(id).unwrap();
+        assert!(line.a[0].forward, "Left's right edge runs top-down");
+        assert!(!line.b[0].forward, "Right's left edge runs bottom-up");
+        let start = |side| s.doc.side_point(line, side, 0.0).unwrap().1;
+        assert_eq!(start(od_core::Side::A), Vec2::new(200.0, 0.0));
+        assert_eq!(start(od_core::Side::B), Vec2::new(300.0, 0.0));
+    }
+
+    #[test]
+    fn free_sewing_can_cross_the_outlines_start() {
+        let mut h = sewing_harness();
+        // From 40 mm along Left's top edge, back round its top-left corner
+        // (where the outline starts) and 40 mm down its left edge.
+        drag_mm(&mut h, (40.0, 0.0), (0.0, 40.0));
+        let sides = h.state().session.canvas.sew_pending_edges().unwrap();
+        let edge = sides[0][0];
+        let pattern = h.state().session.doc.patterns[0].clone();
+        let length = pattern.segment_length(edge.start, edge.end, od_core::document::TOLERANCE);
+        assert!((length - 80.0).abs() < 2.0, "{edge:?} is {length} mm");
+        assert!(!edge.forward, "sewn from the top edge back round");
+        assert!(pattern.edge_points(&edge)[0].distance(Vec2::new(40.0, 0.0)) < 1.0);
+    }
+
+    #[test]
+    fn seams_can_be_selected_flipped_edited_and_deleted() {
+        let mut h = sewing_harness();
+        let id = sew_side_seam(&mut h);
+        press(&mut h, Modifiers::NONE, Key::V);
+        click_mm(&mut h, 250.0, 75.0);
+        assert_eq!(h.state().session.selected_seam, None);
+        click_mm(&mut h, 200.0, 75.0);
+        assert_eq!(h.state().session.selected_seam, Some(id));
+        assert_eq!(h.state().session.selection, None);
+        h.get_by_label("Selected: seam");
+        h.get_by_label("1:1");
+
+        click(&mut h, "Flip side B");
+        assert!(h.state().session.doc.sewing_line(id).unwrap().b[0].forward);
+        assert_eq!(last_step(&h), "Flip seam");
+        press(&mut h, Modifiers::COMMAND, Key::Z);
+
+        // Drag side A's first end (Left's top-right corner) 50 mm down.
+        drag_mm(&mut h, (200.0, 0.0), (204.0, 50.0));
+        assert_eq!(last_step(&h), "Edit sewing");
+        let s = &h.state().session;
+        let line = s.doc.sewing_line(id).unwrap();
+        let (a, b) = line.side_lengths(&s.doc).unwrap();
+        assert!(
+            (a - 100.0).abs() < 0.5 && (b - 150.0).abs() < 0.1,
+            "{a} {b}"
+        );
+        assert_eq!(
+            s.doc.patterns[0].outline[1].pos,
+            Vec2::new(200.0, 0.0),
+            "pattern stays"
+        );
+
+        press(&mut h, Modifiers::NONE, Key::Delete);
+        assert!(h.state().session.doc.sewing_lines.is_empty());
+        assert_eq!(h.state().session.doc.patterns.len(), 2);
+        press(&mut h, Modifiers::COMMAND, Key::Z);
+        assert_eq!(h.state().session.doc.sewing_lines.len(), 1);
+    }
+
+    #[test]
+    fn the_length_check_can_be_tuned_and_jumped_to() {
+        let mut h = sewing_harness();
+        // 100 mm of Left's bottom edge against 70 mm of Right's.
+        drag_mm(&mut h, (40.0, 150.0), (140.0, 150.0));
+        press(&mut h, Modifiers::NONE, Key::Tab);
+        drag_mm(&mut h, (320.0, 150.0), (390.0, 150.0));
+        press(&mut h, Modifiers::NONE, Key::Enter);
+        let id = h.state().session.doc.sewing_lines[0].id;
+
+        h.get_by_label("1 seam differs in length").click();
+        h.run();
+        assert_eq!(h.state().session.selected_seam, Some(id));
+
+        h.state_mut().session.seam_check.percent = 50.0;
+        h.run();
+        assert!(h.query_by_label("1 seam differs in length").is_none());
+        h.state_mut().session.seam_check = Default::default();
+        h.state_mut().session.seam_check.enabled = false;
+        h.run();
+        assert!(h.query_by_label("1 seam differs in length").is_none());
+    }
+
+    #[test]
+    fn tack_tool_holds_any_pattern_point_to_another() {
+        let mut h = sewing_harness();
+        press(&mut h, Modifiers::NONE, Key::K);
+        assert_eq!(h.state().session.tool, Tool::Tack);
+        click_mm(&mut h, 250.0, 300.0);
+        assert!(h.state().session.tack_start.is_none(), "off every pattern");
+        click_mm(&mut h, 50.0, 50.0);
+        assert!(h.state().session.tack_start.is_some());
+        press(&mut h, Modifiers::NONE, Key::Escape);
+        assert!(h.state().session.tack_start.is_none(), "Esc cancels");
+
+        click_mm(&mut h, 50.0, 50.0);
+        click_mm(&mut h, 320.0, 60.0);
+        let s = &h.state().session;
+        assert_eq!(s.doc.tacks.len(), 1);
+        let tack = s.doc.tacks[0].clone();
+        assert!(tack.a.at.distance(Vec2::new(50.0, 50.0)) < 1.0);
+        let TackTarget::Pattern(b) = tack.b else {
+            panic!("tacked to a pattern");
+        };
+        assert_eq!(b.pattern, s.doc.patterns[1].id);
+        h.get_by_label("Selected: tack");
+        h.get_by_label("Delete tack");
+
+        press(&mut h, Modifiers::NONE, Key::V);
+        click_mm(&mut h, 250.0, 75.0);
+        assert_eq!(h.state().session.selected_tack, None);
+        click_mm(&mut h, 250.0, 55.0);
+        assert_eq!(h.state().session.selected_tack, Some(tack.id));
+        press(&mut h, Modifiers::NONE, Key::Delete);
+        assert!(h.state().session.doc.tacks.is_empty());
+        press(&mut h, Modifiers::COMMAND, Key::Z);
+        assert_eq!(h.state().session.doc.tacks, [tack]);
     }
 }

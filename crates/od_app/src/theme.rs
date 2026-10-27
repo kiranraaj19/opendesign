@@ -24,6 +24,8 @@ pub struct Palette {
     pub preview: Color32,
     pub avatar: Color32,
     pub warning: Color32,
+    /// Seams, told apart by colour: seam `i` uses `seams[i % len]`.
+    pub seams: [Color32; 6],
 }
 
 pub const DARK: Palette = Palette {
@@ -45,6 +47,14 @@ pub const DARK: Palette = Palette {
     preview: Color32::from_rgb(0x6E, 0xE7, 0xB7),
     avatar: Color32::from_rgb(0x9C, 0x8F, 0x84),
     warning: Color32::from_rgb(0xF4, 0x56, 0x56),
+    seams: [
+        Color32::from_rgb(0x6E, 0xE7, 0xB7),
+        Color32::from_rgb(0xF4, 0x72, 0xB6),
+        Color32::from_rgb(0x60, 0xA5, 0xFA),
+        Color32::from_rgb(0xFA, 0xCC, 0x15),
+        Color32::from_rgb(0xC0, 0x84, 0xFC),
+        Color32::from_rgb(0x2D, 0xD4, 0xBF),
+    ],
 };
 
 pub const LIGHT: Palette = Palette {
@@ -66,6 +76,14 @@ pub const LIGHT: Palette = Palette {
     preview: Color32::from_rgb(0x05, 0x96, 0x69),
     avatar: Color32::from_rgb(0x8A, 0x7A, 0x6C),
     warning: Color32::from_rgb(0xDC, 0x26, 0x26),
+    seams: [
+        Color32::from_rgb(0x05, 0x96, 0x69),
+        Color32::from_rgb(0xDB, 0x27, 0x77),
+        Color32::from_rgb(0x25, 0x63, 0xEB),
+        Color32::from_rgb(0xCA, 0x8A, 0x04),
+        Color32::from_rgb(0x93, 0x33, 0xEA),
+        Color32::from_rgb(0x0D, 0x94, 0x88),
+    ],
 };
 
 pub fn palette(dark: bool) -> &'static Palette {

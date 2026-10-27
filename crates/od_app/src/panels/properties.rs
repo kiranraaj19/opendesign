@@ -34,6 +34,19 @@ pub fn ui(ui: &mut egui::Ui, s: &mut Session) {
     ui.add_space(8.0);
     bom_section(ui, s);
 
+    if let Some(id) = s.selected_tack.filter(|&id| s.doc.tack(id).is_some()) {
+        ui.add_space(8.0);
+        tack_section(ui, s, id);
+        return;
+    }
+    if let Some(id) = s
+        .selected_seam
+        .filter(|&id| s.doc.sewing_line(id).is_some())
+    {
+        ui.add_space(8.0);
+        seam_section(ui, s, id);
+        return;
+    }
     let Some(pattern) = s.selection.and_then(|id| s.doc.pattern(id)) else {
         ui.add_space(8.0);
         ui.weak("Nothing selected.");
@@ -364,4 +377,109 @@ fn bom_section(ui: &mut egui::Ui, s: &mut Session) {
             }
         });
     ui.label(format!("Total fabric: {:.2} m²", total_area_m2(&boms)));
+}
+
+/// A selected seam: its side lengths and what can be done with it.
+fn seam_section(ui: &mut egui::Ui, s: &mut Session, id: od_core::SewingLineId) {
+    use od_core::Side;
+    let Some(line) = s.doc.sewing_line(id) else {
+        return;
+    };
+    let (a, b) = line.side_lengths(&s.doc).unwrap_or_default();
+    let flagged = s.seam_check.flags(&s.doc, line);
+    let names = |side| {
+        let mut names: Vec<&str> = line
+            .side(side)
+            .iter()
+            .filter_map(|e| s.doc.pattern(e.pattern).map(|p| p.name.as_str()))
+            .collect();
+        names.dedup();
+        names.join(", ")
+    };
+    let (names_a, names_b) = (names(Side::A), names(Side::B));
+    let kind = format!("{}:{}", line.a.len(), line.b.len());
+
+    ui.heading("Seam");
+    egui::Grid::new("seam_props")
+        .num_columns(2)
+        .striped(true)
+        .show(ui, |ui| {
+            ui.label("Sewing");
+            ui.label(kind);
+            ui.end_row();
+            ui.label("Side A");
+            ui.label(format!("{a:.1} mm ({names_a})"));
+            ui.end_row();
+            ui.label("Side B");
+            ui.label(format!("{b:.1} mm ({names_b})"));
+            ui.end_row();
+            ui.label("Difference");
+            let diff = format!("{:.1} mm", (a - b).abs());
+            if flagged {
+                let pal = crate::theme::palette(ui.visuals().dark_mode);
+                ui.label(egui::RichText::new(diff).color(pal.warning))
+                    .on_hover_text(format!(
+                        "More than {:.1}% of the shorter side (View menu)",
+                        s.seam_check.percent
+                    ));
+            } else {
+                ui.label(diff);
+            }
+            ui.end_row();
+        });
+    ui.add_space(8.0);
+    ui.horizontal_wrapped(|ui| {
+        if ui
+            .button("Flip side B")
+            .on_hover_text("Sew side B the other way round, to untwist the seam")
+            .clicked()
+        {
+            s.execute(od_core::FlipSeamSide::new(id, Side::B));
+        }
+        if ui.button("Delete seam").clicked() {
+            s.execute(od_core::RemoveSewingLine::new(id));
+            s.selected_seam = None;
+        }
+    });
+}
+
+/// A selected tack: what it holds to what.
+fn tack_section(ui: &mut egui::Ui, s: &mut Session, id: od_core::TackId) {
+    use od_core::TackTarget;
+    let Some(tack) = s.doc.tack(id) else {
+        return;
+    };
+    let name = |pattern| {
+        s.doc
+            .pattern(pattern)
+            .map_or_else(|| "?".to_owned(), |p| p.name.clone())
+    };
+    let from = name(tack.a.pattern);
+    let (to, distance) = match tack.b {
+        TackTarget::Pattern(b) => (name(b.pattern), Some(tack.a.at.distance(b.at))),
+        TackTarget::Avatar(_) => ("Avatar".to_owned(), None),
+    };
+
+    ui.heading("Tack");
+    egui::Grid::new("tack_props")
+        .num_columns(2)
+        .striped(true)
+        .show(ui, |ui| {
+            ui.label("From");
+            ui.label(from);
+            ui.end_row();
+            ui.label("To");
+            ui.label(to);
+            ui.end_row();
+            if let Some(d) = distance {
+                ui.label("Apart in 2D");
+                ui.label(format!("{d:.0} mm"));
+                ui.end_row();
+            }
+        });
+    ui.add_space(8.0);
+    if ui.button("Delete tack").clicked() {
+        s.execute(od_core::RemoveTack::new(id));
+        s.selected_tack = None;
+    }
 }

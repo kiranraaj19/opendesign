@@ -1,7 +1,7 @@
 //! Project files (`.odproj`): a versioned JSON wrapper around a [`Document`].
 //!
 //! ```json
-//! { "format": "opendesign-project", "version": 8, "document": { ... } }
+//! { "format": "opendesign-project", "version": 9, "document": { ... } }
 //! ```
 //!
 //! Older versions are upgraded on load by the `migrate_*` steps below, so a
@@ -14,7 +14,7 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
-use crate::document::{Document, PatternId};
+use crate::document::{Document, Invalid, PatternId, SewingLineId, TackId};
 
 pub const EXTENSION: &str = "odproj";
 pub const FORMAT: &str = "opendesign-project";
@@ -31,7 +31,10 @@ pub const FORMAT: &str = "opendesign-project";
 /// - 6: patterns gain a fabric (mass, stiffness, friction, colour/weave).
 /// - 7: patterns gain topstitch lines and point trims (buttons, snaps).
 /// - 8: the document gains a size chart; patterns gain a grading rule.
-pub const VERSION: u32 = 8;
+/// - 9: seam edges gain a sewing direction; tacks hold a point anywhere on
+///   a pattern (not an outline point index) to another pattern or the
+///   avatar.
+pub const VERSION: u32 = 9;
 
 #[derive(Debug)]
 pub enum ProjectError {
@@ -43,6 +46,10 @@ pub enum ProjectError {
     /// Written by a newer OpenDesign.
     UnsupportedVersion(u32),
     DuplicateId(PatternId),
+    /// A seam sews a pattern that isn't in the file, or is malformed.
+    BadSewingLine(SewingLineId),
+    /// A tack holds a pattern that isn't in the file.
+    BadTack(TackId),
 }
 
 impl fmt::Display for ProjectError {
@@ -58,11 +65,27 @@ impl fmt::Display for ProjectError {
             ProjectError::DuplicateId(id) => {
                 write!(f, "the file is damaged (pattern id {} is used twice)", id.0)
             }
+            ProjectError::BadSewingLine(id) => {
+                write!(f, "the file is damaged (seam {} sews a missing pattern)", id.0)
+            }
+            ProjectError::BadTack(id) => {
+                write!(f, "the file is damaged (tack {} holds a missing pattern)", id.0)
+            }
         }
     }
 }
 
 impl std::error::Error for ProjectError {}
+
+impl From<Invalid> for ProjectError {
+    fn from(e: Invalid) -> Self {
+        match e {
+            Invalid::DuplicatePattern(id) => ProjectError::DuplicateId(id),
+            Invalid::BadSewingLine(id) => ProjectError::BadSewingLine(id),
+            Invalid::BadTack(id) => ProjectError::BadTack(id),
+        }
+    }
+}
 
 impl From<io::Error> for ProjectError {
     fn from(e: io::Error) -> Self {
@@ -187,6 +210,49 @@ fn migrate_v7(doc: &mut serde_json::Value) {
     }
 }
 
+/// Upgrade a version 8 document to version 9 in place. Every seam edge was
+/// sewn forwards. A tack held two outline points by index; it now holds
+/// their positions, and its second end becomes a pattern target. A tack
+/// whose point no longer exists is dropped.
+fn migrate_v8(doc: &mut serde_json::Value) {
+    use serde_json::{json, Value};
+    if let Some(lines) = doc.get_mut("sewing_lines").and_then(Value::as_array_mut) {
+        for line in lines.iter_mut().filter_map(Value::as_object_mut) {
+            for side in ["a", "b"] {
+                let edges = line.get_mut(side).and_then(Value::as_array_mut);
+                for edge in edges.into_iter().flatten().filter_map(Value::as_object_mut) {
+                    edge.insert("forward".into(), json!(true));
+                }
+            }
+        }
+    }
+    let outline_point = |doc: &Value, point: &Value| -> Option<Value> {
+        let pattern = point.get("pattern")?.as_u64()?;
+        let index = point.get("index")?.as_u64()? as usize;
+        let found = doc
+            .get("patterns")?
+            .as_array()?
+            .iter()
+            .find(|p| p.get("id").and_then(Value::as_u64) == Some(pattern))?;
+        let pos = found.get("outline")?.as_array()?.get(index)?;
+        Some(json!({ "pattern": pattern, "at": { "x": pos.get("x")?, "y": pos.get("y")? } }))
+    };
+    let Some(tacks) = doc.get("tacks").and_then(Value::as_array).cloned() else {
+        return; // leave it for deserialisation to report
+    };
+    let upgraded: Vec<Value> = tacks
+        .iter()
+        .filter_map(|tack| {
+            let a = outline_point(doc, tack.get("a")?)?;
+            let b = outline_point(doc, tack.get("b")?)?;
+            Some(json!({ "id": tack.get("id")?, "a": a, "b": { "pattern": b } }))
+        })
+        .collect();
+    if let Some(object) = doc.as_object_mut() {
+        object.insert("tacks".into(), Value::Array(upgraded));
+    }
+}
+
 pub fn to_json(doc: &Document) -> String {
     let file = FileOut {
         format: FORMAT,
@@ -238,8 +304,11 @@ pub fn from_json(text: &str) -> Result<Document, ProjectError> {
     if header.version < 8 {
         migrate_v7(&mut body);
     }
+    if header.version < 9 {
+        migrate_v8(&mut body);
+    }
     let mut doc: Document = serde_json::from_value(body).map_err(ProjectError::Malformed)?;
-    doc.validate().map_err(ProjectError::DuplicateId)?;
+    doc.validate()?;
     Ok(doc)
 }
 
@@ -315,7 +384,7 @@ mod tests {
             Err(ProjectError::NotAProject)
         ));
         assert!(matches!(
-            from_json(&good.replace("\"version\": 8", "\"version\": 99")),
+            from_json(&good.replace("\"version\": 9", "\"version\": 99")),
             Err(ProjectError::UnsupportedVersion(99))
         ));
         let dup = good.replace("\"id\": 2", "\"id\": 1");
@@ -338,7 +407,7 @@ mod tests {
         doc.patterns[0].seam_allowance = 7.5;
 
         let text = to_json(&doc);
-        assert!(text.contains("\"version\": 8"));
+        assert!(text.contains("\"version\": 9"));
         assert!(text.contains("\"kind\": \"curve\""));
         assert_eq!(from_json(&text).unwrap(), doc);
     }
@@ -387,7 +456,7 @@ mod tests {
 
         // Saving writes the current version, which loads back the same.
         let resaved = to_json(&doc);
-        assert!(resaved.contains("\"version\": 8"));
+        assert!(resaved.contains("\"version\": 9"));
         assert_eq!(from_json(&resaved).unwrap(), doc);
     }
 
@@ -431,11 +500,13 @@ mod tests {
                 pattern: id,
                 start: 0.0,
                 end: 1.0,
+                forward: true,
             }],
             vec![crate::document::SeamEdge {
                 pattern: id,
                 start: 2.0,
                 end: 3.0,
+                forward: true,
             }],
         );
         sew.apply(&mut doc);
@@ -443,7 +514,7 @@ mod tests {
 
         // Saving writes the current version, which loads back the same.
         let resaved = to_json(&doc);
-        assert!(resaved.contains("\"version\": 8"));
+        assert!(resaved.contains("\"version\": 9"));
         assert_eq!(from_json(&resaved).unwrap(), doc);
     }
 
@@ -483,20 +554,17 @@ mod tests {
 
         let id = doc.patterns[0].id;
         let mut tack = crate::command::AddTack::new(
-            crate::document::SeamPoint {
+            crate::document::TackPoint {
                 pattern: id,
-                index: 0,
+                at: Vec2::ZERO,
             },
-            crate::document::SeamPoint {
-                pattern: id,
-                index: 2,
-            },
+            crate::document::TackTarget::Avatar([0.0, 1.0, 0.1]),
         );
         tack.apply(&mut doc);
         assert_eq!(doc.tacks.len(), 1);
 
         let resaved = to_json(&doc);
-        assert!(resaved.contains("\"version\": 8"));
+        assert!(resaved.contains("\"version\": 9"));
         assert_eq!(from_json(&resaved).unwrap(), doc);
     }
 
@@ -544,7 +612,8 @@ mod tests {
             vec![SeamEdge {
                 pattern: id,
                 start: 0.0,
-                end: 1.0
+                end: 1.0,
+                forward: true,
             }]
         );
         assert_eq!(
@@ -552,12 +621,13 @@ mod tests {
             vec![SeamEdge {
                 pattern: id,
                 start: 2.0,
-                end: 3.0
+                end: 3.0,
+                forward: true,
             }]
         );
 
         let resaved = to_json(&doc);
-        assert!(resaved.contains("\"version\": 8"));
+        assert!(resaved.contains("\"version\": 9"));
         assert_eq!(from_json(&resaved).unwrap(), doc);
     }
 
@@ -598,7 +668,7 @@ mod tests {
         assert_eq!(doc.patterns[0].fabric, crate::document::Fabric::cotton());
 
         let resaved = to_json(&doc);
-        assert!(resaved.contains("\"version\": 8"));
+        assert!(resaved.contains("\"version\": 9"));
         assert_eq!(from_json(&resaved).unwrap(), doc);
     }
 
@@ -617,7 +687,7 @@ mod tests {
         assert_eq!(doc.patterns[0].trims.len(), 1);
 
         let resaved = to_json(&doc);
-        assert!(resaved.contains("\"version\": 8"));
+        assert!(resaved.contains("\"version\": 9"));
         assert_eq!(from_json(&resaved).unwrap(), doc);
     }
 
@@ -681,7 +751,7 @@ mod tests {
         assert_ne!(doc.patterns[0].graded_outline(1), doc.patterns[0].outline);
 
         let resaved = to_json(&doc);
-        assert!(resaved.contains("\"version\": 8"));
+        assert!(resaved.contains("\"version\": 9"));
         assert_eq!(from_json(&resaved).unwrap(), doc);
     }
 
@@ -719,5 +789,90 @@ mod tests {
     fn missing_file_is_an_io_error() {
         let err = load(&temp_path("does-not-exist.odproj")).unwrap_err();
         assert!(matches!(err, ProjectError::Io(ref e) if e.kind() == io::ErrorKind::NotFound));
+    }
+
+    #[test]
+    fn version_8_files_get_forward_edges_and_positional_tacks() {
+        use crate::command::AddSewingLine;
+        use crate::document::{SeamEdge, TackPoint, TackTarget};
+        let mut doc = sample();
+        let (a, b) = (doc.patterns[0].id, doc.patterns[1].id);
+        let edge = |pattern| SeamEdge {
+            pattern,
+            start: 1.0,
+            end: 2.0,
+            forward: true,
+        };
+        AddSewingLine::new(vec![edge(a)], vec![edge(b)]).apply(&mut doc);
+        // As version 8 wrote it: no direction, tacks by outline index.
+        let mut file: serde_json::Value = serde_json::from_str(&to_json(&doc)).unwrap();
+        file["version"] = 8.into();
+        let body = &mut file["document"];
+        for side in ["a", "b"] {
+            body["sewing_lines"][0][side][0]
+                .as_object_mut()
+                .unwrap()
+                .remove("forward");
+        }
+        body["tacks"] = serde_json::json!([
+            { "id": 1, "a": { "pattern": a.0, "index": 2 }, "b": { "pattern": b.0, "index": 0 } },
+            { "id": 2, "a": { "pattern": a.0, "index": 9 }, "b": { "pattern": b.0, "index": 0 } }
+        ]);
+        body["next_tack_id"] = 3.into();
+
+        let loaded = from_json(&file.to_string()).unwrap();
+        assert_eq!(loaded.sewing_lines, doc.sewing_lines, "edges sewn forwards");
+        // The tack holds the same outline points, now by position; the one
+        // pointing past the outline is dropped.
+        assert_eq!(loaded.tacks.len(), 1);
+        assert_eq!(
+            loaded.tacks[0].a,
+            TackPoint {
+                pattern: a,
+                at: Vec2::new(500.0, 600.0)
+            }
+        );
+        assert_eq!(
+            loaded.tacks[0].b,
+            TackTarget::Pattern(TackPoint {
+                pattern: b,
+                at: Vec2::ZERO
+            })
+        );
+    }
+
+    #[test]
+    fn seams_and_tacks_on_missing_patterns_are_rejected() {
+        use crate::command::{AddSewingLine, AddTack};
+        use crate::document::{SeamEdge, TackPoint, TackTarget};
+        let mut doc = sample();
+        let a = doc.patterns[0].id;
+        let edge = SeamEdge {
+            pattern: a,
+            start: 0.0,
+            end: 1.0,
+            forward: true,
+        };
+        AddSewingLine::new(vec![edge], vec![edge]).apply(&mut doc);
+        let mut bad: serde_json::Value = serde_json::from_str(&to_json(&doc)).unwrap();
+        bad["document"]["sewing_lines"][0]["b"][0]["pattern"] = 99.into();
+        assert!(matches!(
+            from_json(&bad.to_string()),
+            Err(ProjectError::BadSewingLine(_))
+        ));
+
+        let mut doc = sample();
+        let point = TackPoint {
+            pattern: doc.patterns[0].id,
+            at: Vec2::ZERO,
+        };
+        AddTack::new(point, TackTarget::Avatar([0.0; 3])).apply(&mut doc);
+        let mut bad: serde_json::Value = serde_json::from_str(&to_json(&doc)).unwrap();
+        bad["document"]["tacks"][0]["a"]["pattern"] = 99.into();
+        assert!(matches!(
+            from_json(&bad.to_string()),
+            Err(ProjectError::BadTack(_))
+        ));
+        assert_eq!(from_json(&to_json(&doc)).unwrap(), doc);
     }
 }

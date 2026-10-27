@@ -9,7 +9,9 @@
 use std::collections::{BTreeSet, HashMap};
 use std::ops::Range;
 
-use od_core::document::{Document, FlatPoint, Pattern, PatternId, SeamEdge, TrimKind, TOLERANCE};
+use od_core::document::{
+    Document, FlatPoint, Pattern, PatternId, SeamEdge, TackTarget, TrimKind, TOLERANCE,
+};
 use od_core::geometry::{self, Vec2};
 use od_render::pattern::Placement;
 
@@ -61,6 +63,11 @@ pub struct ClothScene {
     /// particle index nearest each of its points, in order — draw a line
     /// through their current draped positions.
     pub topstitches: Vec<Vec<usize>>,
+    /// Each [`Tack`], as the two particles it stitches: the cloth particle
+    /// nearest its pattern point, and the one nearest its other pattern
+    /// point or a fixed anchor particle on the avatar. Draw a thread
+    /// between their current positions.
+    pub tacks: Vec<(usize, usize)>,
 }
 
 fn to_glam(v: Vec2) -> glam::Vec2 {
@@ -124,7 +131,13 @@ fn side_chain(
             continue;
         };
         let outline_len = layout.pattern.outline.len();
-        for i in points_in_range(&layout.flat, outline_len, edge.start, edge.end) {
+        let mut points = points_in_range(&layout.flat, outline_len, edge.start, edge.end);
+        // A backwards edge is sewn from its end to its start, so its
+        // particles pair up with the other side's in that order.
+        if !edge.forward {
+            points.reverse();
+        }
+        for i in points {
             chain.push((layout.offset + i, layout.flat[i].pos));
         }
     }
@@ -300,15 +313,29 @@ pub fn build(
     }
     stitch_pairs.retain(|&(a, b)| a != b);
 
+    // Particles only run along outlines, so a tacked point inside a
+    // pattern is held by the outline particle nearest it.
+    let mut tacks = Vec::new();
     for tack in &doc.tacks {
-        if let (Some(la), Some(lb)) = (layouts.get(&tack.a.pattern), layouts.get(&tack.b.pattern)) {
-            let pa = la.pattern.outline[tack.a.index].pos;
-            let pb = lb.pattern.outline[tack.b.index].pos;
-            let ia = nearest_particle(la, pa);
-            let ib = nearest_particle(lb, pb);
-            if ia != ib {
-                stitch_pairs.insert((ia.min(ib), ia.max(ib)));
+        let Some(la) = layouts.get(&tack.a.pattern) else {
+            continue;
+        };
+        let ia = nearest_particle(la, tack.a.at);
+        let ib = match tack.b {
+            TackTarget::Pattern(b) => match layouts.get(&b.pattern) {
+                Some(lb) => nearest_particle(lb, b.at),
+                None => continue,
+            },
+            // A fixed particle on the avatar: it has no mass, so nothing
+            // moves it and the stitch pulls the cloth to it.
+            TackTarget::Avatar(at) => {
+                particles.push(Particle::pinned(glam::Vec3::from_array(at)));
+                particles.len() - 1
             }
+        };
+        if ia != ib {
+            stitch_pairs.insert((ia.min(ib), ia.max(ib)));
+            tacks.push((ia, ib));
         }
     }
 
@@ -326,6 +353,7 @@ pub fn build(
         pattern_faces,
         trims,
         topstitches,
+        tacks,
     }
 }
 
@@ -334,7 +362,7 @@ mod tests {
     use super::*;
     use crate::xpbd::World;
     use od_core::document::{
-        OutlinePoint, PatternId as Pid, SeamPoint, SewingLine, SewingLineId, Tack, TackId,
+        OutlinePoint, PatternId as Pid, SewingLine, SewingLineId, Tack, TackId, TackPoint,
     };
     use od_render::pattern::RingLayout;
 
@@ -425,18 +453,21 @@ mod tests {
         let mut doc = Document::new("test");
         doc.patterns.push(rectangle(1, "front", 200.0, 300.0));
         doc.patterns.push(rectangle(2, "back", 200.0, 300.0));
-        // Sew the front's right edge (corners 1->2) to the back's left edge (corners 3->0).
+        // Sew the front's right edge (corners 1->2, top down) to the back's
+        // left edge (corners 3->0 run bottom up, so sewn backwards).
         doc.sewing_lines.push(SewingLine {
             id: SewingLineId(1),
             a: vec![SeamEdge {
                 pattern: Pid(1),
                 start: 1.0,
                 end: 2.0,
+                forward: true,
             }],
             b: vec![SeamEdge {
                 pattern: Pid(2),
                 start: 3.0,
                 end: 4.0,
+                forward: false,
             }],
         });
         let placements = placements_for(&doc);
@@ -452,6 +483,13 @@ mod tests {
             let in_back = back_range.contains(&s.a) || back_range.contains(&s.b);
             assert!(in_front && in_back, "stitch {s:?} should cross patterns");
             assert_eq!(s.rest_length, 0.0);
+            // Untwisted: both patterns hang at the same height on the ring,
+            // so stitched particles start level with each other.
+            let (ya, yb) = (
+                scene.particles[s.a].position.y,
+                scene.particles[s.b].position.y,
+            );
+            assert!((ya - yb).abs() < 0.02, "stitch {s:?} joins {ya} to {yb}");
         }
     }
 
@@ -488,19 +526,62 @@ mod tests {
         doc.patterns.push(rectangle(2, "back", 200.0, 300.0));
         doc.tacks.push(Tack {
             id: TackId(1),
-            a: SeamPoint {
+            a: TackPoint {
                 pattern: Pid(1),
-                index: 0,
+                at: Vec2::ZERO,
             },
-            b: SeamPoint {
+            b: TackTarget::Pattern(TackPoint {
                 pattern: Pid(2),
-                index: 0,
-            },
+                at: Vec2::ZERO,
+            }),
         });
         let placements = placements_for(&doc);
         let scene = build(&doc, &placements, &ClothConfig::default());
         assert_eq!(scene.stitches.len(), 1);
         assert_eq!(scene.stitches[0].rest_length, 0.0);
+        assert_eq!(scene.tacks.len(), 1);
+    }
+
+    #[test]
+    fn avatar_tack_stitches_the_cloth_to_a_fixed_anchor() {
+        let mut doc = Document::new("test");
+        doc.patterns.push(rectangle(1, "front", 200.0, 300.0));
+        let anchor = [0.0, 1.2, 0.05];
+        doc.tacks.push(Tack {
+            id: TackId(1),
+            // Inside the pattern: held by the nearest outline particle.
+            a: TackPoint {
+                pattern: Pid(1),
+                at: Vec2::new(195.0, 150.0),
+            },
+            b: TackTarget::Avatar(anchor),
+        });
+        let placements = placements_for(&doc);
+        let scene = build(&doc, &placements, &ClothConfig::default());
+        let cloth = scene.pattern_ranges[0].1.clone();
+        assert_eq!(scene.particles.len(), cloth.end + 1, "one anchor particle");
+        let fixed = &scene.particles[cloth.end];
+        assert_eq!(fixed.inv_mass, 0.0);
+        assert_eq!(fixed.position.to_array(), anchor);
+        assert_eq!(scene.tacks, [(scene.tacks[0].0, cloth.end)]);
+        assert!(cloth.contains(&scene.tacks[0].0));
+
+        // Stepping pulls the tacked cloth towards the anchor; the anchor stays.
+        let mut world = World::new(scene.particles.clone());
+        world.distance_constraints = scene.structural.clone();
+        world.distance_constraints.extend(scene.stitches.clone());
+        let held = scene.tacks[0].0;
+        let start = world.particles[held]
+            .position
+            .distance(glam::Vec3::from_array(anchor));
+        for _ in 0..30 {
+            world.step(1.0 / 60.0, 8, &[]);
+        }
+        let end = world.particles[held]
+            .position
+            .distance(glam::Vec3::from_array(anchor));
+        assert!(end < start * 0.5, "{start} -> {end}");
+        assert_eq!(world.particles[cloth.end].position.to_array(), anchor);
     }
 
     #[test]

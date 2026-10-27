@@ -3,10 +3,11 @@
 
 use crate::document::{
     normalize_degrees, Axis, Document, Fabric, Grading, InternalLine, Notch, OutlinePoint, Pattern,
-    PatternId, PointKind, SeamEdge, SeamPoint, SewingLine, SewingLineId, Tack, TackId, Topstitch,
-    Trim, TrimKind,
+    PatternId, PointKind, SeamEdge, SewingLine, SewingLineId, Tack, TackId, TackPoint, TackTarget,
+    Topstitch, Trim, TrimKind,
 };
 use crate::geometry::Vec2;
+use crate::seam::{self, Side};
 
 pub trait Command {
     /// Short label shown in the History panel and the Edit menu.
@@ -66,15 +67,24 @@ impl Command for AddPattern {
     }
 }
 
+/// Delete a pattern, and the seams and tacks that hold it.
 pub struct DeletePattern {
     id: PatternId,
     /// The removed pattern and its position, kept for undo.
     removed: Option<(usize, Pattern)>,
+    /// All seams and tacks before the delete, restored on undo.
+    sewing_lines: Vec<SewingLine>,
+    tacks: Vec<Tack>,
 }
 
 impl DeletePattern {
     pub fn new(id: PatternId) -> Self {
-        Self { id, removed: None }
+        Self {
+            id,
+            removed: None,
+            sewing_lines: Vec::new(),
+            tacks: Vec::new(),
+        }
     }
 }
 
@@ -89,12 +99,18 @@ impl Command for DeletePattern {
     fn apply(&mut self, doc: &mut Document) {
         if let Some(index) = doc.index_of(self.id) {
             self.removed = Some((index, doc.patterns.remove(index)));
+            self.sewing_lines = doc.sewing_lines.clone();
+            doc.sewing_lines.retain(|s| !s.touches(self.id));
+            self.tacks = doc.tacks.clone();
+            doc.tacks.retain(|t| !t.touches(self.id));
         }
     }
 
     fn undo(&mut self, doc: &mut Document) {
         if let Some((index, pattern)) = self.removed.take() {
             doc.patterns.insert(index.min(doc.patterns.len()), pattern);
+            doc.sewing_lines = std::mem::take(&mut self.sewing_lines);
+            doc.tacks = std::mem::take(&mut self.tacks);
         }
     }
 }
@@ -102,9 +118,11 @@ impl Command for DeletePattern {
 pub struct MovePattern {
     id: PatternId,
     delta: Vec2,
-    /// The pattern before the move, restored on undo so that undo is exact
-    /// (adding and subtracting a float delta can be off in the last bit).
+    /// The pattern and tacks before the move, restored on undo so that
+    /// undo is exact (adding and subtracting a float delta can be off in
+    /// the last bit).
     before: Option<Pattern>,
+    tacks: Vec<Tack>,
 }
 
 impl MovePattern {
@@ -113,6 +131,7 @@ impl MovePattern {
             id,
             delta,
             before: None,
+            tacks: Vec::new(),
         }
     }
 }
@@ -126,12 +145,15 @@ impl Command for MovePattern {
         if let Some(p) = doc.pattern_mut(self.id) {
             self.before = Some(p.clone());
             p.translate(self.delta);
+            let delta = self.delta;
+            self.tacks = move_tack_points(doc, self.id, |p| p + delta);
         }
     }
 
     fn undo(&mut self, doc: &mut Document) {
         if let (Some(p), Some(before)) = (doc.pattern_mut(self.id), self.before.take()) {
             *p = before;
+            doc.tacks = std::mem::take(&mut self.tacks);
         }
     }
 }
@@ -207,11 +229,18 @@ pub struct InsertPoint {
     id: PatternId,
     index: usize,
     point: OutlinePoint,
+    /// Seams before the insert, restored exactly on undo.
+    sewing_lines: Vec<SewingLine>,
 }
 
 impl InsertPoint {
     pub fn new(id: PatternId, index: usize, point: OutlinePoint) -> Self {
-        Self { id, index, point }
+        Self {
+            id,
+            index,
+            point,
+            sewing_lines: Vec::new(),
+        }
     }
 }
 
@@ -221,16 +250,23 @@ impl Command for InsertPoint {
     }
 
     fn apply(&mut self, doc: &mut Document) {
-        if let Some(p) = doc.pattern_mut(self.id) {
-            let index = self.index.min(p.outline.len());
-            p.outline.insert(index, self.point);
-        }
+        let Some(p) = doc.pattern_mut(self.id) else {
+            return;
+        };
+        let before = p.clone();
+        self.index = self.index.min(p.outline.len());
+        p.outline.insert(self.index, self.point);
+        let index = self.index;
+        self.sewing_lines = remap_sewing(doc, &before, &|b, a, t| {
+            seam::param_after_insert(b, a, index, t)
+        });
     }
 
     fn undo(&mut self, doc: &mut Document) {
         if let Some(p) = doc.pattern_mut(self.id) {
             if self.index < p.outline.len() {
                 p.outline.remove(self.index);
+                doc.sewing_lines = std::mem::take(&mut self.sewing_lines);
             }
         }
     }
@@ -242,6 +278,8 @@ pub struct DeletePoint {
     id: PatternId,
     index: usize,
     removed: Option<OutlinePoint>,
+    /// Seams before the delete, restored exactly on undo.
+    sewing_lines: Vec<SewingLine>,
 }
 
 impl DeletePoint {
@@ -250,6 +288,7 @@ impl DeletePoint {
             id,
             index,
             removed: None,
+            sewing_lines: Vec::new(),
         }
     }
 }
@@ -260,16 +299,23 @@ impl Command for DeletePoint {
     }
 
     fn apply(&mut self, doc: &mut Document) {
-        if let Some(p) = doc.pattern_mut(self.id) {
-            if p.outline.len() > 3 && self.index < p.outline.len() {
-                self.removed = Some(p.outline.remove(self.index));
-            }
+        let Some(p) = doc.pattern_mut(self.id) else {
+            return;
+        };
+        if p.outline.len() > 3 && self.index < p.outline.len() {
+            let before = p.clone();
+            self.removed = Some(p.outline.remove(self.index));
+            let index = self.index;
+            self.sewing_lines = remap_sewing(doc, &before, &|b, a, t| {
+                seam::param_after_delete(b, a, index, t)
+            });
         }
     }
 
     fn undo(&mut self, doc: &mut Document) {
         if let (Some(p), Some(point)) = (doc.pattern_mut(self.id), self.removed.take()) {
             p.outline.insert(self.index.min(p.outline.len()), point);
+            doc.sewing_lines = std::mem::take(&mut self.sewing_lines);
         }
     }
 }
@@ -719,8 +765,9 @@ impl Command for RemoveTrim {
 pub struct MirrorPattern {
     id: PatternId,
     axis: Axis,
-    /// The pattern before mirroring, restored exactly on undo.
+    /// The pattern and tacks before mirroring, restored exactly on undo.
     before: Option<Pattern>,
+    tacks: Vec<Tack>,
 }
 
 impl MirrorPattern {
@@ -729,6 +776,7 @@ impl MirrorPattern {
             id,
             axis,
             before: None,
+            tacks: Vec::new(),
         }
     }
 }
@@ -747,7 +795,9 @@ impl Command for MirrorPattern {
         if let Some(p) = doc.pattern_mut(self.id) {
             self.before = Some(p.clone());
             let c = p.center();
-            p.mirror(axis, if axis == Axis::Vertical { c.x } else { c.y });
+            let about = if axis == Axis::Vertical { c.x } else { c.y };
+            p.mirror(axis, about);
+            self.tacks = move_tack_points(doc, self.id, |p| axis.reflect(p, about));
         }
     }
 
@@ -755,6 +805,7 @@ impl Command for MirrorPattern {
         if let Some(before) = self.before.take() {
             if let Some(p) = doc.pattern_mut(self.id) {
                 *p = before;
+                doc.tacks = std::mem::take(&mut self.tacks);
             }
         }
     }
@@ -899,16 +950,128 @@ impl Command for RemoveSewingLine {
     }
 }
 
-/// Pin two outline points together with a tack.
+/// After `before`'s outline points were renumbered, move every seam edge on
+/// that pattern with `remap` (a parameter before, to one after). Seams left
+/// with an empty edge are dropped. Returns all seams as they were, for undo.
+fn remap_sewing(
+    doc: &mut Document,
+    before: &Pattern,
+    remap: &impl Fn(&Pattern, &Pattern, f32) -> f32,
+) -> Vec<SewingLine> {
+    let old = doc.sewing_lines.clone();
+    let Some(after) = doc.pattern(before.id).cloned() else {
+        return old;
+    };
+    doc.sewing_lines.retain_mut(|line| {
+        line.a
+            .iter_mut()
+            .chain(line.b.iter_mut())
+            .filter(|e| e.pattern == before.id)
+            .all(|e| match seam::remap_edge(e, before, &after, remap) {
+                Some(moved) => {
+                    *e = moved;
+                    true
+                }
+                None => false,
+            })
+    });
+    old
+}
+
+/// Move every tack point on pattern `id` with `f`, as the pattern itself
+/// moved. Returns all tacks as they were, for undo.
+fn move_tack_points(doc: &mut Document, id: PatternId, f: impl Fn(Vec2) -> Vec2) -> Vec<Tack> {
+    let old = doc.tacks.clone();
+    for tack in &mut doc.tacks {
+        for point in tack.points_mut().filter(|p| p.pattern == id) {
+            point.at = f(point.at);
+        }
+    }
+    old
+}
+
+/// Sew one side of a seam the other way round, to untwist it.
+pub struct FlipSeamSide {
+    id: SewingLineId,
+    side: Side,
+}
+
+impl FlipSeamSide {
+    pub fn new(id: SewingLineId, side: Side) -> Self {
+        Self { id, side }
+    }
+}
+
+impl Command for FlipSeamSide {
+    fn label(&self) -> String {
+        "Flip seam".into()
+    }
+
+    fn apply(&mut self, doc: &mut Document) {
+        if let Some(line) = doc.sewing_line_mut(self.id) {
+            let edges = line.side_mut(self.side);
+            edges.reverse();
+            for e in edges.iter_mut() {
+                *e = e.reversed();
+            }
+        }
+    }
+
+    fn undo(&mut self, doc: &mut Document) {
+        // Flipping twice restores the side exactly.
+        self.apply(doc);
+    }
+}
+
+/// Replace one edge of a seam, e.g. after dragging one of its ends.
+pub struct SetSeamEdge {
+    id: SewingLineId,
+    side: Side,
+    index: usize,
+    /// Swapped with the seam's edge on apply and undo, so both are exact.
+    edge: SeamEdge,
+}
+
+impl SetSeamEdge {
+    pub fn new(id: SewingLineId, side: Side, index: usize, edge: SeamEdge) -> Self {
+        Self {
+            id,
+            side,
+            index,
+            edge,
+        }
+    }
+}
+
+impl Command for SetSeamEdge {
+    fn label(&self) -> String {
+        "Edit sewing".into()
+    }
+
+    fn apply(&mut self, doc: &mut Document) {
+        if let Some(edge) = doc
+            .sewing_line_mut(self.id)
+            .and_then(|line| line.side_mut(self.side).get_mut(self.index))
+        {
+            std::mem::swap(edge, &mut self.edge);
+        }
+    }
+
+    fn undo(&mut self, doc: &mut Document) {
+        self.apply(doc);
+    }
+}
+
+/// Hold a pattern point to another pattern point, or the avatar.
 pub struct AddTack {
-    a: SeamPoint,
-    b: SeamPoint,
+    a: TackPoint,
+    b: TackTarget,
     /// Assigned on first apply so redo recreates the same id.
     id: Option<TackId>,
 }
 
 impl AddTack {
-    pub fn new(a: SeamPoint, b: SeamPoint) -> Self {
+    pub fn new(a: TackPoint, b: TackTarget) -> Self {
         Self { a, b, id: None }
     }
 
@@ -1253,17 +1416,20 @@ mod tests {
             pattern: id,
             start: 0.0,
             end: 1.0,
+            forward: true,
         }];
         let b = vec![
             SeamEdge {
                 pattern: id2,
                 start: 2.0,
                 end: 3.0,
+                forward: true,
             },
             SeamEdge {
                 pattern: id2,
                 start: 3.0,
                 end: 4.0,
+                forward: true,
             },
         ];
         let mut sew = AddSewingLine::new(a.clone(), b.clone());
@@ -1289,14 +1455,14 @@ mod tests {
         let (mut doc, id) = doc_with_rect();
         let before = doc.tacks.clone();
 
-        let a = SeamPoint {
+        let a = TackPoint {
             pattern: id,
-            index: 0,
+            at: Vec2::ZERO,
         };
-        let b = SeamPoint {
+        let b = TackTarget::Pattern(TackPoint {
             pattern: id,
-            index: 2,
-        };
+            at: Vec2::new(100.0, 50.0),
+        });
         let mut tack = AddTack::new(a, b);
         tack.apply(&mut doc);
         let tack_id = tack.id().unwrap();
@@ -1313,5 +1479,139 @@ mod tests {
         assert!(doc.tacks.is_empty());
         remove.undo(&mut doc);
         assert_eq!(doc.tacks[0].id, tack_id);
+    }
+
+    /// Two 100 × 50 rectangles side by side: "Panel" (0..100) and "Other"
+    /// (150..250), Panel's right edge sewn top-down to Other's left edge,
+    /// which runs bottom-up around its outline so is sewn backwards. Plus a
+    /// tack between them and one from Panel to the avatar.
+    fn sewn_pair() -> (Document, PatternId, PatternId, SewingLineId) {
+        let (mut doc, a) = doc_with_rect();
+        let mut add = AddPattern::new(
+            "Other",
+            rectangle(Vec2::new(150.0, 0.0), Vec2::new(250.0, 50.0)),
+        );
+        add.apply(&mut doc);
+        let b = add.id().unwrap();
+        let edge = |pattern, start, end, forward| SeamEdge {
+            pattern,
+            start,
+            end,
+            forward,
+        };
+        let mut sew = AddSewingLine::new(
+            vec![edge(a, 1.0, 2.0, true)],
+            vec![edge(b, 3.0, 4.0, false)],
+        );
+        sew.apply(&mut doc);
+        let line = sew.id().unwrap();
+        let point = |pattern, x, y| TackPoint {
+            pattern,
+            at: Vec2::new(x, y),
+        };
+        AddTack::new(
+            point(a, 20.0, 10.0),
+            TackTarget::Pattern(point(b, 170.0, 10.0)),
+        )
+        .apply(&mut doc);
+        AddTack::new(point(a, 50.0, 25.0), TackTarget::Avatar([0.0, 1.0, 0.1])).apply(&mut doc);
+        (doc, a, b, line)
+    }
+
+    #[test]
+    fn backwards_edges_pair_matching_ends() {
+        let (doc, _, _, id) = sewn_pair();
+        let line = doc.sewing_line(id).unwrap();
+        let start = |side| doc.side_point(line, side, 0.0).unwrap().1;
+        assert_eq!(start(Side::A), Vec2::new(100.0, 0.0));
+        assert_eq!(start(Side::B), Vec2::new(150.0, 0.0));
+    }
+
+    #[test]
+    fn seams_follow_inserted_and_deleted_points() {
+        let (mut doc, a, _, id) = sewn_pair();
+        let before = doc.clone();
+        // A point in the middle of the sewn right edge keeps the seam on it.
+        let mut insert = InsertPoint::new(a, 2, OutlinePoint::corner(Vec2::new(100.0, 25.0)));
+        insert.apply(&mut doc);
+        let edge = doc.sewing_line(id).unwrap().a[0];
+        assert_eq!((edge.start, edge.end, edge.forward), (1.0, 3.0, true));
+        // A point before it shifts it along.
+        let mut first = InsertPoint::new(a, 1, OutlinePoint::corner(Vec2::new(50.0, 0.0)));
+        first.apply(&mut doc);
+        assert_eq!(doc.sewing_line(id).unwrap().a[0].start, 2.0);
+        first.undo(&mut doc);
+        insert.undo(&mut doc);
+        assert_eq!(doc, before);
+
+        // Deleting the edge's lower corner joins it to the next edge.
+        let mut delete = DeletePoint::new(a, 2);
+        delete.apply(&mut doc);
+        let edge = doc.sewing_line(id).unwrap().a[0];
+        assert_eq!(edge.start, 1.0);
+        assert!(edge.end > 1.0 && edge.end < 2.0, "{edge:?}");
+        delete.undo(&mut doc);
+        assert_eq!(doc, before);
+    }
+
+    #[test]
+    fn deleting_a_pattern_takes_its_seams_and_tacks() {
+        let (mut doc, _, b, _) = sewn_pair();
+        let before = doc.clone();
+        let mut delete = DeletePattern::new(b);
+        delete.apply(&mut doc);
+        assert!(doc.sewing_lines.is_empty());
+        assert_eq!(doc.tacks.len(), 1, "the avatar tack stays");
+        delete.undo(&mut doc);
+        assert_eq!(doc, before);
+    }
+
+    #[test]
+    fn tack_points_move_and_flip_with_their_pattern() {
+        let (mut doc, a, b, _) = sewn_pair();
+        let before = doc.clone();
+        let mut mv = MovePattern::new(a, Vec2::new(5.0, -5.0));
+        mv.apply(&mut doc);
+        assert_eq!(doc.tacks[0].a.at, Vec2::new(25.0, 5.0));
+        assert_eq!(doc.tacks[1].a.at, Vec2::new(55.0, 20.0));
+        assert_eq!(doc.tacks[0].b, before.tacks[0].b, "the other end stays");
+        mv.undo(&mut doc);
+        assert_eq!(doc, before);
+
+        // Other spans 150..250: flipping left-right about x = 200.
+        let mut flip = MirrorPattern::new(b, Axis::Vertical);
+        flip.apply(&mut doc);
+        let TackTarget::Pattern(end) = doc.tacks[0].b else {
+            panic!("pattern tack");
+        };
+        assert_eq!(end.at, Vec2::new(230.0, 10.0));
+        flip.undo(&mut doc);
+        assert_eq!(doc, before);
+    }
+
+    #[test]
+    fn flipping_and_editing_a_seam_side() {
+        let (mut doc, a, _, id) = sewn_pair();
+        let before = doc.clone();
+        let mut flip = FlipSeamSide::new(id, Side::B);
+        flip.apply(&mut doc);
+        assert!(doc.sewing_line(id).unwrap().b[0].forward);
+        flip.undo(&mut doc);
+        assert_eq!(doc, before);
+
+        let shorter = SeamEdge {
+            pattern: a,
+            start: 1.0,
+            end: 1.5,
+            forward: true,
+        };
+        let mut edit = SetSeamEdge::new(id, Side::A, 0, shorter);
+        edit.apply(&mut doc);
+        let line = doc.sewing_line(id).unwrap();
+        assert_eq!(line.a[0], shorter);
+        assert_eq!(line.side_lengths(&doc), Some((25.0, 50.0)));
+        assert_eq!(edit.label(), "Edit sewing");
+        edit.undo(&mut doc);
+        assert_eq!(doc, before);
     }
 }

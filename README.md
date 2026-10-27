@@ -47,6 +47,10 @@ without this step.
 | Notches | Notch tool (`N`): click an outline to add, click a notch to remove |
 | Internal lines | Internal line tool (`L`): click inside a pattern, `Enter` or double-click to finish |
 | Flip, mirror, duplicate | Properties → Symmetry; `Ctrl+D` duplicates |
+| Sew | Sew tool (`S`): click a segment (or drag along an outline for a free stretch, which may cross the outline's start), `Tab` for the other side, `Enter` sews; add more stretches per side for one-to-many. Pick both sides near matching ends and the seam is sewn untwisted. Click a sewn edge to unsew it |
+| Edit a seam | Select tool: click a seam to see its side lengths in Properties; drag the handles at its ends to move them along the outline; Flip side B untwists it, `Del` deletes it |
+| Check sewing length | View → Check sewing length (on, 3% by default): mismatched seams show in the warning colour, and the status bar counts them (click to select the first) |
+| Tack | Tack tool (`K`): click a point on a pattern, then a point on another pattern (2D or 3D view) or on the avatar (3D view, before draping). `Esc` cancels; select a tack and `Del` deletes it. Clicking two exact outline points with the Sew tool also tacks them |
 | Select / move | Select tool (`V`), click or drag a pattern |
 | Delete | `Del` (the selected point when editing points), or the button in Properties |
 | Undo / redo | `Ctrl+Z` / `Ctrl+Y` (or `Ctrl+Shift+Z`) |
@@ -66,7 +70,8 @@ the default arrangement.
 ### Project files
 
 Projects are saved as `.odproj`: versioned JSON
-(`{"format": "opendesign-project", "version": 1, "document": {...}}`).
+(`{"format": "opendesign-project", "version": 9, "document": {...}}`).
+Older versions are upgraded when opened.
 Saves go through a temporary file and a rename, so a crash mid-save never
 leaves a half-written project. The title bar shows `*` and the status bar
 says "Unsaved changes" until you save; New, Open, Quit and closing the window
@@ -118,7 +123,10 @@ without opening a window.
 4. 3D viewport ✅ wgpu renderer (lit, depth-tested, floor grid, contact
    shadow), orbit camera with presets, procedural sized avatars, OBJ/glTF
    avatar loading, patterns placed around the avatar, click-to-select in 3D
-5. Sewing
+5. Sewing ✅ segment and free sewing with a direction per edge (so seams
+   drape untwisted), one-to-many seams, seams and tacks kept in step with
+   outline edits, seam selection and end-dragging, a tunable length check,
+   tacks anywhere on a pattern or to the avatar, seam and tack threads in 3D
 6. Cloth simulation
 7. Fabrics and materials
 8. Asset library

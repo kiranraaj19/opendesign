@@ -10,19 +10,20 @@ use std::sync::Arc;
 
 use eframe::egui_wgpu;
 use egui::{Color32, PointerButton, Pos2, Rect, Sense, UiBuilder};
-use od_core::{Pattern, PatternId, TrimKind, Vec2};
+use od_core::{Pattern, PatternId, Side, TackPoint, TackTarget, TrimKind, Vec2};
 use od_render::avatar::{avatar_mesh, AvatarKind, Measurements};
 use od_render::camera::{ndc_from_pixel, OrbitCamera, ViewPreset};
 use od_render::glam;
 use od_render::gpu::{Renderer, Targets};
 use od_render::material::Material;
 use od_render::mesh::{Aabb, Mesh};
-use od_render::pattern::RingLayout;
+use od_render::pattern::{Placement, RingLayout};
 use od_render::scene::{linear, AvatarDraw, Frame, GridColors};
 use od_render::view::{self, FrameInput, PlacedPattern, Theme};
 use od_sim::collision::Collider;
 
-use crate::app::Session;
+use crate::app::{Session, Tool};
+use crate::panels::pattern2d;
 use crate::theme;
 
 /// Shown instead of the scene when there is no wgpu renderer.
@@ -295,6 +296,26 @@ impl Viewport3D {
         Some((key, ray.at(t)))
     }
 
+    /// What is under `pos` and where: a pattern (`Some`) or the avatar
+    /// (`None`), whichever is in front.
+    pub fn pick_target(
+        &self,
+        rect: Rect,
+        pos: Pos2,
+        placed: &[PlacedPattern<PatternId>],
+    ) -> Option<(Option<PatternId>, glam::Vec3)> {
+        let ndc = ndc_from_pixel(
+            to_glam(pos),
+            to_glam(rect.min),
+            to_glam(rect.size().to_pos2()),
+        );
+        let ray = self.camera.ray(ndc, aspect(rect));
+        let items = std::iter::once((None, self.avatar.mesh()))
+            .chain(placed.iter().map(|p| (Some(p.key), &p.mesh)));
+        let (key, t) = od_render::pick::closest_hit(&ray, items)?;
+        Some((key, ray.at(t)))
+    }
+
     /// Everything in view, from the current direction.
     fn frame_all(&mut self, rect: Rect, placed: &[PlacedPattern<PatternId>]) {
         self.camera
@@ -334,6 +355,161 @@ fn ring_placements(s: &Session) -> Vec<(PatternId, od_render::pattern::Placement
         .enumerate()
         .map(|(i, p)| (p.id, ring.placement(i, count)))
         .collect()
+}
+
+/// Where each pattern's flat (2D, mm) points land in the undraped 3D
+/// preview: its ring placement, and the 2D point at the placement's centre
+/// (the centre of its outline's bounds, as [`Placement::place`] uses).
+pub struct FlatFrame {
+    placement: Placement,
+    mid: glam::Vec2,
+}
+
+impl FlatFrame {
+    pub fn world(&self, p: Vec2) -> glam::Vec3 {
+        let d = (glam::Vec2::new(p.x, p.y) - self.mid) / 1000.0;
+        self.placement.center + self.placement.right * d.x - self.placement.up * d.y
+    }
+
+    /// The flat point at a world point on the piece: the inverse of
+    /// [`Self::world`].
+    pub fn flat(&self, world: glam::Vec3) -> Vec2 {
+        let d = world - self.placement.center;
+        let p = self.mid
+            + glam::Vec2::new(d.dot(self.placement.right), -d.dot(self.placement.up)) * 1000.0;
+        Vec2::new(p.x, p.y)
+    }
+}
+
+pub fn flat_frames(s: &Session) -> HashMap<PatternId, FlatFrame> {
+    let by_id: HashMap<PatternId, &Pattern> = s.doc.patterns.iter().map(|p| (p.id, p)).collect();
+    ring_placements(s)
+        .into_iter()
+        .filter_map(|(id, placement)| {
+            let poly = pattern_polyline(by_id.get(&id)?);
+            let first = *poly.first()?;
+            let (min, max) = poly.iter().fold((first, first), |(lo, hi), p| {
+                (
+                    Vec2::new(lo.x.min(p.x), lo.y.min(p.y)),
+                    Vec2::new(hi.x.max(p.x), hi.y.max(p.y)),
+                )
+            });
+            let mid = (min + max) * 0.5;
+            Some((
+                id,
+                FlatFrame {
+                    placement,
+                    mid: glam::Vec2::new(mid.x, mid.y),
+                },
+            ))
+        })
+        .collect()
+}
+
+/// A line to draw over the 3D view, in world space.
+pub struct Overlay {
+    pub points: Vec<glam::Vec3>,
+    pub color: Color32,
+    pub dashed: bool,
+}
+
+/// Seams and tacks over the 3D view. Before draping: each sewn stretch on
+/// its piece, threads joining points that will be sewn together, and tack
+/// threads. While draping, the cloth shows the seams itself, so only tack
+/// threads, between the particles they hold.
+pub fn overlays(s: &Session, pal: &theme::Palette) -> Vec<Overlay> {
+    const THREADS: usize = 4;
+    let tack_color = |id| {
+        if s.selected_tack == Some(id) {
+            pal.selected
+        } else {
+            pal.accent
+        }
+    };
+    let mut out = Vec::new();
+    if let Some(drape) = &s.viewport.drape {
+        for ((a, b), tack) in drape.tack_positions().into_iter().zip(&s.doc.tacks) {
+            out.push(Overlay {
+                points: vec![a, b],
+                color: tack_color(tack.id),
+                dashed: true,
+            });
+        }
+        return out;
+    }
+    let frames = flat_frames(s);
+    for (i, line) in s.doc.sewing_lines.iter().enumerate() {
+        let color = pattern2d::seam_color(s, i, pal);
+        for edge in line.edges() {
+            let (Some(pattern), Some(frame)) =
+                (s.doc.pattern(edge.pattern), frames.get(&edge.pattern))
+            else {
+                continue;
+            };
+            out.push(Overlay {
+                points: pattern
+                    .edge_points(edge)
+                    .into_iter()
+                    .map(|p| frame.world(p))
+                    .collect(),
+                color,
+                dashed: false,
+            });
+        }
+        for k in 0..=THREADS {
+            let t = k as f32 / THREADS as f32;
+            let ends = (
+                s.doc.side_point(line, Side::A, t),
+                s.doc.side_point(line, Side::B, t),
+            );
+            if let (Some((pa, a)), Some((pb, b))) = ends {
+                if let (Some(fa), Some(fb)) = (frames.get(&pa), frames.get(&pb)) {
+                    out.push(Overlay {
+                        points: vec![fa.world(a), fb.world(b)],
+                        color,
+                        dashed: true,
+                    });
+                }
+            }
+        }
+    }
+    let world = |p: &TackPoint| frames.get(&p.pattern).map(|f| f.world(p.at));
+    for tack in &s.doc.tacks {
+        let to = match &tack.b {
+            TackTarget::Pattern(p) => world(p),
+            TackTarget::Avatar(at) => Some(glam::Vec3::from_array(*at)),
+        };
+        if let (Some(from), Some(to)) = (world(&tack.a), to) {
+            out.push(Overlay {
+                points: vec![from, to],
+                color: tack_color(tack.id),
+                dashed: true,
+            });
+        }
+    }
+    out
+}
+
+/// The Tack tool clicked the 3D view: a point on a pattern starts or
+/// finishes a tack, a point on the avatar finishes one. Tacks are placed
+/// on the flat preview; while a drape exists the click does nothing.
+fn tack_click(s: &mut Session, rect: Rect, pos: Pos2, placed: &[PlacedPattern<PatternId>]) {
+    if s.viewport.drape.is_some() {
+        return;
+    }
+    let target = match s.viewport.pick_target(rect, pos, placed) {
+        Some((Some(id), at)) => flat_frames(s).get(&id).map(|frame| {
+            TackTarget::Pattern(TackPoint {
+                pattern: id,
+                at: frame.flat(at),
+            })
+        }),
+        Some((None, at)) => Some(TackTarget::Avatar(at.to_array())),
+        None => None,
+    };
+    if let Some(target) = target {
+        s.tack_to(target);
+    }
 }
 
 /// Start simulating from the document's current patterns and sewing data,
@@ -721,7 +897,9 @@ fn handle_input(
         v.frame_all(rect, placed);
     } else if response.clicked() {
         if let Some(pos) = response.interact_pointer_pos() {
-            if v.pinning {
+            if s.tool == Tool::Tack {
+                tack_click(s, rect, pos, placed);
+            } else if v.pinning {
                 if let Some((pattern, point)) = v.pick_point(rect, pos, placed) {
                     if let Some(drape) = v.drape.as_mut() {
                         drape.toggle_pin_near(pattern, point);
@@ -804,6 +982,32 @@ fn paint(ui: &mut egui::Ui, rect: Rect, s: &Session, placed: &[PlacedPattern<Pat
         ui.put(Rect::from_center_size(rect.center(), size), label);
     }
 
+    for line in overlays(s, pal) {
+        let pts: Vec<Pos2> = line
+            .points
+            .iter()
+            .filter_map(|&p| v.screen_pos(rect, p))
+            .collect();
+        if pts.len() < 2 {
+            continue;
+        }
+        if line.dashed {
+            for end in [pts[0], pts[pts.len() - 1]] {
+                painter.circle_filled(end, 3.0, line.color);
+            }
+            painter.add(egui::Shape::dashed_line(&pts, (1.5, line.color), 5.0, 3.0));
+        } else {
+            painter.add(egui::Shape::line(pts, (3.0, line.color)));
+        }
+    }
+    if let Some(start) = s.tack_start.as_ref() {
+        let frames = flat_frames(s);
+        let at = frames.get(&start.pattern).map(|f| f.world(start.at));
+        if let Some(screen) = at.and_then(|p| v.screen_pos(rect, p)) {
+            painter.circle_stroke(screen, 6.0, (2.0, pal.preview));
+        }
+    }
+
     if let Some(drape) = &v.drape {
         for pos in drape.pin_positions() {
             if let Some(screen) = v.screen_pos(rect, pos) {
@@ -834,7 +1038,11 @@ fn paint(ui: &mut egui::Ui, rect: Rect, s: &Session, placed: &[PlacedPattern<Pat
     painter.text(
         rect.left_top() + egui::vec2(10.0, 8.0),
         egui::Align2::LEFT_TOP,
-        if v.pinning {
+        if s.tool == Tool::Tack && v.drape.is_some() {
+            "Tack: reset the drape to place tacks on the flat pieces"
+        } else if s.tool == Tool::Tack {
+            "Tack: click a pattern, then a pattern or the avatar · Esc cancels"
+        } else if v.pinning {
             "Click the cloth to pin or unpin a point"
         } else {
             "Drag: orbit · Right-drag: pan · Scroll: zoom · Double-click: frame · Click: select"
@@ -958,6 +1166,10 @@ mod tests {
             doc: Document::default(),
             history: History::new(),
             selection: None,
+            selected_seam: None,
+            selected_tack: None,
+            tack_start: None,
+            seam_check: Default::default(),
             tool: Tool::Select,
             canvas: Canvas2D::default(),
             viewport: Viewport3D::new(None),
@@ -1715,5 +1927,106 @@ mod tests {
             let image = h.render().expect("render");
             image.save(Path::new(&dir).join("app_sizing.png")).unwrap();
         }
+    }
+
+    #[test]
+    fn tack_tool_holds_a_pattern_point_to_the_avatar() {
+        let mut h = harness();
+        let id = add_block(&mut h);
+        h.state_mut().tool = Tool::Tack;
+        h.run();
+        let rect = view_rect(&h);
+        let (piece, head) = {
+            let s = h.state();
+            let piece = flat_frames(s)[&id].world(Vec2::new(100.0, 100.0));
+            // The head: above the patterns, which ring the chest.
+            let b = s.viewport.avatar.bounds;
+            let head = glam::Vec3::new(b.center().x, b.max.y - 0.08, b.center().z);
+            let v = &s.viewport;
+            (
+                v.screen_pos(rect, piece).unwrap(),
+                v.screen_pos(rect, head).unwrap(),
+            )
+        };
+        click_at(&mut h, head);
+        assert!(
+            h.state().tack_start.is_none(),
+            "the avatar alone can't start one"
+        );
+
+        click_at(&mut h, piece);
+        let start = h.state().tack_start.expect("started on the pattern");
+        assert_eq!(start.pattern, id);
+        assert!(
+            start.at.distance(Vec2::new(100.0, 100.0)) < 2.0,
+            "{:?}",
+            start.at
+        );
+
+        click_at(&mut h, head);
+        let s = h.state();
+        assert_eq!(s.doc.tacks.len(), 1);
+        let TackTarget::Avatar(at) = s.doc.tacks[0].b else {
+            panic!("tacked to the avatar");
+        };
+        let b = s.viewport.avatar.bounds;
+        assert!(at[1] > b.max.y - 0.2 && at[2] > b.center().z, "{at:?}");
+        assert!(s.tack_start.is_none());
+
+        // Its thread shows over the flat preview, then follows the drape.
+        assert_eq!(overlays(s, theme::palette(true)).len(), 1);
+        h.get_by_label("Drape").click();
+        h.step();
+        h.step();
+        let s = h.state();
+        let drape = s.viewport.drape.as_ref().unwrap();
+        let (cloth, anchor) = drape.tack_positions()[0];
+        assert_eq!(anchor.to_array(), at);
+        assert!(cloth.distance(anchor) > 0.0);
+        assert_eq!(overlays(s, theme::palette(true)).len(), 1);
+    }
+
+    #[test]
+    fn seams_show_as_threads_before_draping() {
+        use od_core::{AddSewingLine, SeamEdge};
+        let mut s = session();
+        s.add_pattern(
+            "Front",
+            geometry::rectangle(Vec2::ZERO, Vec2::new(400.0, 500.0)),
+        );
+        s.add_pattern(
+            "Back",
+            geometry::rectangle(Vec2::ZERO, Vec2::new(400.0, 500.0)),
+        );
+        let (front, back) = (s.doc.patterns[0].id, s.doc.patterns[1].id);
+        let edge = |pattern, start, end, forward| SeamEdge {
+            pattern,
+            start,
+            end,
+            forward,
+        };
+        // Front's right side to Back's left, top to bottom.
+        s.execute(AddSewingLine::new(
+            vec![edge(front, 1.0, 2.0, true)],
+            vec![edge(back, 3.0, 4.0, false)],
+        ));
+        let lines = overlays(&s, theme::palette(true));
+        // Two sewn stretches, then five threads.
+        assert_eq!(lines.len(), 2 + 5);
+        assert!(!lines[0].dashed && lines[2].dashed);
+        let frames = flat_frames(&s);
+        let first = &lines[2].points;
+        assert!(first[0].distance(frames[&front].world(Vec2::new(400.0, 0.0))) < 1e-5);
+        assert!(first[1].distance(frames[&back].world(Vec2::ZERO)) < 1e-5);
+        // The flat frames match where the preview puts the pieces.
+        let placed = placed_patterns(&s);
+        assert!(
+            frames[&front]
+                .world(Vec2::ZERO)
+                .distance(placed[0].outline[0])
+                < 1e-5
+        );
+        let flat = frames[&front].flat(placed[0].outline[2]);
+        assert!(flat.distance(Vec2::new(400.0, 500.0)) < 1e-2);
     }
 }

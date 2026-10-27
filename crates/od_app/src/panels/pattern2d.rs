@@ -9,8 +9,8 @@ use od_core::document::TOLERANCE;
 use od_core::{
     geometry, AddInternalLine, AddNotch, AddSewingLine, AddTack, AddTopstitch, AddTrim, Document,
     InsertPoint, MovePattern, MovePoint, OutlinePoint, Pattern, PatternId, PatternValue, PointKind,
-    RemoveNotch, RemoveSewingLine, RemoveTack, RemoveTrim, SeamEdge, SeamPoint, SetPointKind,
-    TrimKind, Vec2,
+    RemoveNotch, RemoveSewingLine, RemoveTack, RemoveTrim, SeamEdge, SetPointKind, SetSeamEdge,
+    SewingLine, SewingLineId, Side, TackId, TackPoint, TackTarget, TrimKind, Vec2,
 };
 
 use crate::app::{Session, Tool};
@@ -70,6 +70,8 @@ pub struct Canvas2D {
     /// starts, since the pointer's press position is no longer available
     /// by the time it is released.
     sew_drag_start: Option<Vec2>,
+    /// Unsnapped pointer position, for hover highlights and readouts.
+    hover: Option<Vec2>,
 }
 
 /// What the sew tool has picked so far.
@@ -82,7 +84,7 @@ enum SewBuild {
         active: usize,
     },
     /// A single point, waiting for a second to tack to.
-    Point(SeamPoint),
+    Point(TackPoint),
 }
 
 enum Drag {
@@ -101,6 +103,27 @@ enum Drag {
         grab: Vec2,
         to: Vec2,
     },
+    /// Moving one end of one edge of the selected seam along its outline.
+    SeamEnd {
+        end: SeamEnd,
+        /// The edge as it is being dragged.
+        edge: SeamEdge,
+    },
+}
+
+/// One end of one edge of a seam.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SeamEnd {
+    line: SewingLineId,
+    side: Side,
+    index: usize,
+    /// The end sewing starts from, or the one it finishes at.
+    first: bool,
+}
+
+/// Same stretch of the same outline, whichever way it is sewn.
+fn same_stretch(a: &SeamEdge, b: &SeamEdge) -> bool {
+    a.pattern == b.pattern && a.start == b.start && a.end == b.end
 }
 
 impl Default for Canvas2D {
@@ -118,6 +141,7 @@ impl Default for Canvas2D {
             selected_point: None,
             sew_pending: None,
             sew_drag_start: None,
+            hover: None,
         }
     }
 }
@@ -161,11 +185,133 @@ impl Canvas2D {
 
     /// The point picked by the sew tool, if a tack is half-built.
     #[cfg(test)]
-    pub fn sew_pending_point(&self) -> Option<SeamPoint> {
+    pub fn sew_pending_point(&self) -> Option<TackPoint> {
         match self.sew_pending {
             Some(SewBuild::Point(p)) => Some(p),
             _ => None,
         }
+    }
+
+    /// The corner-to-corner segment under `p` as an edge, sewn from
+    /// whichever end is nearer, so picking two edges near matching ends
+    /// sews them untwisted.
+    fn segment_edge(
+        &self,
+        doc: &Document,
+        selection: Option<PatternId>,
+        p: Vec2,
+    ) -> Option<SeamEdge> {
+        let hit = self.edge_at(doc, selection, p)?;
+        let pattern = doc.pattern(hit.id)?;
+        let n = pattern.outline.len() as f32;
+        let (start, end) = pattern.segment_at(hit.param);
+        let from_start = (hit.param - start).rem_euclid(n);
+        let to_end = (end - hit.param).rem_euclid(n);
+        Some(SeamEdge {
+            pattern: hit.id,
+            start,
+            end,
+            forward: from_start <= to_end,
+        })
+    }
+
+    /// Snap an outline parameter onto a corner point within reach.
+    fn snap_param(&self, pattern: &Pattern, t: f32) -> f32 {
+        if !self.snap.points {
+            return t;
+        }
+        let at = pattern.pos_at_param(t, TOLERANCE);
+        let reach = self.px(SNAP_PX);
+        pattern
+            .outline
+            .iter()
+            .enumerate()
+            .filter(|(_, op)| op.kind == PointKind::Corner)
+            .map(|(i, op)| (op.pos.distance(at), i))
+            .filter(|(d, _)| *d <= reach)
+            .min_by(|a, b| a.0.total_cmp(&b.0))
+            .map_or(t, |(_, i)| i as f32)
+    }
+
+    /// The seam whose sewn line passes nearest `p`, within reach.
+    pub fn seam_at(&self, doc: &Document, p: Vec2) -> Option<SewingLineId> {
+        let reach = self.px(PICK_PX);
+        doc.sewing_lines
+            .iter()
+            .rev()
+            .filter_map(|line| {
+                let gap = line
+                    .edges()
+                    .filter_map(|e| doc.pattern(e.pattern).map(|pat| pat.edge_points(e)))
+                    .flat_map(|pts| {
+                        pts.windows(2)
+                            .map(|w| geometry::closest_on_segment(w[0], w[1], p).0.distance(p))
+                            .collect::<Vec<_>>()
+                    })
+                    .fold(f32::MAX, f32::min);
+                (gap <= reach).then_some((gap, line.id))
+            })
+            .min_by(|a, b| a.0.total_cmp(&b.0))
+            .map(|(_, id)| id)
+    }
+
+    /// The end of an edge of seam `id` within reach of `p`.
+    fn seam_end_at(&self, doc: &Document, id: Option<SewingLineId>, p: Vec2) -> Option<SeamEnd> {
+        let line = doc.sewing_line(id?)?;
+        let reach = self.px(PICK_PX);
+        let mut best: Option<(f32, SeamEnd)> = None;
+        for side in [Side::A, Side::B] {
+            for (index, edge) in line.side(side).iter().enumerate() {
+                let Some(pattern) = doc.pattern(edge.pattern) else {
+                    continue;
+                };
+                for (first, t) in [(true, edge.first()), (false, edge.last())] {
+                    let d = pattern.pos_at_param(t, TOLERANCE).distance(p);
+                    if d <= reach && best.is_none_or(|(b, _)| d < b) {
+                        let end = SeamEnd {
+                            line: line.id,
+                            side,
+                            index,
+                            first,
+                        };
+                        best = Some((d, end));
+                    }
+                }
+            }
+        }
+        best.map(|(_, end)| end)
+    }
+
+    /// The tack whose ends or thread pass nearest `p`, within reach.
+    pub fn tack_at(&self, doc: &Document, p: Vec2) -> Option<TackId> {
+        let reach = self.px(PICK_PX);
+        doc.tacks
+            .iter()
+            .rev()
+            .map(|tack| {
+                let gap = match tack.b {
+                    TackTarget::Pattern(b) => geometry::closest_on_segment(tack.a.at, b.at, p)
+                        .0
+                        .distance(p),
+                    TackTarget::Avatar(_) => tack.a.at.distance(p),
+                };
+                (gap, tack.id)
+            })
+            .filter(|(gap, _)| *gap <= reach)
+            .min_by(|a, b| a.0.total_cmp(&b.0))
+            .map(|(_, id)| id)
+    }
+
+    /// The pattern point a tack click at `p` lands on: inside a pattern, or
+    /// on its outline.
+    fn tack_point_at(&self, doc: &Document, p: Vec2) -> Option<TackPoint> {
+        if let Some(pattern) = doc.pattern_at(p) {
+            return Some(TackPoint { pattern, at: p });
+        }
+        self.edge_at(doc, None, p).map(|hit| TackPoint {
+            pattern: hit.id,
+            at: hit.pos,
+        })
     }
 
     fn to_screen(&self, rect: Rect, p: Vec2) -> Pos2 {
@@ -326,14 +472,14 @@ pub fn ui(ui: &mut egui::Ui, s: &mut Session) {
 
     if s.canvas.draft_tool != s.tool {
         s.canvas.draft.clear();
+        s.tack_start = None;
         s.canvas.draft_tool = s.tool;
     }
     if s.tool != Tool::EditPoints {
         s.canvas.selected_point = None;
     }
-    s.canvas.cursor = response
-        .hover_pos()
-        .map(|p| s.canvas.snap(&s.doc, s.canvas.to_doc(rect, p), None));
+    s.canvas.hover = response.hover_pos().map(|p| s.canvas.to_doc(rect, p));
+    s.canvas.cursor = s.canvas.hover.map(|p| s.canvas.snap(&s.doc, p, None));
 
     // Single keys must not fire while typing in a text field.
     let typing = ui.memory(|m| m.focused().is_some());
@@ -346,6 +492,7 @@ pub fn ui(ui: &mut egui::Ui, s: &mut Session) {
         Tool::Notch => handle_notch(&response, rect, s),
         Tool::Sew => handle_sew(&response, rect, s),
         Tool::Trim => handle_trim(ui, &response, rect, s),
+        Tool::Tack => handle_tack(ui, &response, rect, s, typing),
     }
 
     // Background and grid.
@@ -373,7 +520,12 @@ pub fn ui(ui: &mut egui::Ui, s: &mut Session) {
     draw_overlays(&painter, rect, s, pal);
 
     let hint = match s.tool {
-        Tool::Select => "Click to select · drag to move",
+        Tool::Select => {
+            "Click to select a pattern, seam or tack · drag to move · drag a selected seam's ends to edit it"
+        }
+        Tool::Tack => {
+            "Click a point on a pattern, then a point on a pattern to hold it to · in the 3D view the second click can be on the avatar · Esc cancels"
+        }
         Tool::Rectangle => "Drag to draw a rectangle",
         Tool::Pen => {
             "Click to place points (Shift+click: curve point) · click the first point or Enter to close · Esc cancels"
@@ -439,7 +591,17 @@ fn handle_drag_tools(response: &egui::Response, rect: Rect, s: &mut Session) {
         .map(|p| s.canvas.to_doc(rect, p));
 
     if response.clicked() && s.tool == Tool::Select {
-        s.selection = pointer.and_then(|p| s.doc.pattern_at(p));
+        // Tacks and seams lie on patterns, so they win over the pattern
+        // underneath.
+        s.selected_tack = pointer.and_then(|p| s.canvas.tack_at(&s.doc, p));
+        s.selected_seam = match s.selected_tack {
+            Some(_) => None,
+            None => pointer.and_then(|p| s.canvas.seam_at(&s.doc, p)),
+        };
+        s.selection = match (s.selected_tack, s.selected_seam) {
+            (None, None) => pointer.and_then(|p| s.doc.pattern_at(p)),
+            _ => None,
+        };
     }
 
     // egui reports a drag only after the pointer has moved a few pixels, so
@@ -448,11 +610,27 @@ fn handle_drag_tools(response: &egui::Response, rect: Rect, s: &mut Session) {
         if let (Some(origin), Some(p)) = (press_origin(response, rect, &s.canvas), pointer) {
             s.canvas.drag = match s.tool {
                 Tool::Select => {
-                    s.selection = s.doc.pattern_at(origin);
-                    s.selection.map(|id| Drag::Move {
-                        id,
-                        delta: p - origin,
-                    })
+                    // The selected seam's ends come first: they sit on
+                    // outlines, over the pattern.
+                    let end = s.canvas.seam_end_at(&s.doc, s.selected_seam, origin);
+                    let edge = end.and_then(|end| {
+                        let line = s.doc.sewing_line(end.line)?;
+                        line.side(end.side).get(end.index).copied()
+                    });
+                    match (end, edge) {
+                        (Some(end), Some(edge)) => Some(Drag::SeamEnd { end, edge }),
+                        _ => {
+                            s.selection = s.doc.pattern_at(origin);
+                            if s.selection.is_some() {
+                                s.selected_seam = None;
+                                s.selected_tack = None;
+                            }
+                            s.selection.map(|id| Drag::Move {
+                                id,
+                                delta: p - origin,
+                            })
+                        }
+                    }
                 }
                 _ => Some(Drag::Rect {
                     start: s.canvas.snap(&s.doc, origin, None).0,
@@ -463,6 +641,18 @@ fn handle_drag_tools(response: &egui::Response, rect: Rect, s: &mut Session) {
     } else if response.dragged_by(PointerButton::Primary) {
         let step = response.drag_delta() / s.canvas.zoom;
         let snapped = pointer.map(|p| s.canvas.snap(&s.doc, p, None).0);
+        if let (Some(p), Some(Drag::SeamEnd { end, edge })) = (pointer, &s.canvas.drag) {
+            if let Some(pattern) = s.doc.pattern(edge.pattern) {
+                let t = s.canvas.snap_param(pattern, pattern.nearest_param(p).0);
+                let moved = if end.first {
+                    pattern.edge_between(t, edge.last(), edge.forward)
+                } else {
+                    pattern.edge_between(edge.first(), t, edge.forward)
+                };
+                let end = *end;
+                s.canvas.drag = Some(Drag::SeamEnd { end, edge: moved });
+            }
+        }
         match &mut s.canvas.drag {
             Some(Drag::Move { delta, .. }) => *delta += Vec2::new(step.x, step.y),
             Some(Drag::Rect { end, .. }) => {
@@ -479,6 +669,17 @@ fn handle_drag_tools(response: &egui::Response, rect: Rect, s: &mut Session) {
         match s.canvas.drag.take() {
             Some(Drag::Move { id, delta }) if delta != Vec2::ZERO => {
                 s.execute(MovePattern::new(id, delta));
+            }
+            Some(Drag::SeamEnd { end, edge }) => {
+                let current = s
+                    .doc
+                    .sewing_line(end.line)
+                    .and_then(|line| line.side(end.side).get(end.index).copied());
+                // An end dragged onto the other end would leave nothing sewn.
+                let empty = edge.end - edge.start < 1e-4;
+                if current.is_some_and(|c| c != edge) && !empty {
+                    s.execute(SetSeamEdge::new(end.line, end.side, end.index, edge));
+                }
             }
             Some(Drag::Rect { start, end }) => {
                 let size = end - start;
@@ -801,7 +1002,9 @@ fn handle_sew(response: &egui::Response, rect: Rect, s: &mut Session) {
     // clicks near a corner, so edges there can still be picked).
     if !matches!(s.canvas.sew_pending, Some(SewBuild::Edges { .. })) {
         if let Some((id, index)) = s.canvas.point_at(&s.doc, s.selection, release) {
-            handle_sew_point(s, SeamPoint { pattern: id, index });
+            if let Some(at) = s.doc.pattern(id).map(|p| p.outline[index].pos) {
+                handle_sew_point(s, TackPoint { pattern: id, at });
+            }
             return;
         }
     }
@@ -814,26 +1017,16 @@ fn handle_sew(response: &egui::Response, rect: Rect, s: &mut Session) {
             s.canvas.edge_at(&s.doc, s.selection, release),
         );
         match (a, b) {
-            (Some(a), Some(b)) if a.id == b.id => Some(SeamEdge {
-                pattern: a.id,
-                start: a.param.min(b.param),
-                end: a.param.max(b.param),
-            }),
+            // From where the drag began to where it ended, the shorter way
+            // round: it may cross the outline's starting point.
+            (Some(a), Some(b)) if a.id == b.id => s
+                .doc
+                .pattern(a.id)
+                .map(|pattern| pattern.shorter_edge(a.param, b.param)),
             _ => None,
         }
     } else {
-        s.canvas
-            .edge_at(&s.doc, s.selection, release)
-            .and_then(|hit| {
-                s.doc.pattern(hit.id).map(|pattern| {
-                    let (start, end) = pattern.segment_at(hit.param);
-                    SeamEdge {
-                        pattern: hit.id,
-                        start,
-                        end,
-                    }
-                })
-            })
+        s.canvas.segment_edge(&s.doc, s.selection, release)
     };
     if let Some(edge) = edge {
         handle_sew_edge(s, edge);
@@ -850,7 +1043,7 @@ fn handle_sew_edge(s: &mut Session, edge: SeamEdge) {
             .doc
             .sewing_lines
             .iter()
-            .find(|sl| sl.a.contains(&edge) || sl.b.contains(&edge));
+            .find(|sl| sl.edges().any(|e| same_stretch(e, &edge)));
         if let Some(sewn) = sewn {
             s.execute(RemoveSewingLine::new(sewn.id));
             return;
@@ -865,7 +1058,7 @@ fn handle_sew_edge(s: &mut Session, edge: SeamEdge) {
         return;
     };
     let side = &mut sides[*active];
-    match side.iter().position(|&e| e == edge) {
+    match side.iter().position(|e| same_stretch(e, &edge)) {
         Some(i) => {
             side.remove(i);
         }
@@ -878,10 +1071,10 @@ fn handle_sew_edge(s: &mut Session, edge: SeamEdge) {
 
 /// Handle one point pick: untack an existing tack that uses it, complete a
 /// pending point into a tack, or start a new pending point.
-fn handle_sew_point(s: &mut Session, point: SeamPoint) {
+fn handle_sew_point(s: &mut Session, point: TackPoint) {
     s.selection = Some(point.pattern);
     if s.canvas.sew_pending.is_none() {
-        let tacked = s.doc.tacks.iter().find(|t| t.a == point || t.b == point);
+        let tacked = s.doc.tacks.iter().find(|t| t.points().any(|p| *p == point));
         if let Some(tacked) = tacked {
             s.execute(RemoveTack::new(tacked.id));
             return;
@@ -889,9 +1082,55 @@ fn handle_sew_point(s: &mut Session, point: SeamPoint) {
     }
     match s.canvas.sew_pending.take() {
         Some(SewBuild::Point(first)) if first == point => {} // same point again: cancel
-        Some(SewBuild::Point(first)) => s.execute(AddTack::new(first, point)),
+        Some(SewBuild::Point(first)) => {
+            s.execute(AddTack::new(first, TackTarget::Pattern(point)));
+        }
         // Nothing pending, or an edge build was: start a fresh tack pick.
         _ => s.canvas.sew_pending = Some(SewBuild::Point(point)),
+    }
+}
+
+fn handle_tack(
+    ui: &egui::Ui,
+    response: &egui::Response,
+    rect: Rect,
+    s: &mut Session,
+    typing: bool,
+) {
+    if response.clicked() {
+        let pointer = response
+            .interact_pointer_pos()
+            .map(|p| s.canvas.to_doc(rect, p));
+        if let Some(point) = pointer.and_then(|p| s.canvas.tack_point_at(&s.doc, p)) {
+            s.tack_to(TackTarget::Pattern(point));
+        }
+    }
+    if !typing && ui.input(|i| i.key_pressed(Key::Escape)) {
+        s.tack_start = None;
+    }
+}
+
+/// The seam as it should look this frame, with a dragged end.
+fn previewed_seam<'a>(s: &Session, line: &'a SewingLine) -> std::borrow::Cow<'a, SewingLine> {
+    match &s.canvas.drag {
+        Some(Drag::SeamEnd { end, edge }) if end.line == line.id => {
+            let mut line = line.clone();
+            if let Some(slot) = line.side_mut(end.side).get_mut(end.index) {
+                *slot = *edge;
+            }
+            std::borrow::Cow::Owned(line)
+        }
+        _ => std::borrow::Cow::Borrowed(line),
+    }
+}
+
+/// Colour seam `index` is drawn in: its own, or the warning colour if the
+/// length check flags it.
+pub fn seam_color(s: &Session, index: usize, pal: &theme::Palette) -> Color32 {
+    if s.seam_check.flags(&s.doc, &s.doc.sewing_lines[index]) {
+        pal.warning
+    } else {
+        pal.seams[index % pal.seams.len()]
     }
 }
 
@@ -1043,55 +1282,50 @@ fn draw_pattern(
     }
 }
 
-/// Highlight sewn edges along their outlines, and the edge waiting for its
-/// match while using the sew tool. A seam whose two edges differ in length
-/// by more than [`od_core::document::LENGTH_MISMATCH_TOLERANCE`] is drawn in
-/// a warning colour, with the difference labelled.
+/// Seams and tacks. Each seam has its own colour (the warning colour when
+/// [`crate::app::SeamCheck`] flags its length), a dot where each side starts
+/// sewing, and on the selected or hovered seam, dashed lines joining the
+/// points sewn together, plus handles on the selected seam's ends. Tacks are
+/// crosses with a dashed thread, or labelled "avatar" when held to it.
 fn draw_sewing_lines(painter: &egui::Painter, rect: Rect, s: &Session, pal: &theme::Palette) {
     let to_screen = |p: Vec2| s.canvas.to_screen(rect, p);
     let edge_points = |edge: &SeamEdge| -> Vec<Pos2> {
         s.doc
             .pattern(edge.pattern)
-            .map(|pattern| pattern.segment_points(edge.start, edge.end, TOLERANCE))
+            .map(|pattern| previewed(s, pattern).edge_points(edge))
             .unwrap_or_default()
             .into_iter()
             .map(to_screen)
             .collect()
     };
-    let draw_edge = |edge: &SeamEdge, stroke: Stroke| {
-        let points = edge_points(edge);
-        if points.len() >= 2 {
-            painter.add(Shape::line(points, stroke));
-        }
-    };
     let draw_group = |group: &[SeamEdge], stroke: Stroke| {
-        for edge in group {
-            draw_edge(edge, stroke);
+        for (k, edge) in group.iter().enumerate() {
+            let points = edge_points(edge);
+            // A dot where each side starts shows which way it is sewn.
+            if let (0, Some(&first)) = (k, points.first()) {
+                painter.circle_filled(first, stroke.width + 1.0, stroke.color);
+            }
+            if points.len() >= 2 {
+                painter.add(Shape::line(points, stroke));
+            }
         }
     };
-    let tack_radius = s.canvas.px(5.0);
-    let draw_point = |point: &SeamPoint, color: Color32| {
-        let Some(pos) = s
-            .doc
-            .pattern(point.pattern)
-            .and_then(|pat| pat.outline.get(point.index))
-            .map(|op| to_screen(op.pos))
-        else {
-            return;
-        };
-        painter.circle_filled(pos, tack_radius, color);
-        painter.circle_stroke(pos, tack_radius, Stroke::new(1.5, pal.canvas_bg));
+    let hovered = match s.tool {
+        Tool::Select => s.canvas.hover.and_then(|p| s.canvas.seam_at(&s.doc, p)),
+        _ => None,
     };
-    for tack in &s.doc.tacks {
-        draw_point(&tack.a, pal.accent);
-        draw_point(&tack.b, pal.accent);
-    }
-    for line in &s.doc.sewing_lines {
-        let mismatch = line.length_mismatch(&s.doc);
-        if line.is_length_mismatched(&s.doc) {
-            let stroke = Stroke::new(3.0, pal.warning);
-            draw_group(&line.a, stroke);
-            draw_group(&line.b, stroke);
+
+    for (i, line) in s.doc.sewing_lines.iter().enumerate() {
+        let line = previewed_seam(s, line);
+        let line = line.as_ref();
+        let color = seam_color(s, i, pal);
+        let selected = s.selected_seam == Some(line.id);
+        let emphasis = selected || hovered == Some(line.id);
+        let stroke = Stroke::new(if emphasis { 5.0 } else { 3.0 }, color);
+        draw_group(&line.a, stroke);
+        draw_group(&line.b, stroke);
+        if s.seam_check.flags(&s.doc, line) {
+            let mismatch = line.length_mismatch(&s.doc);
             let a_points: Vec<Pos2> = line.a.iter().flat_map(edge_points).collect();
             if let (Some(mismatch), Some(&mid)) = (mismatch, a_points.get(a_points.len() / 2)) {
                 painter.text(
@@ -1102,18 +1336,122 @@ fn draw_sewing_lines(painter: &egui::Painter, rect: Rect, s: &Session, pal: &the
                     pal.warning,
                 );
             }
-        } else {
-            let stroke = Stroke::new(3.0, pal.accent);
-            draw_group(&line.a, stroke);
-            draw_group(&line.b, stroke);
+        }
+        if emphasis {
+            const PAIRS: usize = 8;
+            for k in 0..=PAIRS {
+                let t = k as f32 / PAIRS as f32;
+                if let (Some((_, a)), Some((_, b))) = (
+                    s.doc.side_point(line, Side::A, t),
+                    s.doc.side_point(line, Side::B, t),
+                ) {
+                    painter.extend(Shape::dashed_line(
+                        &[to_screen(a), to_screen(b)],
+                        Stroke::new(1.0, color),
+                        5.0,
+                        4.0,
+                    ));
+                }
+            }
+        }
+        if selected {
+            for edge in line.edges() {
+                if let Some(pattern) = s.doc.pattern(edge.pattern) {
+                    for t in [edge.start, edge.end] {
+                        let at = to_screen(previewed(s, pattern).pos_at_param(t, TOLERANCE));
+                        painter.circle(at, 5.0, pal.canvas_bg, Stroke::new(2.0, color));
+                    }
+                }
+            }
         }
     }
+
+    // Tacked points move with a pattern being dragged.
+    let at = |point: &TackPoint| match &s.canvas.drag {
+        Some(Drag::Move { id, delta }) if *id == point.pattern => point.at + *delta,
+        _ => point.at,
+    };
+    let mark = |at: Pos2, color: Color32| {
+        let stroke = Stroke::new(2.0, color);
+        for d in [Px::new(5.0, 5.0), Px::new(5.0, -5.0)] {
+            painter.line_segment([at - d, at + d], stroke);
+        }
+    };
+    for tack in &s.doc.tacks {
+        let color = if s.selected_tack == Some(tack.id) {
+            pal.selected
+        } else {
+            pal.accent
+        };
+        let from = to_screen(at(&tack.a));
+        mark(from, color);
+        match &tack.b {
+            TackTarget::Pattern(b) => {
+                let to = to_screen(at(b));
+                mark(to, color);
+                painter.extend(Shape::dashed_line(
+                    &[from, to],
+                    Stroke::new(1.5, color),
+                    6.0,
+                    4.0,
+                ));
+            }
+            TackTarget::Avatar(_) => {
+                painter.text(
+                    from + Px::new(8.0, -8.0),
+                    Align2::LEFT_BOTTOM,
+                    "avatar",
+                    FontId::proportional(11.0),
+                    color,
+                );
+            }
+        }
+    }
+    if let Some(start) = &s.tack_start {
+        let from = to_screen(start.at);
+        mark(from, pal.preview);
+        if let (Tool::Tack, Some(hover)) = (s.tool, s.canvas.hover) {
+            painter.extend(Shape::dashed_line(
+                &[from, to_screen(hover)],
+                Stroke::new(1.5, pal.preview),
+                6.0,
+                4.0,
+            ));
+        }
+    }
+
     match &s.canvas.sew_pending {
-        Some(SewBuild::Edges { sides, .. }) => {
+        Some(SewBuild::Edges { sides, active }) => {
             draw_group(&sides[0], Stroke::new(3.0, pal.selected));
             draw_group(&sides[1], Stroke::new(3.0, pal.preview));
+            // Running lengths of both sides, by the pointer.
+            let length = |group: &[SeamEdge]| -> f32 {
+                group
+                    .iter()
+                    .filter_map(|e| {
+                        s.doc
+                            .pattern(e.pattern)
+                            .map(|p| p.segment_length(e.start, e.end, TOLERANCE))
+                    })
+                    .sum()
+            };
+            let (a, b) = (length(&sides[0]), length(&sides[1]));
+            let text = if *active == 0 && sides[1].is_empty() {
+                format!("A {a:.1} mm")
+            } else {
+                format!("A {a:.1} mm · B {b:.1} mm · Δ {:.1} mm", (a - b).abs())
+            };
+            if let Some(hover) = s.canvas.hover {
+                painter.text(
+                    to_screen(hover) + Px::new(12.0, 12.0),
+                    Align2::LEFT_TOP,
+                    text,
+                    FontId::monospace(12.0),
+                    pal.preview,
+                );
+            }
         }
-        Some(SewBuild::Point(point)) => draw_point(point, pal.selected),
+        Some(SewBuild::Point(point)) => mark(to_screen(point.at), pal.selected),
         None => {}
     }
 }

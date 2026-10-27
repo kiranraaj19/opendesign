@@ -28,6 +28,7 @@ pub struct Drape {
     structural_count: usize,
     trims: Vec<(TrimKind, usize)>,
     topstitches: Vec<Vec<usize>>,
+    tacks: Vec<(usize, usize)>,
 }
 
 impl Drape {
@@ -54,6 +55,7 @@ impl Drape {
             structural_count,
             trims: scene.trims,
             topstitches: scene.topstitches,
+            tacks: scene.tacks,
         }
     }
 
@@ -108,6 +110,19 @@ impl Drape {
         self.trims
             .iter()
             .map(|&(kind, i)| (kind, self.world.particles[i].position))
+            .collect()
+    }
+
+    /// Where each tack's two ends currently sit, for drawing its thread.
+    pub fn tack_positions(&self) -> Vec<(Vec3, Vec3)> {
+        self.tacks
+            .iter()
+            .map(|&(a, b)| {
+                (
+                    self.world.particles[a].position,
+                    self.world.particles[b].position,
+                )
+            })
             .collect()
     }
 
@@ -389,11 +404,13 @@ mod tests {
                 pattern: PatternId(1),
                 start: 1.0,
                 end: 2.0,
+                forward: true,
             }],
             b: vec![SeamEdge {
                 pattern: PatternId(2),
                 start: 3.0,
                 end: 4.0,
+                forward: true,
             }],
         });
         let placements = placements_for(&doc, 1.5);

@@ -108,6 +108,11 @@ pub struct SeamEdge {
     pub pattern: PatternId,
     pub start: f32,
     pub end: f32,
+    /// Sewn from `start` to `end` (`true`), or from `end` back to `start`.
+    /// Two edges that face opposite ways around their outlines (a front's
+    /// right side and a back's left side) are sewn untwisted by giving
+    /// them opposite directions.
+    pub forward: bool,
 }
 
 /// A seam: two groups of edges, on the same or different patterns, sewn
@@ -131,21 +136,56 @@ pub const LENGTH_MISMATCH_TOLERANCE: f32 = 0.03;
 #[serde(transparent)]
 pub struct TackId(pub u64);
 
-/// A single outline point, referenced by a [`Tack`].
+/// A point on a pattern, in the same millimetre space as its outline: on
+/// the outline or inside it. It moves with the pattern when the pattern is
+/// moved or flipped.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
-pub struct SeamPoint {
+pub struct TackPoint {
     pub pattern: PatternId,
-    pub index: usize,
+    pub at: Vec2,
 }
 
-/// A point-to-point stitch: pins two outline points together (a dart tip, a
-/// single alignment mark) without implying a sewn edge between them, the
-/// way a [`SewingLine`] does.
+/// What a [`Tack`] holds its pattern point to.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TackTarget {
+    Pattern(TackPoint),
+    /// A point on the avatar's surface, in metres in the 3D view's world
+    /// (Y up). Kept as placed: resizing the avatar doesn't move it.
+    Avatar([f32; 3]),
+}
+
+/// A point-to-point stitch: holds a point on a pattern to a point on
+/// another (a dart tip, an alignment mark) or to the avatar, without
+/// implying a sewn edge between them the way a [`SewingLine`] does.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Tack {
     pub id: TackId,
-    pub a: SeamPoint,
-    pub b: SeamPoint,
+    pub a: TackPoint,
+    pub b: TackTarget,
+}
+
+impl Tack {
+    /// This tack's pattern points: `a`, and `b` unless it is on the avatar.
+    pub fn points(&self) -> impl Iterator<Item = &TackPoint> {
+        let b = match &self.b {
+            TackTarget::Pattern(p) => Some(p),
+            TackTarget::Avatar(_) => None,
+        };
+        std::iter::once(&self.a).chain(b)
+    }
+
+    pub fn points_mut(&mut self) -> impl Iterator<Item = &mut TackPoint> {
+        let b = match &mut self.b {
+            TackTarget::Pattern(p) => Some(p),
+            TackTarget::Avatar(_) => None,
+        };
+        std::iter::once(&mut self.a).chain(b)
+    }
+
+    pub fn touches(&self, pattern: PatternId) -> bool {
+        self.points().any(|p| p.pattern == pattern)
+    }
 }
 
 impl SewingLine {
@@ -163,7 +203,7 @@ impl SewingLine {
 
     /// The combined lengths in mm of sides `a` and `b`. `None` if either
     /// side has an edge whose pattern no longer exists.
-    fn side_lengths(&self, doc: &Document) -> Option<(f32, f32)> {
+    pub fn side_lengths(&self, doc: &Document) -> Option<(f32, f32)> {
         Some((
             Self::group_length(doc, &self.a)?,
             Self::group_length(doc, &self.b)?,
@@ -180,9 +220,15 @@ impl SewingLine {
     /// Whether the two sides differ in combined length by more than
     /// [`LENGTH_MISMATCH_TOLERANCE`] of the shorter one.
     pub fn is_length_mismatched(&self, doc: &Document) -> bool {
+        self.is_mismatched_by(doc, LENGTH_MISMATCH_TOLERANCE)
+    }
+
+    /// Whether the two sides differ in combined length by more than
+    /// `fraction` of the shorter one.
+    pub fn is_mismatched_by(&self, doc: &Document, fraction: f32) -> bool {
         self.side_lengths(doc).is_some_and(|(a, b)| {
             let shorter = a.min(b);
-            shorter > 0.0 && (a - b).abs() / shorter > LENGTH_MISMATCH_TOLERANCE
+            shorter > 0.0 && (a - b).abs() / shorter > fraction
         })
     }
 }
@@ -358,7 +404,7 @@ pub enum Axis {
 }
 
 impl Axis {
-    fn reflect(self, p: Vec2, about: f32) -> Vec2 {
+    pub(crate) fn reflect(self, p: Vec2, about: f32) -> Vec2 {
         match self {
             Axis::Vertical => Vec2::new(2.0 * about - p.x, p.y),
             Axis::Horizontal => Vec2::new(p.x, 2.0 * about - p.y),
@@ -544,7 +590,7 @@ impl Pattern {
     /// anywhere within one lap of any outline parameter range is therefore
     /// contiguous in the result, regardless of where the outline itself
     /// happens to wrap.
-    fn unwrapped_flat(&self, tolerance: f32) -> Vec<(f32, Vec2)> {
+    pub(crate) fn unwrapped_flat(&self, tolerance: f32) -> Vec<(f32, Vec2)> {
         let nf = self.outline.len() as f32;
         let mut pts: Vec<(f32, Vec2)> = self
             .flatten(tolerance)
@@ -746,6 +792,17 @@ fn quad(out: &mut Vec<FlatPoint>, a: (Vec2, f32), c: (Vec2, f32), b: (Vec2, f32)
     }
 }
 
+/// Why a document read from a file was rejected.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Invalid {
+    DuplicatePattern(PatternId),
+    /// A seam sews a pattern that doesn't exist, has an empty side, or has
+    /// an edge that ends before it starts.
+    BadSewingLine(SewingLineId),
+    /// A tack holds a pattern that doesn't exist.
+    BadTack(TackId),
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Document {
     pub name: String,
@@ -778,13 +835,26 @@ impl Document {
         }
     }
 
-    /// Check a document read from a file: ids must be unique, and new ids
-    /// must not collide with existing ones even if the file says otherwise.
-    pub(crate) fn validate(&mut self) -> Result<(), PatternId> {
+    /// Check a document read from a file: ids must be unique, seams and
+    /// tacks must hold patterns that exist, and new ids must not collide
+    /// with existing ones even if the file says otherwise.
+    pub(crate) fn validate(&mut self) -> Result<(), Invalid> {
         let mut ids: Vec<PatternId> = self.patterns.iter().map(|p| p.id).collect();
         ids.sort();
         if let Some(pair) = ids.windows(2).find(|w| w[0] == w[1]) {
-            return Err(pair[0]);
+            return Err(Invalid::DuplicatePattern(pair[0]));
+        }
+        let known = |id: &PatternId| ids.binary_search(id).is_ok();
+        for line in &self.sewing_lines {
+            let ok = line.edges().all(|e| known(&e.pattern) && e.end > e.start);
+            if !ok || line.a.is_empty() || line.b.is_empty() {
+                return Err(Invalid::BadSewingLine(line.id));
+            }
+        }
+        for tack in &self.tacks {
+            if !tack.points().all(|p| known(&p.pattern)) {
+                return Err(Invalid::BadTack(tack.id));
+            }
         }
         let max = ids.last().map_or(0, |id| id.0);
         self.next_id = self.next_id.max(max + 1);
@@ -810,6 +880,18 @@ impl Document {
     }
 
     /// Reserve a fresh tack id. Ids are never reused, even after undo.
+    pub fn sewing_line(&self, id: SewingLineId) -> Option<&SewingLine> {
+        self.sewing_lines.iter().find(|s| s.id == id)
+    }
+
+    pub fn sewing_line_mut(&mut self, id: SewingLineId) -> Option<&mut SewingLine> {
+        self.sewing_lines.iter_mut().find(|s| s.id == id)
+    }
+
+    pub fn tack(&self, id: TackId) -> Option<&Tack> {
+        self.tacks.iter().find(|t| t.id == id)
+    }
+
     pub fn allocate_tack_id(&mut self) -> TackId {
         let id = TackId(self.next_tack_id);
         self.next_tack_id += 1;
@@ -1068,6 +1150,7 @@ mod tests {
             pattern,
             start,
             end,
+            forward: true,
         }
     }
 
