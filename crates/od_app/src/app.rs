@@ -642,7 +642,10 @@ fn restore_layout(storage: Option<&dyn eframe::Storage>) -> DockState<Tab> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use egui_kittest::{kittest::Queryable, Harness};
+    use egui_kittest::{
+        kittest::{NodeT, Queryable},
+        Harness,
+    };
 
     fn harness() -> Harness<'static, OpenDesignApp> {
         let mut h = Harness::builder()
@@ -1796,5 +1799,72 @@ mod tests {
 
         press(&mut h, Modifiers::COMMAND, Key::Z);
         assert_eq!(h.state().session.doc.tacks, doc.tacks);
+    }
+
+    // ---- Library: asset browser (Phase 8) ----
+
+    #[test]
+    fn library_lists_avatars_fabrics_and_trims() {
+        let mut h = harness();
+        // Avatars (also covered by viewport3d's own avatar-switching tests).
+        for label in ["Female", "Male", "Kid"] {
+            h.get_by_label(label);
+        }
+        // Fabrics: a swatch legend; assignment itself lives in Properties
+        // (see `properties_panel_assigns_a_fabric`), so there's no
+        // per-fabric widget here to avoid a second control for one action.
+        h.get_by_label("Select a pattern to assign a fabric.");
+        // Trims remain a placeholder past this phase, collapsed by default.
+        click(&mut h, "Trims");
+        assert!(h.get_by_label("Buttons").accesskit_node().is_disabled());
+    }
+
+    #[test]
+    fn picking_a_fabric_assigns_it_to_the_selected_pattern() {
+        let mut h = harness();
+        click(&mut h, "+ Front bodice");
+        let id = h.state().session.doc.patterns[0].id;
+        assert_eq!(
+            h.state().session.doc.pattern(id).unwrap().fabric,
+            od_core::Fabric::default()
+        );
+
+        click(&mut h, "Denim");
+        assert_eq!(
+            h.state().session.doc.pattern(id).unwrap().fabric,
+            od_core::Fabric::denim()
+        );
+
+        // Undo restores the previous (default) fabric.
+        press(&mut h, Modifiers::COMMAND, Key::Z);
+        assert_eq!(
+            h.state().session.doc.pattern(id).unwrap().fabric,
+            od_core::Fabric::default()
+        );
+    }
+
+    #[test]
+    fn switching_the_selected_pattern_shows_its_own_fabric() {
+        let mut h = harness();
+        click(&mut h, "+ Front bodice");
+        let front = h.state().session.doc.patterns[0].id;
+        click(&mut h, "Silk");
+
+        click(&mut h, "+ Back bodice");
+        let back = h.state().session.doc.patterns[1].id;
+        assert_ne!(front, back);
+        assert_eq!(
+            h.state().session.doc.pattern(back).unwrap().fabric,
+            od_core::Fabric::default()
+        );
+
+        // Re-selecting the first pattern (2D canvas) shows it still has
+        // its fabric, unaffected by the second pattern's selection.
+        h.state_mut().session.selection = Some(front);
+        h.run();
+        assert_eq!(
+            h.state().session.doc.pattern(front).unwrap().fabric,
+            od_core::Fabric::silk()
+        );
     }
 }
