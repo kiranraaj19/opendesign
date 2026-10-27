@@ -145,6 +145,9 @@ pub struct Viewport3D {
     /// stepped) while paused so the last pose stays on screen.
     pub drape: Option<od_sim::drape::Drape>,
     pub draping: bool,
+    /// While draping, clicking the garment pins or unpins the nearest
+    /// point instead of selecting a pattern.
+    pub pinning: bool,
 }
 
 impl Viewport3D {
@@ -171,6 +174,7 @@ impl Viewport3D {
             needs_framing: true,
             drape: None,
             draping: false,
+            pinning: false,
         }
     }
 
@@ -192,7 +196,6 @@ impl Viewport3D {
     }
 
     /// Where a world point appears in the view `rect`, if in front of the camera.
-    #[cfg(test)]
     pub fn screen_pos(&self, rect: Rect, world: glam::Vec3) -> Option<Pos2> {
         let ndc = self.camera.project(world, aspect(rect))?;
         let p = od_render::camera::pixel_from_ndc(
@@ -217,6 +220,25 @@ impl Viewport3D {
         );
         let ray = self.camera.ray(ndc, aspect(rect));
         view::pick(&ray, Some(self.avatar.mesh()), placed)
+    }
+
+    /// Like [`Self::pick`], but also returns where on the pattern the ray
+    /// landed, for a tool that pins the cloth where it was clicked.
+    pub fn pick_point(
+        &self,
+        rect: Rect,
+        pos: Pos2,
+        placed: &[PlacedPattern<PatternId>],
+    ) -> Option<(PatternId, glam::Vec3)> {
+        let ndc = ndc_from_pixel(
+            to_glam(pos),
+            to_glam(rect.min),
+            to_glam(rect.size().to_pos2()),
+        );
+        let ray = self.camera.ray(ndc, aspect(rect));
+        let items = placed.iter().map(|p| (p.key, &p.mesh));
+        let (key, t) = od_render::pick::closest_hit(&ray, items)?;
+        Some((key, ray.at(t)))
     }
 
     /// Everything in view, from the current direction.
@@ -370,14 +392,19 @@ fn view_buttons(ui: &mut egui::Ui, s: &mut Session) -> Option<ViewAction> {
     {
         toggle_drape(s);
     }
-    if s.viewport.drape.is_some()
-        && ui
+    if s.viewport.drape.is_some() {
+        if ui
             .button("Reset drape")
             .on_hover_text("Discard the simulation and go back to the flat layout")
             .clicked()
-    {
-        s.viewport.drape = None;
-        s.viewport.draping = false;
+        {
+            s.viewport.drape = None;
+            s.viewport.draping = false;
+        }
+        ui.toggle_value(&mut s.viewport.pinning, "Pin")
+            .on_hover_text("Click the draped cloth to pin or unpin a point in place");
+    } else {
+        s.viewport.pinning = false;
     }
     action
 }
@@ -414,7 +441,15 @@ fn handle_input(
         v.frame_all(rect, placed);
     } else if response.clicked() {
         if let Some(pos) = response.interact_pointer_pos() {
-            s.selection = v.pick(rect, pos, placed);
+            if v.pinning {
+                if let Some((pattern, point)) = v.pick_point(rect, pos, placed) {
+                    if let Some(drape) = v.drape.as_mut() {
+                        drape.toggle_pin_near(pattern, point);
+                    }
+                }
+            } else {
+                s.selection = v.pick(rect, pos, placed);
+            }
         }
     }
 }
@@ -467,10 +502,23 @@ fn paint(ui: &mut egui::Ui, rect: Rect, s: &Session, placed: &[PlacedPattern<Pat
         ui.put(Rect::from_center_size(rect.center(), size), label);
     }
 
+    if let Some(drape) = &v.drape {
+        for pos in drape.pin_positions() {
+            if let Some(screen) = v.screen_pos(rect, pos) {
+                painter.circle_filled(screen, 5.0, pal.selected);
+                painter.circle_stroke(screen, 5.0, (1.0, pal.canvas_bg));
+            }
+        }
+    }
+
     painter.text(
         rect.left_top() + egui::vec2(10.0, 8.0),
         egui::Align2::LEFT_TOP,
-        "Drag: orbit · Right-drag: pan · Scroll: zoom · Double-click: frame · Click: select",
+        if v.pinning {
+            "Click the cloth to pin or unpin a point"
+        } else {
+            "Drag: orbit · Right-drag: pan · Scroll: zoom · Double-click: frame · Click: select"
+        },
         egui::FontId::proportional(12.0),
         pal.hint,
     );
@@ -736,6 +784,85 @@ mod tests {
         h.run();
         assert!(h.state().viewport.drape.is_none());
         h.get_by_label("Drape");
+    }
+
+    #[test]
+    fn pin_tool_toggles_a_pin_where_the_cloth_is_clicked() {
+        let mut h = harness();
+        add_block(&mut h);
+        h.run();
+
+        h.get_by_label("Drape").click();
+        h.step();
+        // One more settled frame before a freshly-shown button's click can
+        // reliably register.
+        h.step();
+        h.get_by_label("Pin").click();
+        h.step();
+        assert!(h.state().viewport.pinning);
+
+        let rect = view_rect(&h);
+        // The cloth keeps falling each step, so find where it currently is
+        // right before clicking rather than reusing a stale position.
+        let cloth_centre = |h: &Harness<'_, Session>| {
+            let s = h.state();
+            let placed = s.viewport.drape.as_ref().unwrap().placed_patterns();
+            let centre = placed[0].mesh.bounds().unwrap().center();
+            s.viewport.screen_pos(rect, centre).unwrap()
+        };
+
+        // Like `click_at`, but stepping (not `run`-ing) each frame: while
+        // draping is on, every frame requests a repaint, which `run()`
+        // treats as never converging.
+        let click_while_draping = |h: &mut Harness<'_, Session>, pos: Pos2| {
+            h.hover_at(pos);
+            h.step();
+            h.drag_at(pos);
+            h.step();
+            h.drop_at(pos);
+            h.step();
+        };
+
+        let on_cloth = cloth_centre(&h);
+        assert!(rect.contains(on_cloth));
+        click_while_draping(&mut h, on_cloth);
+        assert_eq!(
+            h.state()
+                .viewport
+                .drape
+                .as_ref()
+                .unwrap()
+                .pin_positions()
+                .len(),
+            1,
+            "clicking the cloth while pinning adds a pin"
+        );
+        // Pinning takes over clicks instead of selecting the pattern.
+        assert_eq!(h.state().selection, None);
+
+        // Click just inside the mesh from the pin itself: close enough
+        // that it's still the nearest particle, but off the exact vertex,
+        // which is a numerically fragile spot for a ray/triangle hit test.
+        let near_pin = {
+            let s = h.state();
+            let drape = s.viewport.drape.as_ref().unwrap();
+            let pin = drape.pin_positions()[0];
+            let centre = drape.placed_patterns()[0].mesh.bounds().unwrap().center();
+            s.viewport
+                .screen_pos(rect, pin * 0.9 + centre * 0.1)
+                .unwrap()
+        };
+        click_while_draping(&mut h, near_pin);
+        assert!(
+            h.state()
+                .viewport
+                .drape
+                .as_ref()
+                .unwrap()
+                .pin_positions()
+                .is_empty(),
+            "clicking the same spot again unpins it"
+        );
     }
 
     #[test]
