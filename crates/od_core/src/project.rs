@@ -1,7 +1,7 @@
 //! Project files (`.odproj`): a versioned JSON wrapper around a [`Document`].
 //!
 //! ```json
-//! { "format": "opendesign-project", "version": 7, "document": { ... } }
+//! { "format": "opendesign-project", "version": 8, "document": { ... } }
 //! ```
 //!
 //! Older versions are upgraded on load by the `migrate_*` steps below, so a
@@ -30,7 +30,8 @@ pub const FORMAT: &str = "opendesign-project";
 ///   sewing), not whole outline indices.
 /// - 6: patterns gain a fabric (mass, stiffness, friction, colour/weave).
 /// - 7: patterns gain topstitch lines and point trims (buttons, snaps).
-pub const VERSION: u32 = 7;
+/// - 8: the document gains a size chart; patterns gain a grading rule.
+pub const VERSION: u32 = 8;
 
 #[derive(Debug)]
 pub enum ProjectError {
@@ -168,6 +169,24 @@ fn migrate_v6(doc: &mut serde_json::Value) {
     }
 }
 
+/// Upgrade a version 7 document to version 8 in place: the standard S/M/L/XL
+/// chart, and no pattern had a grading rule yet (same outline at every size
+/// until one is set).
+fn migrate_v7(doc: &mut serde_json::Value) {
+    use serde_json::{json, Value};
+    let default_chart =
+        serde_json::to_value(crate::document::SizeChart::default()).expect("chart serializes");
+    if let Some(object) = doc.as_object_mut() {
+        object.insert("size_chart".into(), default_chart);
+    }
+    let Some(patterns) = doc.get_mut("patterns").and_then(Value::as_array_mut) else {
+        return; // leave it for deserialisation to report
+    };
+    for pattern in patterns.iter_mut().filter_map(Value::as_object_mut) {
+        pattern.insert("grading".into(), json!({ "point_deltas": [] }));
+    }
+}
+
 pub fn to_json(doc: &Document) -> String {
     let file = FileOut {
         format: FORMAT,
@@ -215,6 +234,9 @@ pub fn from_json(text: &str) -> Result<Document, ProjectError> {
     }
     if header.version < 7 {
         migrate_v6(&mut body);
+    }
+    if header.version < 8 {
+        migrate_v7(&mut body);
     }
     let mut doc: Document = serde_json::from_value(body).map_err(ProjectError::Malformed)?;
     doc.validate().map_err(ProjectError::DuplicateId)?;
@@ -293,7 +315,7 @@ mod tests {
             Err(ProjectError::NotAProject)
         ));
         assert!(matches!(
-            from_json(&good.replace("\"version\": 7", "\"version\": 99")),
+            from_json(&good.replace("\"version\": 8", "\"version\": 99")),
             Err(ProjectError::UnsupportedVersion(99))
         ));
         let dup = good.replace("\"id\": 2", "\"id\": 1");
@@ -316,7 +338,7 @@ mod tests {
         doc.patterns[0].seam_allowance = 7.5;
 
         let text = to_json(&doc);
-        assert!(text.contains("\"version\": 7"));
+        assert!(text.contains("\"version\": 8"));
         assert!(text.contains("\"kind\": \"curve\""));
         assert_eq!(from_json(&text).unwrap(), doc);
     }
@@ -365,7 +387,7 @@ mod tests {
 
         // Saving writes the current version, which loads back the same.
         let resaved = to_json(&doc);
-        assert!(resaved.contains("\"version\": 7"));
+        assert!(resaved.contains("\"version\": 8"));
         assert_eq!(from_json(&resaved).unwrap(), doc);
     }
 
@@ -421,7 +443,7 @@ mod tests {
 
         // Saving writes the current version, which loads back the same.
         let resaved = to_json(&doc);
-        assert!(resaved.contains("\"version\": 7"));
+        assert!(resaved.contains("\"version\": 8"));
         assert_eq!(from_json(&resaved).unwrap(), doc);
     }
 
@@ -474,7 +496,7 @@ mod tests {
         assert_eq!(doc.tacks.len(), 1);
 
         let resaved = to_json(&doc);
-        assert!(resaved.contains("\"version\": 7"));
+        assert!(resaved.contains("\"version\": 8"));
         assert_eq!(from_json(&resaved).unwrap(), doc);
     }
 
@@ -535,7 +557,7 @@ mod tests {
         );
 
         let resaved = to_json(&doc);
-        assert!(resaved.contains("\"version\": 7"));
+        assert!(resaved.contains("\"version\": 8"));
         assert_eq!(from_json(&resaved).unwrap(), doc);
     }
 
@@ -576,7 +598,7 @@ mod tests {
         assert_eq!(doc.patterns[0].fabric, crate::document::Fabric::cotton());
 
         let resaved = to_json(&doc);
-        assert!(resaved.contains("\"version\": 7"));
+        assert!(resaved.contains("\"version\": 8"));
         assert_eq!(from_json(&resaved).unwrap(), doc);
     }
 
@@ -595,7 +617,71 @@ mod tests {
         assert_eq!(doc.patterns[0].trims.len(), 1);
 
         let resaved = to_json(&doc);
-        assert!(resaved.contains("\"version\": 7"));
+        assert!(resaved.contains("\"version\": 8"));
+        assert_eq!(from_json(&resaved).unwrap(), doc);
+    }
+
+    /// A file exactly as the topstitch/trims commit (format version 7)
+    /// wrote it: no size chart, and no pattern has a grading rule yet.
+    const V7_FILE: &str = r#"{
+  "format": "opendesign-project",
+  "version": 7,
+  "document": {
+    "name": "Old shirt",
+    "patterns": [
+      {
+        "id": 4,
+        "name": "Front",
+        "outline": [
+          { "x": 0.0, "y": 0.0, "kind": "corner" },
+          { "x": 500.0, "y": 0.0, "kind": "corner" },
+          { "x": 500.0, "y": 600.0, "kind": "corner" },
+          { "x": 0.0, "y": 600.0, "kind": "corner" }
+        ],
+        "seam_allowance": 10.0,
+        "grain_angle": 0.0,
+        "notches": [],
+        "internal_lines": [],
+        "fabric": {
+          "name": "Cotton",
+          "mass_per_area": 0.15,
+          "stretch_compliance": 1e-7,
+          "bending_compliance": 1e-5,
+          "friction": 0.3,
+          "color": [235, 230, 210],
+          "texture": "plain"
+        },
+        "topstitches": [],
+        "trims": []
+      }
+    ],
+    "sewing_lines": [],
+    "tacks": [],
+    "next_id": 5,
+    "next_sewing_id": 1,
+    "next_tack_id": 1
+  }
+}"#;
+
+    #[test]
+    fn version_7_files_load_with_the_standard_size_chart_and_no_grading() {
+        let doc = from_json(V7_FILE).unwrap();
+        assert_eq!(doc.size_chart, crate::document::SizeChart::standard());
+        assert_eq!(doc.patterns[0].grading, crate::document::Grading::default());
+        // Ungraded, so every size looks the same as the base.
+        assert_eq!(doc.patterns[0].graded_outline(2), doc.patterns[0].outline);
+
+        let id = doc.patterns[0].id;
+        let mut doc = doc;
+        crate::command::SetGrading::new(
+            id,
+            crate::document::Grading::uniform_scale(&doc.pattern(id).unwrap().outline, 5.0),
+        )
+        .apply(&mut doc);
+        assert_ne!(doc.patterns[0].graded_outline(1), doc.patterns[0].outline);
+
+        let resaved = to_json(&doc);
+        assert!(resaved.contains("\"version\": 8"));
         assert_eq!(from_json(&resaved).unwrap(), doc);
     }
 

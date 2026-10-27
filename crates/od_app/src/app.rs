@@ -136,6 +136,10 @@ pub struct Session {
     pub canvas: Canvas2D,
     pub viewport: Viewport3D,
     pub props: PropertiesState,
+    /// Index into `doc.size_chart.names` the 2D canvas, properties and BOM
+    /// previews currently show. Not persisted: a document always opens
+    /// showing its base size.
+    pub preview_size: usize,
 }
 
 impl Session {
@@ -231,10 +235,18 @@ impl Session {
 
     /// Replace the document, e.g. after File → New or Open.
     pub fn load_document(&mut self, doc: Document) {
+        self.preview_size = doc.size_chart.base;
         self.doc = doc;
         self.history.clear();
         self.selection = None;
         self.props = PropertiesState::default();
+    }
+
+    /// How many sizes [`Session::preview_size`] is from the document's base
+    /// size (see [`od_core::SizeChart::steps`]), for grading a pattern or
+    /// computing its BOM at the size currently being previewed.
+    pub fn preview_steps(&self) -> i32 {
+        self.doc.size_chart.steps(self.preview_size)
     }
 }
 
@@ -259,6 +271,7 @@ impl OpenDesignApp {
                 canvas: Canvas2D::default(),
                 viewport: Viewport3D::new(cc.wgpu_render_state.as_ref()),
                 props: PropertiesState::default(),
+                preview_size: Document::default().size_chart.base,
             },
             files: FileState::with_recent(
                 cc.storage
@@ -392,6 +405,17 @@ impl OpenDesignApp {
                     ui.add_enabled_ui(!s.doc.patterns.is_empty(), |ui| {
                         if ui.button("Patterns as DXF (AAMA)…").clicked() {
                             if let Some(err) = crate::export::export_dxf(s) {
+                                files.error = Some(err);
+                            }
+                        }
+                        if ui
+                            .button("Patterns and BOM as PDF…")
+                            .on_hover_text(
+                                "Traces each piece to scale plus a bill-of-materials summary, at the size picked in Properties.",
+                            )
+                            .clicked()
+                        {
+                            if let Some(err) = crate::export::export_pdf(s) {
                                 files.error = Some(err);
                             }
                         }
@@ -1478,7 +1502,8 @@ mod tests {
             .get_all_by_role(Role::SpinButton)
             .map(|n| n.rect().center())
             .collect();
-        assert_eq!(fields.len(), 2);
+        // Seam allowance, grainline, and the new grading-percent field.
+        assert_eq!(fields.len(), 3);
         drag(&mut h, fields[0], fields[0] + egui::vec2(40.0, 0.0));
         assert_eq!(last_step(&h), "Set seam allowance");
         let allowance = h.state().session.doc.patterns[0].seam_allowance;

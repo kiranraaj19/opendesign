@@ -352,7 +352,21 @@ pub fn ui(ui: &mut egui::Ui, s: &mut Session) {
     painter.rect_filled(rect, 0.0, pal.canvas_bg);
     draw_grid(&painter, rect, &s.canvas, pal);
 
-    for pattern in &s.doc.patterns {
+    // Previewing a graded size only changes what's drawn: editing always
+    // acts on the base pattern, so every tool keeps working off real
+    // outline indices regardless of which size is being looked at.
+    let steps = s.preview_steps();
+    let graded: Vec<Pattern> = if steps == 0 {
+        Vec::new()
+    } else {
+        s.doc.patterns.iter().map(|p| p.graded(steps)).collect()
+    };
+    let display: Vec<&Pattern> = if steps == 0 {
+        s.doc.patterns.iter().collect()
+    } else {
+        graded.iter().collect()
+    };
+    for pattern in display {
         draw_pattern(&painter, rect, s, pattern, pal);
     }
     draw_sewing_lines(&painter, rect, s, pal);
@@ -391,11 +405,19 @@ pub fn ui(ui: &mut egui::Ui, s: &mut Session) {
             }
         },
     };
+    let size_note = if steps != 0 {
+        format!(
+            " · previewing size {} (editing still acts on the base pattern)",
+            s.doc.size_chart.names[s.preview_size]
+        )
+    } else {
+        String::new()
+    };
     painter.text(
         rect.left_top() + Px::new(10.0, 8.0),
         Align2::LEFT_TOP,
         format!(
-            "{hint} · scroll to zoom · right-drag to pan · {:.0}%",
+            "{hint} · scroll to zoom · right-drag to pan · {:.0}%{size_note}",
             s.canvas.zoom * 100.0
         ),
         FontId::proportional(12.0),

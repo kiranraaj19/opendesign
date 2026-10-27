@@ -16,6 +16,7 @@ egui_dock = { version = "0.21.1", features = ["serde"] }
 od_core = { path = "../od_core" }
 od_render = { path = "../od_render" }
 od_sim = { path = "../od_sim" }
+printpdf = { version = "0.12.8", default-features = false }
 rfd = "0.17.2"
 serde = { version = "1", features = ["derive"] }
 

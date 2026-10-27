@@ -738,6 +738,7 @@ mod tests {
             canvas: Canvas2D::default(),
             viewport: Viewport3D::new(None),
             props: PropertiesState::default(),
+            preview_size: Document::default().size_chart.base,
         }
     }
 

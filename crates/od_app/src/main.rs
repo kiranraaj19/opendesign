@@ -6,6 +6,7 @@ mod export;
 mod files;
 mod i18n;
 mod panels;
+mod pdf;
 mod theme;
 
 fn main() -> eframe::Result {

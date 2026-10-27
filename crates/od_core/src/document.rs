@@ -278,6 +278,76 @@ impl Default for Fabric {
     }
 }
 
+/// The sizes offered across a document, in small-to-large order, with one
+/// marked as the base size that every pattern is drawn at and every
+/// [`Grading`] rule is defined relative to (zero delta at the base size).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SizeChart {
+    /// Size names, smallest to largest (e.g. `["S", "M", "L", "XL"]`).
+    pub names: Vec<String>,
+    /// Index into `names` of the size patterns are drawn at.
+    pub base: usize,
+}
+
+impl SizeChart {
+    /// The common four-size chart, based on M.
+    pub fn standard() -> Self {
+        Self {
+            names: ["S", "M", "L", "XL"]
+                .into_iter()
+                .map(String::from)
+                .collect(),
+            base: 1,
+        }
+    }
+
+    /// How many sizes `index` is from the base size (negative for smaller,
+    /// positive for larger); the unit [`Grading`] deltas are scaled by.
+    pub fn steps(&self, index: usize) -> i32 {
+        index as i32 - self.base as i32
+    }
+
+    pub fn base_name(&self) -> &str {
+        self.names.get(self.base).map_or("", String::as_str)
+    }
+}
+
+impl Default for SizeChart {
+    fn default() -> Self {
+        Self::standard()
+    }
+}
+
+/// A grading rule: how far each of a pattern's outline points moves per
+/// size step away from the document's base size (see [`SizeChart::steps`]).
+/// Grading one size up moves every point by its delta once; two sizes up,
+/// twice; one size down, the opposite way. Empty (the default) means the
+/// pattern is the same at every size.
+///
+/// Indices line up with `Pattern::outline`; a point added after grading was
+/// set has no delta (treated as zero) until the rule is updated.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+pub struct Grading {
+    pub point_deltas: Vec<Vec2>,
+}
+
+impl Grading {
+    /// A simple grading rule, proportional to size: every point moves
+    /// `percent_per_step`% of the way from the pattern's centre to that
+    /// point, for each size step. This is the standard shortcut for pieces
+    /// without hand-graded rules — real grading can differ point to point
+    /// (e.g. a collar grades less than a hem), which is why `point_deltas`
+    /// is stored explicitly rather than just the percentage.
+    pub fn uniform_scale(outline: &[OutlinePoint], percent_per_step: f32) -> Self {
+        let center = geometry::bounds(&outline.iter().map(|p| p.pos).collect::<Vec<_>>())
+            .map_or(Vec2::ZERO, |(min, max)| (min + max) * 0.5);
+        let factor = percent_per_step / 100.0;
+        Self {
+            point_deltas: outline.iter().map(|p| (p.pos - center) * factor).collect(),
+        }
+    }
+}
+
 /// Mirror axis through a pattern.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Axis {
@@ -328,6 +398,8 @@ pub struct Pattern {
     pub fabric: Fabric,
     pub topstitches: Vec<Topstitch>,
     pub trims: Vec<Trim>,
+    /// How this piece's outline changes across the document's size chart.
+    pub grading: Grading,
 }
 
 /// Seam allowance given to new patterns, in mm.
@@ -347,6 +419,7 @@ impl Pattern {
             fabric: Fabric::default(),
             topstitches: Vec::new(),
             trims: Vec::new(),
+            grading: Grading::default(),
         }
     }
 
@@ -535,6 +608,42 @@ impl Pattern {
             .map(|w| w[0].distance(w[1]))
             .sum()
     }
+
+    /// The outline graded `steps` sizes away from the document's base size
+    /// (see [`SizeChart::steps`]): each point moved by its [`Grading`] delta
+    /// that many times over. Unchanged at `steps == 0` or with no grading
+    /// rule set; a point added since the rule was set moves by zero.
+    pub fn graded_outline(&self, steps: i32) -> Vec<OutlinePoint> {
+        if steps == 0 || self.grading.point_deltas.is_empty() {
+            return self.outline.clone();
+        }
+        self.outline
+            .iter()
+            .enumerate()
+            .map(|(i, p)| {
+                let delta = self
+                    .grading
+                    .point_deltas
+                    .get(i)
+                    .copied()
+                    .unwrap_or(Vec2::ZERO);
+                OutlinePoint {
+                    pos: p.pos + delta * steps as f32,
+                    kind: p.kind,
+                }
+            })
+            .collect()
+    }
+
+    /// A copy of this pattern with its outline graded `steps` sizes away
+    /// from the base size, for measuring or drawing a size other than the
+    /// one it was drafted at without mutating the original.
+    pub fn graded(&self, steps: i32) -> Pattern {
+        Pattern {
+            outline: self.graded_outline(steps),
+            ..self.clone()
+        }
+    }
 }
 
 /// An angle in degrees brought into -180..180.
@@ -643,6 +752,7 @@ pub struct Document {
     pub patterns: Vec<Pattern>,
     pub sewing_lines: Vec<SewingLine>,
     pub tacks: Vec<Tack>,
+    pub size_chart: SizeChart,
     next_id: u64,
     next_sewing_id: u64,
     next_tack_id: u64,
@@ -661,6 +771,7 @@ impl Document {
             patterns: Vec::new(),
             sewing_lines: Vec::new(),
             tacks: Vec::new(),
+            size_chart: SizeChart::default(),
             next_id: 1,
             next_sewing_id: 1,
             next_tack_id: 1,
@@ -997,6 +1108,46 @@ mod tests {
         };
         assert_eq!(seam.length_mismatch(&doc), None);
         assert!(!seam.is_length_mismatched(&doc));
+    }
+
+    #[test]
+    fn size_chart_steps_are_relative_to_the_base() {
+        let chart = SizeChart::standard();
+        assert_eq!(chart.names, ["S", "M", "L", "XL"]);
+        assert_eq!(chart.base_name(), "M");
+        assert_eq!(chart.steps(0), -1);
+        assert_eq!(chart.steps(1), 0);
+        assert_eq!(chart.steps(3), 2);
+    }
+
+    #[test]
+    fn ungraded_pattern_is_the_same_at_every_size() {
+        let p = rect_with_curve();
+        assert_eq!(p.graded_outline(2), p.outline);
+        assert_eq!(p.graded_outline(-1), p.outline);
+    }
+
+    #[test]
+    fn uniform_scale_grading_moves_points_away_from_centre() {
+        let mut p = pattern(&[
+            (0.0, 0.0, C),
+            (100.0, 0.0, C),
+            (100.0, 100.0, C),
+            (0.0, 100.0, C),
+        ]);
+        p.grading = Grading::uniform_scale(&p.outline, 10.0);
+        // Centre is (50, 50); the top-right corner is 50 away from it on
+        // each axis, so one size up moves it 10% of that, outward.
+        let bigger = p.graded_outline(1);
+        assert_eq!(bigger[2].pos, Vec2::new(105.0, 105.0));
+        // Two sizes up doubles the move; one size down reverses it.
+        let biggest = p.graded_outline(2);
+        assert_eq!(biggest[2].pos, Vec2::new(110.0, 110.0));
+        let smaller = p.graded_outline(-1);
+        assert_eq!(smaller[2].pos, Vec2::new(95.0, 95.0));
+        // Grading scales the area up with size.
+        let graded = p.graded(1);
+        assert!(graded.area() > p.area());
     }
 
     #[test]

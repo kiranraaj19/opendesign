@@ -1,8 +1,9 @@
-//! Properties of the current selection.
+//! Properties of the current selection, plus document-wide sizing (size
+//! chart preview) and the bill of materials.
 
 use od_core::{
-    Axis, Fabric, Pattern, PatternId, PatternValue, PointKind, RemoveInternalLine, RenamePattern,
-    SetFabric, SetPatternValue,
+    document_bom, total_area_m2, Axis, Fabric, Grading, Pattern, PatternId, PatternValue,
+    PointKind, RemoveInternalLine, RenamePattern, SetFabric, SetGrading, SetPatternValue,
 };
 
 use crate::app::Session;
@@ -13,6 +14,9 @@ use crate::app::Session;
 pub struct PropertiesState {
     editing: Option<(PatternId, String)>,
     pending: Option<(PatternId, PatternValue, f32)>,
+    /// A grading percentage being dragged but not yet committed, mirroring
+    /// `pending` above.
+    grading_pending: Option<(PatternId, f32)>,
 }
 
 impl PropertiesState {
@@ -26,7 +30,12 @@ impl PropertiesState {
 }
 
 pub fn ui(ui: &mut egui::Ui, s: &mut Session) {
+    size_section(ui, s);
+    ui.add_space(8.0);
+    bom_section(ui, s);
+
     let Some(pattern) = s.selection.and_then(|id| s.doc.pattern(id)) else {
+        ui.add_space(8.0);
         ui.weak("Nothing selected.");
         ui.add_space(8.0);
         ui.label(format!("Document: {}", s.doc.name));
@@ -96,6 +105,7 @@ pub fn ui(ui: &mut egui::Ui, s: &mut Session) {
         });
 
     fabric_section(ui, s, id);
+    grading_section(ui, s, id);
 
     if let Some(pattern) = s.doc.pattern(id) {
         point_section(ui, s, pattern.clone());
@@ -246,4 +256,112 @@ fn lines_section(ui: &mut egui::Ui, s: &mut Session, id: PatternId) {
     if let Some(i) = remove {
         s.execute(RemoveInternalLine::new(id, i));
     }
+}
+
+/// Pick a size to preview in the 2D canvas and the bill of materials.
+/// Grading itself (per pattern) is set below, in [`grading_section`].
+fn size_section(ui: &mut egui::Ui, s: &mut Session) {
+    ui.heading("Size");
+    ui.horizontal(|ui| {
+        for (i, name) in s.doc.size_chart.names.clone().into_iter().enumerate() {
+            let label = if i == s.doc.size_chart.base {
+                format!("{name} (base)")
+            } else {
+                name
+            };
+            if ui.selectable_label(i == s.preview_size, label).clicked() {
+                s.preview_size = i;
+            }
+        }
+    });
+}
+
+/// A pattern's grading rule, as a single "% per size" slider driving
+/// [`Grading::uniform_scale`] — real hand-graded rules can vary point to
+/// point, but this is enough to demonstrate the grading pipeline end to
+/// end (see `od_core::document::Grading`).
+fn grading_section(ui: &mut egui::Ui, s: &mut Session, id: PatternId) {
+    let Some(pattern) = s.doc.pattern(id) else {
+        return;
+    };
+    // The rule is stored as point deltas, not a percentage, so recover the
+    // percentage that would reproduce it (deltas scale linearly with it).
+    let current_percent = pattern
+        .grading
+        .point_deltas
+        .iter()
+        .zip(&pattern.outline)
+        .map(|(d, p)| (*d, p.pos))
+        .find(|(d, _)| d.length() > 1e-6)
+        .map(|(d, pos)| {
+            let center = pattern.center();
+            let radius = pos - center;
+            let denom = radius.dot(radius);
+            if denom > 1e-6 {
+                d.dot(radius) / denom * 100.0
+            } else {
+                0.0
+            }
+        })
+        .unwrap_or(0.0);
+
+    ui.add_space(8.0);
+    ui.label("Grading")
+        .on_hover_text("How much this piece grows per size step, as a percentage move outward from its centre for every outline point.");
+    let mut percent = s
+        .props
+        .grading_pending
+        .filter(|(pid, _)| *pid == id)
+        .map(|(_, v)| v)
+        .unwrap_or(current_percent);
+    let response = ui.add(
+        egui::DragValue::new(&mut percent)
+            .range(-50.0..=50.0)
+            .suffix("% per size")
+            .speed(0.1)
+            .max_decimals(1),
+    );
+    if response.changed() {
+        s.props.grading_pending = Some((id, percent));
+    }
+    let busy = response.dragged() || response.has_focus();
+    if !busy {
+        if let Some((_, value)) = s.props.grading_pending.take_if(|(pid, _)| *pid == id) {
+            if (value - current_percent).abs() > 1e-4 {
+                let outline = pattern.outline.clone();
+                let grading = if value == 0.0 {
+                    Grading::default()
+                } else {
+                    Grading::uniform_scale(&outline, value)
+                };
+                s.execute(SetGrading::new(id, grading));
+            }
+        }
+    }
+}
+
+/// The bill of materials for every pattern, at the size being previewed.
+fn bom_section(ui: &mut egui::Ui, s: &mut Session) {
+    if s.doc.patterns.is_empty() {
+        return;
+    }
+    let steps = s.preview_steps();
+    let boms = document_bom(&s.doc, steps);
+    ui.heading("Bill of materials");
+    egui::Grid::new("bom_table")
+        .num_columns(3)
+        .striped(true)
+        .show(ui, |ui| {
+            ui.label("Piece");
+            ui.label("Area");
+            ui.label("Cut line");
+            ui.end_row();
+            for piece in &boms {
+                ui.label(&piece.name);
+                ui.label(format!("{:.2} m²", piece.area_m2));
+                ui.label(format!("{:.0} mm", piece.perimeter_mm));
+                ui.end_row();
+            }
+        });
+    ui.label(format!("Total fabric: {:.2} m²", total_area_m2(&boms)));
 }

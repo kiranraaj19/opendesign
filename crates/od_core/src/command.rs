@@ -2,7 +2,7 @@
 //! apply itself and how to reverse that change.
 
 use crate::document::{
-    normalize_degrees, Axis, Document, Fabric, InternalLine, Notch, OutlinePoint, Pattern,
+    normalize_degrees, Axis, Document, Fabric, Grading, InternalLine, Notch, OutlinePoint, Pattern,
     PatternId, PointKind, SeamEdge, SeamPoint, SewingLine, SewingLineId, Tack, TackId, Topstitch,
     Trim, TrimKind,
 };
@@ -401,6 +401,37 @@ impl Command for SetFabric {
     fn apply(&mut self, doc: &mut Document) {
         if let Some(p) = doc.pattern_mut(self.id) {
             std::mem::swap(&mut p.fabric, &mut self.fabric);
+        }
+    }
+
+    fn undo(&mut self, doc: &mut Document) {
+        self.apply(doc);
+    }
+}
+
+/// Assign a pattern's grading rule, e.g. from a "grade % per size" slider
+/// in the properties panel.
+pub struct SetGrading {
+    id: PatternId,
+    /// Swapped with the pattern's grading on `apply`/`undo`, so after
+    /// `apply` this holds the *previous* rule (what undo restores).
+    grading: Grading,
+}
+
+impl SetGrading {
+    pub fn new(id: PatternId, grading: Grading) -> Self {
+        Self { id, grading }
+    }
+}
+
+impl Command for SetGrading {
+    fn label(&self) -> String {
+        "Set grading".into()
+    }
+
+    fn apply(&mut self, doc: &mut Document) {
+        if let Some(p) = doc.pattern_mut(self.id) {
+            std::mem::swap(&mut p.grading, &mut self.grading);
         }
     }
 
@@ -1056,6 +1087,20 @@ mod tests {
         });
         let (doc, id) = doc_with_rect();
         assert_eq!(doc.pattern(id).unwrap().fabric.name, "Cotton", "default");
+    }
+
+    #[test]
+    fn set_grading_round_trip() {
+        let (doc, id) = doc_with_rect();
+        let grading = Grading::uniform_scale(&doc.pattern(id).unwrap().outline, 5.0);
+        round_trip(SetGrading::new(ID, grading.clone()), |d| {
+            assert_eq!(pat(d).grading, grading);
+        });
+        assert_eq!(
+            doc.pattern(id).unwrap().grading,
+            Grading::default(),
+            "no grading by default"
+        );
     }
 
     #[test]

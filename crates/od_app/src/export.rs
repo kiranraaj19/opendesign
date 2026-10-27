@@ -70,3 +70,12 @@ pub fn export_dxf(s: &Session) -> Option<String> {
         .err()
         .map(|e| format!("Couldn't export {}:\n{e}", path.display()))
 }
+
+/// Ask where to save, then export the pattern pieces and bill of materials
+/// (at the size currently being previewed) as a PDF.
+pub fn export_pdf(s: &Session) -> Option<String> {
+    let path = pick_save("PDF", "pdf", &s.doc.name)?;
+    crate::pdf::export(&s.doc, s.preview_steps(), &path)
+        .err()
+        .map(|e| format!("Couldn't export {}:\n{e}", path.display()))
+}
