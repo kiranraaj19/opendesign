@@ -171,6 +171,11 @@ pub struct Viewport3D {
     pub avatar: Avatar,
     /// The render pass we draw into, when eframe runs on wgpu.
     gpu: Option<Targets>,
+    /// The same wgpu device/queue as `gpu`'s render state, kept around for
+    /// offscreen exports (turntable, drape animation) done outside the
+    /// live paint callback. `None` under the same condition as `gpu`
+    /// ([`NO_GPU`]).
+    render_device: Option<(Arc<egui_wgpu::wgpu::Device>, Arc<egui_wgpu::wgpu::Queue>)>,
     pub show_sizing: bool,
     error: Option<String>,
     /// Fit the scene to the view once its size is known.
@@ -203,10 +208,13 @@ impl Viewport3D {
             rs.renderer.write().callback_resources.insert(renderer);
             targets
         });
+        let render_device =
+            render_state.map(|rs| (Arc::new(rs.device.clone()), Arc::new(rs.queue.clone())));
         Self {
             camera: OrbitCamera::default(),
             avatar: Avatar::preset(AvatarKind::Female),
             gpu,
+            render_device,
             show_sizing: false,
             error: None,
             needs_framing: true,
@@ -215,6 +223,13 @@ impl Viewport3D {
             pinning: false,
             show_strain: false,
         }
+    }
+
+    /// Whether there's a GPU renderer to export offscreen stills with
+    /// (turntable, drape animation) — the same condition the live view
+    /// falls back to [`NO_GPU`] under.
+    pub fn has_gpu(&self) -> bool {
+        self.render_device.is_some()
     }
 
     /// Ask for an avatar file and load it.
@@ -360,6 +375,215 @@ fn current_placed_patterns(s: &Session) -> Vec<PlacedPattern<PatternId>> {
         Some(drape) => drape.placed_patterns(),
         None => placed_patterns(s),
     }
+}
+
+/// Frames written per turntable or drape-animation export: enough for a
+/// smooth short loop/clip without taking too long on a software GPU.
+pub const EXPORT_FRAME_COUNT: u32 = 24;
+/// A reasonable "final render" resolution for exported frames — higher
+/// than most real-time previews, modest enough to export quickly.
+pub const EXPORT_SIZE: [u32; 2] = [1280, 720];
+
+fn export_aspect(size: [u32; 2]) -> f32 {
+    size[0] as f32 / size[1].max(1) as f32
+}
+
+/// The app's theme tokens as an [`od_render::view::Theme`], the same way
+/// [`paint`] builds one for the live view.
+fn export_theme(dark: bool) -> Theme {
+    let pal = theme::palette(dark);
+    Theme {
+        avatar: color(pal.avatar),
+        pattern: color(pal.pattern_fill),
+        selected: color(pal.selected),
+        outline: color(pal.pattern_stroke),
+        grid: GridColors {
+            minor: color(pal.grid_minor),
+            major: color(pal.grid_major),
+            axis: color(pal.axis),
+        },
+        shadow: [0.0, 0.0, 0.0, if dark { 0.35 } else { 0.18 }],
+    }
+}
+
+/// The clear color behind the scene, as the raw sRGB bytes egui would
+/// have painted (see `examples/snapshot.rs`, which does the same): the
+/// target isn't an sRGB format, so the shader (and here, the clear)
+/// writes sRGB-encoded bytes directly rather than linear light.
+fn export_clear(dark: bool) -> od_render::wgpu::Color {
+    let [r, g, b, _] = theme::palette(dark).canvas_bg.to_srgba_unmultiplied();
+    let channel = |c: u8| f64::from(c) / 255.0;
+    od_render::wgpu::Color {
+        r: channel(r),
+        g: channel(g),
+        b: channel(b),
+        a: 1.0,
+    }
+}
+
+/// Each `placed` pattern's fabric material, in the same order — mirrors
+/// how [`paint`] builds its `materials` for the live view.
+fn materials_for(s: &Session, placed: &[PlacedPattern<PatternId>]) -> Vec<Option<Material>> {
+    placed
+        .iter()
+        .map(|p| {
+            s.doc
+                .pattern(p.key)
+                .map(|pat| material_for_fabric(&pat.fabric))
+        })
+        .collect()
+}
+
+fn write_png(
+    dir: &Path,
+    prefix: &str,
+    index: u32,
+    size: [u32; 2],
+    bytes: &[u8],
+) -> Result<(), String> {
+    let path = dir.join(format!("{prefix}_{index:03}.png"));
+    image::save_buffer(
+        &path,
+        bytes,
+        size[0],
+        size[1],
+        image::ExtendedColorType::Rgba8,
+    )
+    .map_err(|e| format!("Couldn't write {}:\n{e}", path.display()))
+}
+
+/// Render a full turntable — `frames` stills rotating 360° around the
+/// current camera's target — of the document's current scene (flat
+/// layout, or draped if a simulation is running or paused) to `dir`, as
+/// `turntable_000.png`, `turntable_001.png`, … Stitch them into a video
+/// externally, e.g. `ffmpeg -framerate 24 -i turntable_%03d.png
+/// turntable.mp4`. Returns the number of frames written.
+pub fn export_turntable_frames(
+    s: &Session,
+    dir: &Path,
+    frames: u32,
+    size: [u32; 2],
+    dark: bool,
+) -> Result<usize, String> {
+    let (device, queue) = s
+        .viewport
+        .render_device
+        .as_ref()
+        .ok_or_else(|| NO_GPU.to_string())?;
+    let placed = current_placed_patterns(s);
+    let aspect = export_aspect(size);
+    let mut camera = s.viewport.camera;
+    camera.frame(
+        view::scene_bounds(s.viewport.avatar.bounds, &placed),
+        aspect,
+    );
+    let theme = export_theme(dark);
+    let materials = materials_for(s, &placed);
+    let settings = od_render::render::StillSettings {
+        size,
+        ..Default::default()
+    };
+    let clear = export_clear(dark);
+    for i in 0..frames {
+        let cam = camera.turntable(i, frames);
+        let bytes = od_render::render::render_still(
+            device,
+            queue,
+            FrameInput {
+                camera: &cam,
+                aspect,
+                encode_srgb: true,
+                avatar: Some(AvatarDraw {
+                    key: 1,
+                    mesh: s.viewport.avatar.mesh.clone(),
+                    color: theme.avatar,
+                }),
+                avatar_bounds: s.viewport.avatar.bounds,
+                patterns: &placed,
+                selected: None,
+                theme: &theme,
+                pattern_colors: None,
+                pattern_materials: Some(&materials),
+            },
+            settings,
+            clear,
+        );
+        write_png(dir, "turntable", i, size, &bytes)?;
+    }
+    Ok(frames as usize)
+}
+
+/// Build a fresh drape simulation (the same way the "Drape" button does)
+/// and render `frames` steps of it settling onto the avatar, from the
+/// front, to `dir` as `drape_000.png`, `drape_001.png`, … — a sequence
+/// demonstrating the draping *process* rather than a moving avatar or
+/// garment animation, which is out of scope here. Returns the number of
+/// frames written.
+pub fn export_drape_frames(
+    s: &Session,
+    dir: &Path,
+    frames: u32,
+    size: [u32; 2],
+    dark: bool,
+) -> Result<usize, String> {
+    let (device, queue) = s
+        .viewport
+        .render_device
+        .as_ref()
+        .ok_or_else(|| NO_GPU.to_string())?;
+    let placements = ring_placements(s);
+    let mut drape =
+        od_sim::drape::Drape::new(&s.doc, &placements, &od_sim::cloth::ClothConfig::default());
+    drape
+        .colliders
+        .push(Collider::mesh(s.viewport.avatar.mesh().clone(), 0.005));
+    drape
+        .colliders
+        .push(Collider::ground(s.viewport.avatar.bounds.min.y));
+
+    let aspect = export_aspect(size);
+    let mut camera = s.viewport.camera;
+    camera.set_view(ViewPreset::Front);
+    camera.frame(
+        view::scene_bounds(s.viewport.avatar.bounds, &drape.placed_patterns()),
+        aspect,
+    );
+    let theme = export_theme(dark);
+    let settings = od_render::render::StillSettings {
+        size,
+        ..Default::default()
+    };
+    let clear = export_clear(dark);
+    const DT: f32 = 1.0 / 60.0;
+    for i in 0..frames {
+        drape.step(DT, 8);
+        let placed = drape.placed_patterns();
+        let materials = materials_for(s, &placed);
+        let bytes = od_render::render::render_still(
+            device,
+            queue,
+            FrameInput {
+                camera: &camera,
+                aspect,
+                encode_srgb: true,
+                avatar: Some(AvatarDraw {
+                    key: 1,
+                    mesh: s.viewport.avatar.mesh.clone(),
+                    color: theme.avatar,
+                }),
+                avatar_bounds: s.viewport.avatar.bounds,
+                patterns: &placed,
+                selected: None,
+                theme: &theme,
+                pattern_colors: None,
+                pattern_materials: Some(&materials),
+            },
+            settings,
+            clear,
+        );
+        write_png(dir, "drape", i, size, &bytes)?;
+    }
+    Ok(frames as usize)
 }
 
 pub fn ui(ui: &mut egui::Ui, s: &mut Session) {
@@ -1376,6 +1600,51 @@ mod tests {
             }
             image::RgbaImage::from_raw(w, h, pixels).ok_or("bad image size".into())
         }
+    }
+
+    /// The turntable and drape-animation exports write the expected
+    /// numbered PNGs, on a real (often software) GPU.
+    #[test]
+    fn turntable_and_drape_exports_write_numbered_pngs() {
+        let Some(renderer) = WindowLikeRenderer::new() else {
+            eprintln!("no GPU adapter; skipping the export test");
+            return;
+        };
+        let mut s = session();
+        s.viewport = Viewport3D::new(Some(&renderer.rs));
+        let outline = geometry::rectangle(Vec2::ZERO, Vec2::new(400.0, 500.0));
+        s.add_pattern("Panel", outline);
+        assert!(s.viewport.has_gpu());
+
+        let dir = std::env::temp_dir().join(format!("od_app_{}_export", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let size = [16, 9];
+
+        let turntable_frames = export_turntable_frames(&s, &dir, 3, size, true).unwrap();
+        assert_eq!(turntable_frames, 3);
+        for i in 0..3 {
+            let path = dir.join(format!("turntable_{i:03}.png"));
+            assert!(path.exists(), "{}", path.display());
+        }
+
+        let drape_frames = export_drape_frames(&s, &dir, 2, size, false).unwrap();
+        assert_eq!(drape_frames, 2);
+        for i in 0..2 {
+            let path = dir.join(format!("drape_{i:03}.png"));
+            assert!(path.exists(), "{}", path.display());
+        }
+
+        // Without a GPU renderer, both fall back to the same message the
+        // live view shows.
+        let mut headless = session();
+        headless.add_pattern(
+            "Panel",
+            geometry::rectangle(Vec2::ZERO, Vec2::new(400.0, 500.0)),
+        );
+        assert_eq!(
+            export_turntable_frames(&headless, &dir, 1, size, true),
+            Err(NO_GPU.to_string())
+        );
     }
 
     /// The whole app on a real (often software) GPU: the avatar is drawn,

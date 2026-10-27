@@ -8,7 +8,7 @@ struct Globals {
     sky: vec4<f32>,
     ground: vec4<f32>,
     eye: vec4<f32>,
-    params: vec4<f32>,  // x: encode to sRGB
+    params: vec4<f32>,  // x: encode to sRGB, y: "final render" quality
 };
 
 @group(0) @binding(0) var<uniform> g: Globals;
@@ -69,7 +69,19 @@ fn fs_lit(i: LitOut) -> @location(0) vec4<f32> {
     let spec = pow(max(dot(n, half_dir), 0.0), 40.0) * 0.12 * g.key.w * step(0.0, dot(n, g.key.xyz));
     let tex = textureSample(diffuse_tex, diffuse_samp, i.uv);
     let base_color = i.color * tex;
-    let rgb = base_color.rgb * (ambient + vec3<f32>(key + fill)) + vec3<f32>(spec);
+
+    // "Final render" quality (params.y > 0.5), off in the live viewport:
+    // a soft rim/back light opposite the key+fill pair, three-point-style,
+    // to separate silhouettes from the background; and a cheap per-pixel
+    // stand-in for ambient occlusion that dims the sky/ground ambient term
+    // on surfaces turned away from the camera (no real occluder geometry,
+    // just a view-angle fade).
+    let quality = step(0.5, g.params.y);
+    let rim_dir = normalize(-(g.key.xyz + g.fill.xyz));
+    let rim = max(dot(n, rim_dir), 0.0) * 0.3 * quality;
+    let ao = mix(1.0, 0.8 + 0.2 * max(dot(n, view), 0.0), quality);
+
+    let rgb = base_color.rgb * (ambient * ao + vec3<f32>(key + fill + rim)) + vec3<f32>(spec);
     return vec4<f32>(encode(rgb), base_color.a);
 }
 

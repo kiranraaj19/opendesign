@@ -420,6 +420,38 @@ impl OpenDesignApp {
                             }
                         }
                     });
+                    ui.separator();
+                    let dark = ui.visuals().dark_mode;
+                    ui.add_enabled_ui(s.viewport.has_gpu(), |ui| {
+                        if ui
+                            .button("Turntable frames…")
+                            .on_hover_text(
+                                "Render a full rotation around the current scene as numbered \
+                                 PNGs in a folder you choose. Stitch them into a video \
+                                 externally, e.g. ffmpeg -framerate 24 -i turntable_%03d.png \
+                                 turntable.mp4",
+                            )
+                            .clicked()
+                        {
+                            if let Some(err) = crate::export::export_turntable(s, dark) {
+                                files.error = Some(err);
+                            }
+                        }
+                        ui.add_enabled_ui(!s.doc.patterns.is_empty(), |ui| {
+                            if ui
+                                .button("Drape animation frames…")
+                                .on_hover_text(
+                                    "Simulate the drape from scratch and render each step as \
+                                     numbered PNGs in a folder you choose.",
+                                )
+                                .clicked()
+                            {
+                                if let Some(err) = crate::export::export_drape_animation(s, dark) {
+                                    files.error = Some(err);
+                                }
+                            }
+                        });
+                    });
                 });
                 ui.separator();
                 if ui.add(item(tr(TKey::Quit), "Ctrl+Q")).clicked() {

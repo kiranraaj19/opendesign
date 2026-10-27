@@ -137,6 +137,21 @@ impl OrbitCamera {
         (self.yaw, self.pitch) = preset.angles();
     }
 
+    /// The camera for frame `frame` of a `total`-frame turntable: one full
+    /// revolution around `target`, starting from this camera's current
+    /// yaw, keeping distance, pitch and fov. Frame `0` is this camera
+    /// unchanged; frame `total` would (if it existed) land back on it too,
+    /// so a sequence of `0..total` loops seamlessly. `total == 0` is
+    /// treated as `1` (a single still, unrotated).
+    pub fn turntable(&self, frame: u32, total: u32) -> Self {
+        use std::f32::consts::{PI, TAU};
+        let total = total.max(1);
+        let t = (frame % total) as f32 / total as f32;
+        let mut cam = *self;
+        cam.yaw = (self.yaw + t * TAU + PI).rem_euclid(TAU) - PI;
+        cam
+    }
+
     /// Aim at `bounds` and back off until its bounding sphere fits the view.
     pub fn frame(&mut self, bounds: Aabb, aspect: f32) {
         self.target = bounds.center();
@@ -318,6 +333,31 @@ mod tests {
         let ray = cam.ray(cam.project(p, 1.3).unwrap(), 1.3);
         let t = ray.dir.dot(p - ray.origin);
         assert!(close(ray.at(t), p));
+    }
+
+    #[test]
+    fn turntable_sweeps_a_full_revolution_and_keeps_everything_else() {
+        let mut cam = OrbitCamera::default();
+        cam.set_view(ViewPreset::Front);
+        let start = cam.turntable(0, 12);
+        assert_eq!(start.yaw, cam.yaw, "frame 0 is unrotated");
+        assert_eq!(start.pitch, cam.pitch);
+        assert_eq!(start.distance, cam.distance);
+        assert_eq!(start.target, cam.target);
+        assert_eq!(start.fov_y, cam.fov_y);
+
+        let halfway = cam.turntable(6, 12);
+        let diff = (halfway.yaw - cam.yaw + std::f32::consts::PI).rem_euclid(std::f32::consts::TAU)
+            - std::f32::consts::PI;
+        assert!((diff.abs() - std::f32::consts::PI).abs() < 1e-4, "{diff}");
+
+        // Frame `total` would be a full turn, same angle as frame 0; the
+        // modulo in `turntable` means asking for it directly (as if
+        // looping past the end) gives the same camera too.
+        assert_eq!(cam.turntable(12, 12).yaw, cam.turntable(0, 12).yaw);
+
+        // A zero-frame "total" doesn't divide by zero.
+        assert!(cam.turntable(0, 0).yaw.is_finite());
     }
 
     #[test]

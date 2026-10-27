@@ -13,6 +13,7 @@ pub mod material;
 pub mod mesh;
 pub mod pattern;
 pub mod pick;
+pub mod render;
 pub mod scene;
 pub mod view;
 
