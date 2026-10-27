@@ -424,11 +424,7 @@ impl OpenDesignApp {
                 s.redo();
             }
             ui.separator();
-            for (label, phase) in [
-                ("Sew", "Phase 5"),
-                ("Pin", "Phase 6"),
-                ("▶ Simulate", "Phase 6"),
-            ] {
+            for (label, phase) in [("Pin", "Phase 6"), ("▶ Simulate", "Phase 6")] {
                 ui.add_enabled(false, egui::Button::new(label))
                     .on_disabled_hover_text(format!("Coming in {phase}"));
             }
@@ -1424,5 +1420,195 @@ mod tests {
             press(&mut h, Modifiers::COMMAND, Key::Z);
         }
         assert_eq!(h.state().session.doc.patterns, before.patterns);
+    }
+
+    // ---- Sewing (Phase 5) ----
+
+    use od_core::{SeamEdge, SeamPoint};
+
+    /// Midpoint of outline edge `i -> i + 1` of `patterns[index]`, in doc
+    /// space.
+    fn edge_mid(h: &Harness<'_, OpenDesignApp>, index: usize, i: usize) -> Vec2 {
+        let o = &h.state().session.doc.patterns[index].outline;
+        o[i].pos.lerp(o[(i + 1) % o.len()].pos, 0.5)
+    }
+
+    #[test]
+    fn sew_tool_builds_and_unsews_a_two_edge_seam() {
+        let mut h = harness();
+        click(&mut h, "+ Skirt panel");
+        click(&mut h, "+ Skirt panel");
+        let (id0, id1) = (
+            h.state().session.doc.patterns[0].id,
+            h.state().session.doc.patterns[1].id,
+        );
+        click(&mut h, "Sew");
+
+        // Pick the top edge (index 0 -> 1) of each panel for the two sides.
+        let top0 = edge_mid(&h, 0, 0);
+        let at = screen(&h, top0.x, top0.y);
+        click_at(&mut h, at, Modifiers::NONE);
+        assert_eq!(
+            h.state().session.canvas.sew_pending_edges(),
+            Some([
+                vec![SeamEdge {
+                    pattern: id0,
+                    start: 0.0,
+                    end: 1.0
+                }],
+                vec![]
+            ])
+        );
+
+        press(&mut h, Modifiers::NONE, Key::Tab);
+        let top1 = edge_mid(&h, 1, 0);
+        let at = screen(&h, top1.x, top1.y);
+        click_at(&mut h, at, Modifiers::NONE);
+        press(&mut h, Modifiers::NONE, Key::Enter);
+
+        let doc = h.state().session.doc.clone();
+        assert_eq!(doc.sewing_lines.len(), 1);
+        assert_eq!(
+            doc.sewing_lines[0].a,
+            vec![SeamEdge {
+                pattern: id0,
+                start: 0.0,
+                end: 1.0
+            }]
+        );
+        assert_eq!(
+            doc.sewing_lines[0].b,
+            vec![SeamEdge {
+                pattern: id1,
+                start: 0.0,
+                end: 1.0
+            }]
+        );
+        assert_eq!(last_step(&h), "Sew edges");
+        assert_eq!(h.state().session.canvas.sew_pending_edges(), None);
+
+        // Clicking a sewn edge again, with nothing pending, unsews it.
+        let at = screen(&h, top0.x, top0.y);
+        click_at(&mut h, at, Modifiers::NONE);
+        assert!(h.state().session.doc.sewing_lines.is_empty());
+        assert_eq!(last_step(&h), "Unsew edges");
+
+        press(&mut h, Modifiers::COMMAND, Key::Z);
+        assert_eq!(h.state().session.doc.sewing_lines, doc.sewing_lines);
+    }
+
+    #[test]
+    fn sew_tool_drag_picks_a_free_sub_range() {
+        let mut h = harness();
+        click(&mut h, "+ Skirt panel");
+        let id = h.state().session.doc.patterns[0].id;
+        click(&mut h, "Sew");
+
+        // A quarter to three-quarters of the way along the 300 mm top edge.
+        let (o0, o1) = {
+            let o = &h.state().session.doc.patterns[0].outline;
+            (o[0].pos, o[1].pos)
+        };
+        let (from, to) = (o0.lerp(o1, 0.25), o0.lerp(o1, 0.75));
+        let (from_px, to_px) = (screen(&h, from.x, from.y), screen(&h, to.x, to.y));
+        drag(&mut h, from_px, to_px);
+
+        let sides = h.state().session.canvas.sew_pending_edges();
+        let Some([side0, _]) = sides else {
+            panic!("expected a pending edge after dragging, got {sides:?}");
+        };
+        assert_eq!(side0.len(), 1);
+        let edge = side0[0];
+        assert_eq!(edge.pattern, id);
+        // Free sewing: not the whole 0..1 corner span.
+        assert!((edge.start - 0.25).abs() < 0.05, "start {}", edge.start);
+        assert!((edge.end - 0.75).abs() < 0.05, "end {}", edge.end);
+        let length = h.state().session.doc.pattern(id).unwrap().segment_length(
+            edge.start,
+            edge.end,
+            od_core::document::TOLERANCE,
+        );
+        // Half of the 300 mm edge.
+        assert!((length - 150.0).abs() < 5.0, "length {length}");
+    }
+
+    #[test]
+    fn sew_tool_builds_a_one_to_many_seam() {
+        let mut h = harness();
+        click(&mut h, "+ Skirt panel");
+        click(&mut h, "+ Skirt panel");
+        let id1 = h.state().session.doc.patterns[1].id;
+        click(&mut h, "Sew");
+
+        let top0 = edge_mid(&h, 0, 0);
+        let at = screen(&h, top0.x, top0.y);
+        click_at(&mut h, at, Modifiers::NONE);
+        press(&mut h, Modifiers::NONE, Key::Tab);
+        let top1 = edge_mid(&h, 1, 0);
+        let at = screen(&h, top1.x, top1.y);
+        click_at(&mut h, at, Modifiers::NONE);
+        let bottom1 = edge_mid(&h, 1, 2);
+        let at = screen(&h, bottom1.x, bottom1.y);
+        click_at(&mut h, at, Modifiers::NONE);
+        press(&mut h, Modifiers::NONE, Key::Enter);
+
+        let doc = h.state().session.doc.clone();
+        assert_eq!(doc.sewing_lines.len(), 1);
+        let seam = &doc.sewing_lines[0];
+        assert_eq!(seam.a.len(), 1);
+        assert_eq!(seam.b.len(), 2);
+        assert!(seam.b.iter().all(|e| e.pattern == id1));
+        assert_ne!(seam.b[0].start, seam.b[1].start);
+    }
+
+    #[test]
+    fn sew_tool_tacks_two_points_and_toggles() {
+        let mut h = harness();
+        click(&mut h, "+ Skirt panel");
+        let id = h.state().session.doc.patterns[0].id;
+        click(&mut h, "Sew");
+
+        let (p0, p2) = {
+            let o = &h.state().session.doc.patterns[0].outline;
+            (o[0].pos, o[2].pos)
+        };
+        let at = screen(&h, p0.x, p0.y);
+        click_at(&mut h, at, Modifiers::NONE);
+        assert_eq!(
+            h.state().session.canvas.sew_pending_point(),
+            Some(SeamPoint {
+                pattern: id,
+                index: 0
+            })
+        );
+        let at = screen(&h, p2.x, p2.y);
+        click_at(&mut h, at, Modifiers::NONE);
+
+        let doc = h.state().session.doc.clone();
+        assert_eq!(doc.tacks.len(), 1);
+        assert_eq!(
+            doc.tacks[0].a,
+            SeamPoint {
+                pattern: id,
+                index: 0
+            }
+        );
+        assert_eq!(
+            doc.tacks[0].b,
+            SeamPoint {
+                pattern: id,
+                index: 2
+            }
+        );
+        assert_eq!(last_step(&h), "Add tack");
+
+        // Clicking a tacked point again, with nothing pending, untacks it.
+        let at = screen(&h, p0.x, p0.y);
+        click_at(&mut h, at, Modifiers::NONE);
+        assert!(h.state().session.doc.tacks.is_empty());
+        assert_eq!(last_step(&h), "Remove tack");
+
+        press(&mut h, Modifiers::COMMAND, Key::Z);
+        assert_eq!(h.state().session.doc.tacks, doc.tacks);
     }
 }

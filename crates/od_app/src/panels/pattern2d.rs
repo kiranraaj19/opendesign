@@ -65,6 +65,10 @@ pub struct Canvas2D {
     /// possibly more than one for a one-to-many seam) or a tack (a single
     /// point waiting for its match).
     sew_pending: Option<SewBuild>,
+    /// Where a sew-tool drag began, in doc space. Captured as the drag
+    /// starts, since the pointer's press position is no longer available
+    /// by the time it is released.
+    sew_drag_start: Option<Vec2>,
 }
 
 /// What the sew tool has picked so far.
@@ -112,6 +116,7 @@ impl Default for Canvas2D {
             cursor: None,
             selected_point: None,
             sew_pending: None,
+            sew_drag_start: None,
         }
     }
 }
@@ -141,6 +146,25 @@ impl Canvas2D {
     #[cfg(test)]
     pub fn screen_pos(&self, p: Vec2) -> Pos2 {
         self.to_screen(self.rect, p)
+    }
+
+    /// The two sides being built by the sew tool, if a seam (rather than a
+    /// tack) is in progress.
+    #[cfg(test)]
+    pub fn sew_pending_edges(&self) -> Option<[Vec<SeamEdge>; 2]> {
+        match &self.sew_pending {
+            Some(SewBuild::Edges { sides, .. }) => Some(sides.clone()),
+            _ => None,
+        }
+    }
+
+    /// The point picked by the sew tool, if a tack is half-built.
+    #[cfg(test)]
+    pub fn sew_pending_point(&self) -> Option<SeamPoint> {
+        match self.sew_pending {
+            Some(SewBuild::Point(p)) => Some(p),
+            _ => None,
+        }
     }
 
     fn to_screen(&self, rect: Rect, p: Vec2) -> Pos2 {
@@ -676,6 +700,14 @@ fn handle_sew(response: &egui::Response, rect: Rect, s: &mut Session) {
         }
     }
 
+    // The pointer's press position is only reported by egui while the
+    // drag is ongoing (it reads back as `None` once released), so keep a
+    // copy of the last-known one for when the drag stops.
+    if response.dragged() || response.drag_started() {
+        if let Some(origin) = press_origin(response, rect, &s.canvas) {
+            s.canvas.sew_drag_start = Some(origin);
+        }
+    }
     if !response.clicked() && !response.drag_stopped() {
         return;
     }
@@ -696,7 +728,7 @@ fn handle_sew(response: &egui::Response, rect: Rect, s: &mut Session) {
         }
     }
 
-    let press = press_origin(response, rect, &s.canvas);
+    let press = s.canvas.sew_drag_start.take();
     let dragged = press.is_some_and(|p| p.distance(release) > s.canvas.px(PICK_PX));
     let edge = if dragged {
         let (a, b) = (
