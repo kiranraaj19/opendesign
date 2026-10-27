@@ -45,6 +45,11 @@ pub struct ClothScene {
     pub structural: Vec<DistanceConstraint>,
     pub stitches: Vec<DistanceConstraint>,
     pub pattern_ranges: Vec<(PatternId, Range<usize>)>,
+    /// Each pattern's triangulated faces, as indices local to its own
+    /// range (subtract the range's start before indexing `particles`
+    /// directly). What a renderer needs to turn draped particle positions
+    /// back into a surface.
+    pub pattern_faces: Vec<(PatternId, Vec<[u32; 3]>)>,
 }
 
 fn to_glam(v: Vec2) -> glam::Vec2 {
@@ -159,6 +164,7 @@ pub fn build(
     let mut structural_edges: BTreeSet<(usize, usize)> = BTreeSet::new();
     let mut structural = Vec::new();
     let mut pattern_ranges = Vec::new();
+    let mut pattern_faces = Vec::new();
     let mut layouts: HashMap<PatternId, PatternLayout> = HashMap::new();
 
     for (id, placement) in placements {
@@ -174,7 +180,8 @@ pub fn build(
         particles.extend(world.iter().map(|&p| Particle::new(p, inv_mass)));
         pattern_ranges.push((*id, offset..particles.len()));
 
-        for [a, b, c] in geometry::triangulate(&poly_2d) {
+        let faces = geometry::triangulate(&poly_2d);
+        for &[a, b, c] in &faces {
             for (local_a, local_b) in [(a, b), (b, c), (c, a)] {
                 let (ga, gb) = (offset + local_a as usize, offset + local_b as usize);
                 let key = (ga.min(gb), ga.max(gb));
@@ -189,6 +196,7 @@ pub fn build(
                 }
             }
         }
+        pattern_faces.push((*id, faces));
 
         layouts.insert(
             *id,
@@ -239,6 +247,7 @@ pub fn build(
         structural,
         stitches,
         pattern_ranges,
+        pattern_faces,
     }
 }
 
@@ -282,6 +291,8 @@ mod tests {
         let placements = placements_for(&doc);
         let scene = build(&doc, &placements, &ClothConfig::default());
         assert_eq!(scene.particles.len(), 4);
+        assert_eq!(scene.pattern_faces.len(), 1);
+        assert_eq!(scene.pattern_faces[0].1.len(), 2, "a quad is 2 triangles");
         // A quad triangulates into 2 triangles sharing a diagonal: 5 unique edges.
         assert_eq!(scene.structural.len(), 5);
         assert!(scene.stitches.is_empty());

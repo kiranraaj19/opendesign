@@ -2371,6 +2371,7 @@ dependencies = [
  "image",
  "od_core",
  "od_render",
+ "od_sim",
  "rfd",
  "serde",
 ]

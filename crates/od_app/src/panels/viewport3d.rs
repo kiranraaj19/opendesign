@@ -15,8 +15,10 @@ use od_render::camera::{ndc_from_pixel, OrbitCamera, ViewPreset};
 use od_render::glam;
 use od_render::gpu::{Renderer, Targets};
 use od_render::mesh::{Aabb, Mesh};
+use od_render::pattern::RingLayout;
 use od_render::scene::{linear, AvatarDraw, Frame, GridColors};
 use od_render::view::{self, FrameInput, PlacedPattern, Theme};
+use od_sim::collision::Collider;
 
 use crate::app::Session;
 use crate::theme;
@@ -138,6 +140,11 @@ pub struct Viewport3D {
     error: Option<String>,
     /// Fit the scene to the view once its size is known.
     needs_framing: bool,
+    /// Built fresh each time draping is turned on, from the document's
+    /// patterns and sewing data as they stood then; kept (but not
+    /// stepped) while paused so the last pose stays on screen.
+    pub drape: Option<od_sim::drape::Drape>,
+    pub draping: bool,
 }
 
 impl Viewport3D {
@@ -162,6 +169,8 @@ impl Viewport3D {
             show_sizing: false,
             error: None,
             needs_framing: true,
+            drape: None,
+            draping: false,
         }
     }
 
@@ -237,9 +246,65 @@ pub fn placed_patterns(s: &Session) -> Vec<PlacedPattern<PatternId>> {
     view::place_patterns(s.viewport.avatar.bounds, outlines)
 }
 
+/// Where each pattern starts out on the ring, for [`od_sim::drape::Drape`]
+/// to build a cloth scene from. Mirrors [`view::place_patterns`]'s layout
+/// so draping starts from the same pose the flat preview shows.
+fn ring_placements(s: &Session) -> Vec<(PatternId, od_render::pattern::Placement)> {
+    let ring = RingLayout::around(s.viewport.avatar.bounds);
+    let count = s.doc.patterns.len();
+    s.doc
+        .patterns
+        .iter()
+        .enumerate()
+        .map(|(i, p)| (p.id, ring.placement(i, count)))
+        .collect()
+}
+
+/// Start simulating from the document's current patterns and sewing data,
+/// or pause in place if already draping.
+fn toggle_drape(s: &mut Session) {
+    if s.viewport.draping {
+        s.viewport.draping = false;
+        return;
+    }
+    let placements = ring_placements(s);
+    let mut drape =
+        od_sim::drape::Drape::new(&s.doc, &placements, &od_sim::cloth::ClothConfig::default());
+    drape
+        .colliders
+        .push(Collider::mesh(s.viewport.avatar.mesh().clone(), 0.005));
+    drape
+        .colliders
+        .push(Collider::ground(s.viewport.avatar.bounds.min.y));
+    s.viewport.drape = Some(drape);
+    s.viewport.draping = true;
+}
+
+/// Advance the simulation by this frame's time, if draping is running.
+fn step_drape(ui: &egui::Ui, s: &mut Session) {
+    if !s.viewport.draping {
+        return;
+    }
+    if let Some(drape) = &mut s.viewport.drape {
+        let dt = ui.input(|i| i.stable_dt).clamp(0.0, 1.0 / 30.0);
+        drape.step(dt, 8);
+        ui.ctx().request_repaint();
+    }
+}
+
+/// The patterns to show: draped if a simulation is running or paused,
+/// otherwise the flat ring layout.
+fn current_placed_patterns(s: &Session) -> Vec<PlacedPattern<PatternId>> {
+    match &s.viewport.drape {
+        Some(drape) => drape.placed_patterns(),
+        None => placed_patterns(s),
+    }
+}
+
 pub fn ui(ui: &mut egui::Ui, s: &mut Session) {
-    let placed = placed_patterns(s);
     let action = ui.horizontal(|ui| view_buttons(ui, s)).inner;
+    step_drape(ui, s);
+    let placed = current_placed_patterns(s);
     let (rect, response) = ui.allocate_exact_size(ui.available_size(), Sense::click_and_drag());
     response.widget_info(|| {
         egui::WidgetInfo::labeled(egui::WidgetType::Other, true, "3D garment view")
@@ -292,6 +357,28 @@ fn view_buttons(ui: &mut egui::Ui, s: &mut Session) -> Option<ViewAction> {
     ui.separator();
     ui.toggle_value(&mut s.viewport.show_sizing, "Avatar size")
         .on_hover_text("Height, chest, waist and hip of the avatar");
+    ui.separator();
+    let label = if s.viewport.draping {
+        "Stop draping"
+    } else {
+        "Drape"
+    };
+    if ui
+        .button(label)
+        .on_hover_text("Simulate the sewn patterns draping on the avatar (XPBD)")
+        .clicked()
+    {
+        toggle_drape(s);
+    }
+    if s.viewport.drape.is_some()
+        && ui
+            .button("Reset drape")
+            .on_hover_text("Discard the simulation and go back to the flat layout")
+            .clicked()
+    {
+        s.viewport.drape = None;
+        s.viewport.draping = false;
+    }
     action
 }
 
@@ -614,6 +701,41 @@ mod tests {
             h.state().viewport.camera.distance < after.distance * 0.9,
             "zoomed in"
         );
+    }
+
+    #[test]
+    fn drape_button_starts_and_pauses_a_simulation() {
+        let mut h = harness();
+        add_block(&mut h);
+        h.run();
+
+        h.get_by_label("Drape").click();
+        h.step();
+        assert!(h.state().viewport.draping);
+        let drape = h.state().viewport.drape.as_ref().expect("built on toggle");
+        let before = drape.world.particles[0].position;
+
+        // A few more frames of simulated gravity should move the cloth.
+        // Draping keeps requesting repaints, so step frames individually
+        // rather than `run()`, which gives up after a few in that case.
+        for _ in 0..10 {
+            h.step();
+        }
+        let after = h.state().viewport.drape.as_ref().unwrap().world.particles[0].position;
+        assert_ne!(before, after, "draping should move particles over time");
+
+        h.get_by_label("Stop draping").click();
+        h.step();
+        assert!(!h.state().viewport.draping);
+        assert!(
+            h.state().viewport.drape.is_some(),
+            "pausing keeps the last pose"
+        );
+
+        h.get_by_label("Reset drape").click();
+        h.run();
+        assert!(h.state().viewport.drape.is_none());
+        h.get_by_label("Drape");
     }
 
     #[test]

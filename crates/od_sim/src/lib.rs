@@ -8,4 +8,6 @@
 
 pub mod cloth;
 pub mod collision;
+pub mod drape;
+pub mod mesh;
 pub mod xpbd;
