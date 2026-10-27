@@ -13,6 +13,7 @@ path = "src/main.rs"
 eframe = { version = "0.36", features = ["persistence"] }
 egui = "0.36"
 egui_dock = { version = "0.21.1", features = ["serde"] }
+image = { version = "0.25", default-features = false, features = ["png"] }
 od_core = { path = "../od_core" }
 od_render = { path = "../od_render" }
 od_sim = { path = "../od_sim" }
@@ -21,4 +22,3 @@ serde = { version = "1", features = ["derive"] }
 
 [dev-dependencies]
 egui_kittest = { version = "0.36", features = ["eframe", "wgpu"] }
-image = { version = "0.25", default-features = false, features = ["png"] }

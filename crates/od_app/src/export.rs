@@ -70,3 +70,37 @@ pub fn export_dxf(s: &Session) -> Option<String> {
         .err()
         .map(|e| format!("Couldn't export {}:\n{e}", path.display()))
 }
+
+/// Ask for a folder, then render a turntable of the current scene into it
+/// as numbered PNGs (see
+/// [`crate::panels::viewport3d::export_turntable_frames`]). `dark`
+/// matches the live view's current theme. `None` if the dialog was
+/// cancelled; an error message otherwise, to show if the render or a
+/// write failed.
+pub fn export_turntable(s: &Session, dark: bool) -> Option<String> {
+    let dir = rfd::FileDialog::new().pick_folder()?;
+    crate::panels::viewport3d::export_turntable_frames(
+        s,
+        &dir,
+        crate::panels::viewport3d::EXPORT_FRAME_COUNT,
+        crate::panels::viewport3d::EXPORT_SIZE,
+        dark,
+    )
+    .err()
+}
+
+/// Ask for a folder, then simulate the drape from scratch and render each
+/// step into it as numbered PNGs (see
+/// [`crate::panels::viewport3d::export_drape_frames`]) — a "motion"
+/// export of the draping process itself.
+pub fn export_drape_animation(s: &Session, dark: bool) -> Option<String> {
+    let dir = rfd::FileDialog::new().pick_folder()?;
+    crate::panels::viewport3d::export_drape_frames(
+        s,
+        &dir,
+        crate::panels::viewport3d::EXPORT_FRAME_COUNT,
+        crate::panels::viewport3d::EXPORT_SIZE,
+        dark,
+    )
+    .err()
+}

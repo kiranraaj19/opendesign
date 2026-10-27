@@ -58,6 +58,10 @@ pub struct Globals {
     pub ground: [f32; 4],
     pub eye: [f32; 4],
     /// x: 1 when the shader must encode its output to sRGB itself.
+    /// y: 1 for the extra rim light + ambient-occlusion approximation
+    /// `fs_lit` uses for a higher-quality still (see `render::render_still`
+    /// and `scene.wgsl`); `0.0` (the default) for the live viewport's
+    /// ordinary two-light rig.
     pub params: [f32; 4],
 }
 
