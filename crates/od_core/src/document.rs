@@ -206,6 +206,11 @@ pub struct Pattern {
     pub grain_angle: f32,
     pub notches: Vec<Notch>,
     pub internal_lines: Vec<InternalLine>,
+    /// Name of a fabric from the Library panel (`od_core::fabric`), or
+    /// `None` for the default theme fill. Stored by name rather than an
+    /// id so built-in fabrics can be added or reordered freely.
+    #[serde(default)]
+    pub fabric: Option<String>,
 }
 
 /// Seam allowance given to new patterns, in mm.
@@ -222,6 +227,7 @@ impl Pattern {
             grain_angle: 0.0,
             notches: Vec::new(),
             internal_lines: Vec::new(),
+            fabric: None,
         }
     }
 

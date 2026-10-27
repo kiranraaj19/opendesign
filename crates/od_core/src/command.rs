@@ -305,6 +305,52 @@ impl Command for SetPointKind {
     }
 }
 
+/// Tag a pattern with a fabric from the Library panel, by name; `None`
+/// clears it back to the default fill.
+pub struct SetFabric {
+    id: PatternId,
+    /// The fabric to assign, kept as-is (not swapped) so `label` always
+    /// describes the intended change, even once `apply` has run.
+    name: Option<String>,
+    /// The pattern's fabric before this command, filled in by the first
+    /// `apply` so `undo` can restore it.
+    previous: Option<Option<String>>,
+}
+
+impl SetFabric {
+    pub fn new(id: PatternId, name: Option<String>) -> Self {
+        Self {
+            id,
+            name,
+            previous: None,
+        }
+    }
+}
+
+impl Command for SetFabric {
+    fn label(&self) -> String {
+        match &self.name {
+            Some(name) => format!("Set fabric to {name}"),
+            None => "Clear fabric".into(),
+        }
+    }
+
+    fn apply(&mut self, doc: &mut Document) {
+        if let Some(p) = doc.pattern_mut(self.id) {
+            self.previous = Some(p.fabric.clone());
+            p.fabric = self.name.clone();
+        }
+    }
+
+    fn undo(&mut self, doc: &mut Document) {
+        if let Some(previous) = self.previous.take() {
+            if let Some(p) = doc.pattern_mut(self.id) {
+                p.fabric = previous;
+            }
+        }
+    }
+}
+
 /// A numeric pattern property edited in Properties.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PatternValue {
