@@ -1,8 +1,8 @@
 //! Properties of the current selection.
 
 use od_core::{
-    Axis, Pattern, PatternId, PatternValue, PointKind, RemoveInternalLine, RenamePattern,
-    SetPatternValue,
+    Axis, Fabric, Pattern, PatternId, PatternValue, PointKind, RemoveInternalLine, RenamePattern,
+    SetFabric, SetPatternValue,
 };
 
 use crate::app::Session;
@@ -95,6 +95,8 @@ pub fn ui(ui: &mut egui::Ui, s: &mut Session) {
             ui.end_row();
         });
 
+    fabric_section(ui, s, id);
+
     if let Some(pattern) = s.doc.pattern(id) {
         point_section(ui, s, pattern.clone());
     }
@@ -163,6 +165,31 @@ fn value_edit(
             }
         }
     }
+}
+
+/// Pick a fabric for the pattern from the built-in presets. Custom fabrics
+/// aren't editable here (out of scope for this pass); the picker just
+/// shows the current one, matched by name, with "Custom" if it was loaded
+/// from a project that set something else.
+fn fabric_section(ui: &mut egui::Ui, s: &mut Session, id: PatternId) {
+    let Some(fabric) = s.doc.pattern(id).map(|p| p.fabric.clone()) else {
+        return;
+    };
+    ui.add_space(8.0);
+    ui.label("Fabric");
+    ui.horizontal_wrapped(|ui| {
+        for preset in Fabric::presets() {
+            let selected = preset.name == fabric.name;
+            if ui.selectable_label(selected, &preset.name).clicked() && !selected {
+                s.execute(SetFabric::new(id, preset));
+            }
+        }
+    });
+    ui.label(format!(
+        "{:.0} g/m², friction {:.1}",
+        fabric.mass_per_area * 1000.0,
+        fabric.friction
+    ));
 }
 
 /// The point picked with the Edit points tool.

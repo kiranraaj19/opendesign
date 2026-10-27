@@ -2,8 +2,8 @@
 //! apply itself and how to reverse that change.
 
 use crate::document::{
-    normalize_degrees, Axis, Document, InternalLine, Notch, OutlinePoint, Pattern, PatternId,
-    PointKind, SeamEdge, SeamPoint, SewingLine, SewingLineId, Tack, TackId,
+    normalize_degrees, Axis, Document, Fabric, InternalLine, Notch, OutlinePoint, Pattern,
+    PatternId, PointKind, SeamEdge, SeamPoint, SewingLine, SewingLineId, Tack, TackId,
 };
 use crate::geometry::Vec2;
 
@@ -364,6 +364,42 @@ impl Command for SetPatternValue {
     fn apply(&mut self, doc: &mut Document) {
         if let Some(p) = doc.pattern_mut(self.id) {
             std::mem::swap(self.field.slot(p), &mut self.value);
+        }
+    }
+
+    fn undo(&mut self, doc: &mut Document) {
+        self.apply(doc);
+    }
+}
+
+/// Assign a pattern's fabric, e.g. from the properties panel's picker.
+pub struct SetFabric {
+    id: PatternId,
+    /// Swapped with the pattern's fabric on `apply`/`undo`, so after
+    /// `apply` this holds the *previous* fabric (what undo restores) —
+    /// `name` below is what the label should keep showing regardless.
+    fabric: Fabric,
+    /// The fabric being set, named once at construction so `label()` still
+    /// reports it correctly after `apply` has swapped `fabric` to the old
+    /// value.
+    name: String,
+}
+
+impl SetFabric {
+    pub fn new(id: PatternId, fabric: Fabric) -> Self {
+        let name = fabric.name.clone();
+        Self { id, fabric, name }
+    }
+}
+
+impl Command for SetFabric {
+    fn label(&self) -> String {
+        format!("Set fabric: {}", self.name)
+    }
+
+    fn apply(&mut self, doc: &mut Document) {
+        if let Some(p) = doc.pattern_mut(self.id) {
+            std::mem::swap(&mut p.fabric, &mut self.fabric);
         }
     }
 
@@ -873,6 +909,15 @@ mod tests {
             |d| assert_eq!(pat(d).grain_angle, -90.0),
         );
         assert_eq!(PatternValue::SeamAllowance.clean(-3.0), 0.0);
+    }
+
+    #[test]
+    fn set_fabric_round_trip() {
+        round_trip(SetFabric::new(ID, Fabric::denim()), |d| {
+            assert_eq!(pat(d).fabric.name, "Denim");
+        });
+        let (doc, id) = doc_with_rect();
+        assert_eq!(doc.pattern(id).unwrap().fabric.name, "Cotton", "default");
     }
 
     #[test]

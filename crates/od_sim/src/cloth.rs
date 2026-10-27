@@ -15,29 +15,23 @@ use od_render::pattern::Placement;
 
 use crate::xpbd::{DistanceConstraint, Particle};
 
-/// Tuning for how stiff the built constraints are. Compliance is XPBD's
-/// inverse stiffness (m/N); `0.0` is rigid.
+/// Tuning for the constraints [`build`] doesn't take from a pattern's
+/// [`od_core::Fabric`]: just the seam, which stitches two sides that might
+/// be cut from different fabrics, so it has no single one to read from.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ClothConfig {
-    /// Mass of one particle, in kg. Uniform for now; a future pass could
-    /// weight it by the Voronoi area the particle covers.
-    pub particle_mass: f32,
-    pub structural_compliance: f32,
-    /// Compliance of the cross-edge constraint that resists folding at
-    /// each interior triangle edge (see [`bending_pairs`]). Real cloth
-    /// bends far more easily than it stretches, so this is softer than
-    /// `structural_compliance`.
-    pub bending_compliance: f32,
     pub stitch_compliance: f32,
+    /// Floor under a particle's mass, in kg, so an unreasonably light
+    /// fabric or a very finely subdivided pattern can't zero it out and
+    /// make the solver divide by zero.
+    pub min_particle_mass: f32,
 }
 
 impl Default for ClothConfig {
     fn default() -> Self {
         Self {
-            particle_mass: 0.01,
-            structural_compliance: 1e-7,
-            bending_compliance: 1e-5,
             stitch_compliance: 1e-7,
+            min_particle_mass: 1e-6,
         }
     }
 }
@@ -185,8 +179,6 @@ pub fn build(
     placements: &[(PatternId, Placement)],
     config: &ClothConfig,
 ) -> ClothScene {
-    let inv_mass = 1.0 / config.particle_mass;
-
     let mut particles = Vec::new();
     let mut structural_edges: BTreeSet<(usize, usize)> = BTreeSet::new();
     let mut structural = Vec::new();
@@ -204,6 +196,15 @@ pub fn build(
         let glam_poly: Vec<glam::Vec2> = poly_2d.iter().copied().map(to_glam).collect();
         let world = placement.place(&glam_poly);
 
+        // Spread the fabric's mass per square metre over however many
+        // particles this pattern flattened to, so a bigger or more finely
+        // subdivided piece doesn't end up lighter or heavier overall.
+        let area_m2 = pattern.area() * 1e-6;
+        let per_particle_mass = (area_m2 * pattern.fabric.mass_per_area
+            / world.len().max(1) as f32)
+            .max(config.min_particle_mass);
+        let inv_mass = 1.0 / per_particle_mass;
+
         let offset = particles.len();
         particles.extend(world.iter().map(|&p| Particle::new(p, inv_mass)));
         pattern_ranges.push((*id, offset..particles.len()));
@@ -219,7 +220,7 @@ pub fn build(
                         key.0,
                         key.1,
                         rest_length,
-                        config.structural_compliance,
+                        pattern.fabric.stretch_compliance,
                     ));
                 }
             }
@@ -231,7 +232,7 @@ pub fn build(
                 ga.min(gb),
                 ga.max(gb),
                 rest_length,
-                config.bending_compliance,
+                pattern.fabric.bending_compliance,
             ));
         }
         pattern_faces.push((*id, faces));
@@ -436,5 +437,53 @@ mod tests {
         let scene = build(&doc, &placements, &ClothConfig::default());
         assert_eq!(scene.stitches.len(), 1);
         assert_eq!(scene.stitches[0].rest_length, 0.0);
+    }
+
+    #[test]
+    fn a_heavier_stiffer_fabric_gets_more_mass_and_less_compliance() {
+        use od_core::document::Fabric;
+
+        let scene_for = |fabric: Fabric| {
+            let mut doc = Document::new("test");
+            let mut panel = rectangle(1, "panel", 200.0, 300.0);
+            panel.fabric = fabric;
+            doc.patterns.push(panel);
+            let placements = placements_for(&doc);
+            build(&doc, &placements, &ClothConfig::default())
+        };
+
+        let silk = scene_for(Fabric::silk());
+        let denim = scene_for(Fabric::denim());
+
+        // Denim is both heavier per square metre and stiffer (lower
+        // compliance) than silk, so its particles should end up heavier
+        // and its structural constraints less compliant.
+        assert!(
+            denim.particles[0].inv_mass < silk.particles[0].inv_mass,
+            "denim should be heavier: {:?} vs {:?}",
+            denim.particles[0].inv_mass,
+            silk.particles[0].inv_mass
+        );
+        assert!(denim.structural[0].compliance < silk.structural[0].compliance);
+        assert!(denim.bending[0].compliance < silk.bending[0].compliance);
+    }
+
+    #[test]
+    fn particle_mass_is_never_below_the_configured_floor() {
+        use od_core::document::Fabric;
+        let mut doc = Document::new("test");
+        let mut panel = rectangle(1, "panel", 200.0, 300.0);
+        panel.fabric = Fabric {
+            mass_per_area: 0.0,
+            ..Fabric::cotton()
+        };
+        doc.patterns.push(panel);
+        let placements = placements_for(&doc);
+        let config = ClothConfig {
+            min_particle_mass: 0.002,
+            ..ClothConfig::default()
+        };
+        let scene = build(&doc, &placements, &config);
+        assert_eq!(scene.particles[0].inv_mass, 1.0 / 0.002);
     }
 }

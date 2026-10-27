@@ -957,6 +957,32 @@ mod tests {
     }
 
     #[test]
+    fn properties_panel_assigns_a_fabric() {
+        let mut h = harness();
+        h.get_by_label("+ Sleeve").click();
+        h.run();
+        let id = h.state().session.doc.patterns[0].id;
+        assert_eq!(
+            h.state().session.doc.pattern(id).unwrap().fabric.name,
+            "Cotton"
+        );
+
+        click(&mut h, "Denim");
+        assert_eq!(
+            h.state().session.doc.pattern(id).unwrap().fabric.name,
+            "Denim"
+        );
+        assert_eq!(last_step(&h), "Set fabric: Denim");
+
+        h.key_press_modifiers(Modifiers::COMMAND, Key::Z);
+        h.run();
+        assert_eq!(
+            h.state().session.doc.pattern(id).unwrap().fabric.name,
+            "Cotton"
+        );
+    }
+
+    #[test]
     fn select_tool_moves_pattern_as_one_undo_step() {
         let mut h = harness();
         h.get_by_label("+ Back bodice").click();

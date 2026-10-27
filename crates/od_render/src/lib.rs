@@ -8,6 +8,7 @@ pub mod avatar;
 pub mod camera;
 pub mod gpu;
 pub mod import;
+pub mod material;
 pub mod mesh;
 pub mod pattern;
 pub mod pick;

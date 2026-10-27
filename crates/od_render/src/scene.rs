@@ -8,6 +8,7 @@ use bytemuck::{Pod, Zeroable};
 use glam::{Vec2, Vec3};
 
 use crate::camera::OrbitCamera;
+use crate::material::Material;
 use crate::mesh::Mesh;
 
 /// Linear-light RGBA.
@@ -20,6 +21,10 @@ pub struct LitVertex {
     pub position: [f32; 3],
     pub normal: [f32; 3],
     pub color: Color,
+    /// Texture coordinates. Untextured surfaces leave this `[0.0, 0.0]`;
+    /// it's harmless, since they're drawn with a solid white texture (see
+    /// [`crate::gpu::Renderer`]), so sampling it always returns 1.0.
+    pub uv: [f32; 2],
 }
 
 /// A vertex of an unlit line or overlay.
@@ -118,6 +123,19 @@ pub struct Frame {
     pub lines: Vec<FlatVertex>,
     /// Alpha-blended triangles on the floor.
     pub shadow: Vec<FlatVertex>,
+    /// Surfaces drawn with their own texture, each in its own draw call
+    /// (see [`Self::add_textured_surface`]), separate from `surfaces`
+    /// because each needs a different texture bound.
+    pub textured: Vec<TexturedSurface>,
+}
+
+/// One textured draw: a material and the geometry to draw with it, in its
+/// own vertex/index buffers (not merged into [`Frame::surfaces`]).
+#[derive(Debug, Clone)]
+pub struct TexturedSurface {
+    pub material: Material,
+    pub vertices: Vec<LitVertex>,
+    pub indices: Vec<u32>,
 }
 
 impl Frame {
@@ -129,6 +147,7 @@ impl Frame {
             surface_indices: Vec::new(),
             lines: Vec::new(),
             shadow: Vec::new(),
+            textured: Vec::new(),
         }
     }
 
@@ -150,10 +169,37 @@ impl Frame {
                     position: p.to_array(),
                     normal: n.to_array(),
                     color,
+                    uv: [0.0, 0.0],
                 },
             ));
         self.surface_indices
             .extend(mesh.indices.iter().map(|i| i + base));
+    }
+
+    /// A surface drawn with its own texture instead of (or on top of) a
+    /// flat fill: `material.base_color` tints the texture (or stands alone
+    /// if it has none). UV coordinates are a simple planar projection onto
+    /// the plane most aligned with `normal`, tiled once per metre — good
+    /// enough for a flat garment piece or an avatar-sized patch, not a
+    /// general unwrap.
+    pub fn add_textured_surface(&mut self, mesh: &Mesh, normal: Vec3, material: Material) {
+        let (right, up) = planar_basis(normal);
+        let vertices = mesh
+            .positions
+            .iter()
+            .zip(&mesh.normals)
+            .map(|(p, n)| LitVertex {
+                position: p.to_array(),
+                normal: n.to_array(),
+                color: material.base_color,
+                uv: [p.dot(right), p.dot(up)],
+            })
+            .collect();
+        self.textured.push(TexturedSurface {
+            material,
+            vertices,
+            indices: mesh.indices.clone(),
+        });
     }
 
     /// A closed outline, drawn just off both faces of a flat piece so the
@@ -177,8 +223,20 @@ pub fn lit_vertices(mesh: &Mesh, color: Color) -> Vec<LitVertex> {
             position: p.to_array(),
             normal: n.to_array(),
             color,
+            uv: [0.0, 0.0],
         })
         .collect()
+}
+
+/// A stable right/up pair spanning the plane perpendicular to `normal`,
+/// for projecting a flat-ish surface's vertex positions into texture
+/// coordinates.
+fn planar_basis(normal: Vec3) -> (Vec3, Vec3) {
+    let n = normal.try_normalize().unwrap_or(Vec3::Y);
+    let helper = if n.x.abs() < 0.9 { Vec3::X } else { Vec3::Y };
+    let right = helper.cross(n).try_normalize().unwrap_or(Vec3::X);
+    let up = n.cross(right);
+    (right, up)
 }
 
 pub struct GridColors {

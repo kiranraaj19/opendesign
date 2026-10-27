@@ -161,6 +161,97 @@ impl SewingLine {
     }
 }
 
+/// How a fabric's surface looks in the 3D view, besides its flat tint: a
+/// hint for [`od_render`] to pick a procedural weave texture. Kept as a tag
+/// here rather than pixels, since `od_core` has no GPU or image dependency.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FabricTexture {
+    /// A flat tint with no weave pattern (e.g. silk's smooth surface).
+    #[default]
+    Flat,
+    /// A fine, even plain weave (e.g. cotton).
+    Plain,
+    /// A coarser diagonal twill weave (e.g. denim).
+    Twill,
+}
+
+/// A physical fabric: how heavy and stiff it drapes, and how it looks.
+/// Every [`Pattern`] has one (see [`Pattern::fabric`]); [`od_sim`] reads the
+/// physical fields to set particle mass and constraint compliance, and
+/// `od_render`/`od_app` read `color`/`texture` to shade it in the 3D view.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Fabric {
+    pub name: String,
+    /// Mass of one square metre of fabric, in kg.
+    pub mass_per_area: f32,
+    /// XPBD compliance (inverse stiffness, m/N) of the constraints that
+    /// resist stretching. Lower is stiffer.
+    pub stretch_compliance: f32,
+    /// XPBD compliance of the constraints that resist folding. Real cloth
+    /// bends far more easily than it stretches, so this is normally much
+    /// higher (softer) than `stretch_compliance`.
+    pub bending_compliance: f32,
+    /// Coefficient of friction against other surfaces, 0..1. Not yet read
+    /// by `od_sim`'s collision (reserved for a future pass).
+    pub friction: f32,
+    /// Base tint, straight sRGB 0..255.
+    pub color: [u8; 3],
+    pub texture: FabricTexture,
+}
+
+impl Fabric {
+    pub fn cotton() -> Self {
+        Self {
+            name: "Cotton".into(),
+            mass_per_area: 0.15,
+            stretch_compliance: 1e-7,
+            bending_compliance: 1e-5,
+            friction: 0.3,
+            color: [235, 230, 210],
+            texture: FabricTexture::Plain,
+        }
+    }
+
+    pub fn silk() -> Self {
+        Self {
+            name: "Silk".into(),
+            mass_per_area: 0.05,
+            stretch_compliance: 4e-7,
+            bending_compliance: 8e-5,
+            friction: 0.1,
+            color: [232, 226, 236],
+            texture: FabricTexture::Flat,
+        }
+    }
+
+    pub fn denim() -> Self {
+        Self {
+            name: "Denim".into(),
+            mass_per_area: 0.40,
+            stretch_compliance: 2e-8,
+            bending_compliance: 2e-6,
+            friction: 0.5,
+            color: [68, 88, 128],
+            texture: FabricTexture::Twill,
+        }
+    }
+
+    /// The built-in fabrics offered by the properties panel's picker, in
+    /// display order.
+    pub fn presets() -> [Fabric; 3] {
+        [Self::cotton(), Self::silk(), Self::denim()]
+    }
+}
+
+impl Default for Fabric {
+    /// A medium-weight cotton, so an unassigned pattern still drapes
+    /// plausibly.
+    fn default() -> Self {
+        Self::cotton()
+    }
+}
+
 /// Mirror axis through a pattern.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Axis {
@@ -206,6 +297,9 @@ pub struct Pattern {
     pub grain_angle: f32,
     pub notches: Vec<Notch>,
     pub internal_lines: Vec<InternalLine>,
+    /// What this piece is cut from. Defaults to [`Fabric::default`] for a
+    /// new pattern.
+    pub fabric: Fabric,
 }
 
 /// Seam allowance given to new patterns, in mm.
@@ -222,6 +316,7 @@ impl Pattern {
             grain_angle: 0.0,
             notches: Vec::new(),
             internal_lines: Vec::new(),
+            fabric: Fabric::default(),
         }
     }
 
