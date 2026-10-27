@@ -2,6 +2,8 @@
 //! render pass someone else owns (egui's, in the app), so it only needs to
 //! know that pass's formats.
 
+use std::collections::HashMap;
+
 use wgpu::util::DeviceExt;
 
 use crate::scene::{FlatVertex, Frame, Globals, LitVertex};
@@ -29,6 +31,26 @@ pub struct Renderer {
     surface_indices: Growable,
     line_vertices: Growable,
     shadow_vertices: Growable,
+    texture_layout: wgpu::BindGroupLayout,
+    sampler: wgpu::Sampler,
+    /// Bound for the avatar and the plain `surfaces` batch, which have no
+    /// texture of their own: a solid white pixel, so sampling it in the
+    /// shader is the same as not texturing at all.
+    default_texture: wgpu::BindGroup,
+    /// One bind group per distinct [`crate::material::TextureImage::id`]
+    /// seen so far, kept across frames so the same fabric's texture isn't
+    /// re-uploaded to the GPU every frame.
+    texture_cache: HashMap<u64, wgpu::BindGroup>,
+    /// This frame's textured draws, rebuilt in [`Self::prepare`] (their
+    /// geometry can change every frame, e.g. while draping).
+    textured: Vec<TexturedBatch>,
+}
+
+struct TexturedBatch {
+    vertices: wgpu::Buffer,
+    indices: wgpu::Buffer,
+    count: u32,
+    bind_group: wgpu::BindGroup,
 }
 
 struct MeshBuffers {
@@ -82,13 +104,13 @@ impl Growable {
     }
 }
 
-const LIT_ATTRIBUTES: [wgpu::VertexAttribute; 3] =
-    wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3, 2 => Float32x4];
+const LIT_ATTRIBUTES: [wgpu::VertexAttribute; 4] =
+    wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3, 2 => Float32x4, 3 => Float32x2];
 const FLAT_ATTRIBUTES: [wgpu::VertexAttribute; 2] =
     wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x4];
 
 impl Renderer {
-    pub fn new(device: &wgpu::Device, targets: Targets) -> Self {
+    pub fn new(device: &wgpu::Device, queue: &wgpu::Queue, targets: Targets) -> Self {
         let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("od_scene"),
             source: wgpu::ShaderSource::Wgsl(SHADER.into()),
@@ -119,9 +141,48 @@ impl Renderer {
                 resource: globals.as_entire_binding(),
             }],
         });
+        let texture_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("od_texture"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+            ],
+        });
+        let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("od_sampler"),
+            address_mode_u: wgpu::AddressMode::Repeat,
+            address_mode_v: wgpu::AddressMode::Repeat,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            mipmap_filter: wgpu::MipmapFilterMode::Linear,
+            ..Default::default()
+        });
+        let default_texture = make_texture_bind_group(
+            device,
+            queue,
+            &texture_layout,
+            &sampler,
+            1,
+            1,
+            &[255, 255, 255, 255],
+        );
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("od_scene"),
-            bind_group_layouts: &[Some(&layout)],
+            bind_group_layouts: &[Some(&layout), Some(&texture_layout)],
             immediate_size: 0,
         });
 
@@ -204,6 +265,11 @@ impl Renderer {
             surface_indices: Growable::new("od_surface_indices", U::INDEX),
             line_vertices: Growable::new("od_lines", U::VERTEX),
             shadow_vertices: Growable::new("od_shadow", U::VERTEX),
+            texture_layout,
+            sampler,
+            default_texture,
+            texture_cache: HashMap::new(),
+            textured: Vec::new(),
         }
     }
 
@@ -244,11 +310,56 @@ impl Renderer {
             .write(device, queue, &frame.surface_indices);
         self.line_vertices.write(device, queue, &frame.lines);
         self.shadow_vertices.write(device, queue, &frame.shadow);
+
+        // Rebuilt every frame: a textured surface's geometry can change
+        // (e.g. while draping), but its texture is cached by id below so
+        // re-uploading the pixels only happens the first time that id is
+        // seen.
+        self.textured = frame
+            .textured
+            .iter()
+            .filter(|t| !t.indices.is_empty())
+            .map(|textured| {
+                let bind_group = match &textured.material.texture {
+                    Some(tex) => self
+                        .texture_cache
+                        .entry(tex.id)
+                        .or_insert_with(|| {
+                            make_texture_bind_group(
+                                device,
+                                queue,
+                                &self.texture_layout,
+                                &self.sampler,
+                                tex.width,
+                                tex.height,
+                                &tex.rgba,
+                            )
+                        })
+                        .clone(),
+                    None => self.default_texture.clone(),
+                };
+                TexturedBatch {
+                    vertices: device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                        label: Some("od_textured"),
+                        contents: bytemuck::cast_slice(&textured.vertices),
+                        usage: wgpu::BufferUsages::VERTEX,
+                    }),
+                    indices: device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                        label: Some("od_textured_indices"),
+                        contents: bytemuck::cast_slice(&textured.indices),
+                        usage: wgpu::BufferUsages::INDEX,
+                    }),
+                    count: textured.indices.len() as u32,
+                    bind_group,
+                }
+            })
+            .collect();
     }
 
     /// Draw into a pass whose viewport is already set to the 3D view.
     pub fn paint(&self, pass: &mut wgpu::RenderPass<'_>) {
         pass.set_bind_group(0, &self.bind_group, &[]);
+        pass.set_bind_group(1, &self.default_texture, &[]);
 
         pass.set_pipeline(&self.lit);
         if let Some((_, avatar)) = &self.avatar {
@@ -264,6 +375,13 @@ impl Renderer {
             pass.set_vertex_buffer(0, vertices);
             pass.set_index_buffer(indices, wgpu::IndexFormat::Uint32);
             pass.draw_indexed(0..self.surface_indices.count, 0, 0..1);
+        }
+
+        for batch in &self.textured {
+            pass.set_bind_group(1, &batch.bind_group, &[]);
+            pass.set_vertex_buffer(0, batch.vertices.slice(..));
+            pass.set_index_buffer(batch.indices.slice(..), wgpu::IndexFormat::Uint32);
+            pass.draw_indexed(0..batch.count, 0, 0..1);
         }
 
         // After the solids, so depth testing hides lines behind them.
@@ -396,6 +514,59 @@ enum Kind {
     Shadow,
 }
 
+/// Upload an RGBA8 image and wrap it (plus `sampler`) in a bind group
+/// matching `layout`, group 1's shape in `scene.wgsl`.
+fn make_texture_bind_group(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    layout: &wgpu::BindGroupLayout,
+    sampler: &wgpu::Sampler,
+    width: u32,
+    height: u32,
+    rgba: &[u8],
+) -> wgpu::BindGroup {
+    let size = wgpu::Extent3d {
+        width: width.max(1),
+        height: height.max(1),
+        depth_or_array_layers: 1,
+    };
+    let texture = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("od_fabric_texture"),
+        size,
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Rgba8UnormSrgb,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+        view_formats: &[],
+    });
+    queue.write_texture(
+        texture.as_image_copy(),
+        rgba,
+        wgpu::TexelCopyBufferLayout {
+            offset: 0,
+            bytes_per_row: Some(4 * size.width),
+            rows_per_image: Some(size.height),
+        },
+        size,
+    );
+    let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+    device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("od_fabric_texture"),
+        layout,
+        entries: &[
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: wgpu::BindingResource::TextureView(&view),
+            },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: wgpu::BindingResource::Sampler(sampler),
+            },
+        ],
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -446,9 +617,10 @@ mod tests {
     /// Vertex strides and attribute offsets match the Rust structs.
     #[test]
     fn vertex_layouts_match_structs() {
-        assert_eq!(size_of::<LitVertex>(), 40);
+        assert_eq!(size_of::<LitVertex>(), 48);
         assert_eq!(LIT_ATTRIBUTES[1].offset, 12);
         assert_eq!(LIT_ATTRIBUTES[2].offset, 24);
+        assert_eq!(LIT_ATTRIBUTES[3].offset, 40);
         assert_eq!(size_of::<FlatVertex>(), 28);
         assert_eq!(FLAT_ATTRIBUTES[1].offset, 12);
     }
@@ -472,7 +644,7 @@ mod tests {
             depth: Some(crate::DEPTH_FORMAT),
             samples: u32::from(crate::MSAA_SAMPLES),
         };
-        let mut renderer = Renderer::new(&device, targets);
+        let mut renderer = Renderer::new(&device, &queue, targets);
         let kind = AvatarKind::Female;
         let mesh = Arc::new(avatar_mesh(kind, kind.default_measurements()));
         let mut camera = OrbitCamera::default();

@@ -116,7 +116,7 @@ fn main() {
         depth: Some(od_render::DEPTH_FORMAT),
         samples: u32::from(od_render::MSAA_SAMPLES),
     };
-    let mut renderer = Renderer::new(&device, targets);
+    let mut renderer = Renderer::new(&device, &queue, targets);
     let frame = compose_frame(FrameInput {
         camera: &camera,
         aspect,
@@ -131,6 +131,7 @@ fn main() {
         selected: Some(1),
         theme: &theme,
         pattern_colors: None,
+        pattern_materials: None,
     });
     // The app paints this background with egui before the 3D callback runs.
     let channel = |shift: u32| f64::from((bg >> shift) as u8) / 255.0;

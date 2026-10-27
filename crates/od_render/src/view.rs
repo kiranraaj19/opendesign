@@ -5,6 +5,7 @@
 use glam::{Vec2, Vec3};
 
 use crate::camera::OrbitCamera;
+use crate::material::Material;
 use crate::mesh::{Aabb, Mesh};
 use crate::pattern::{pattern_mesh, RingLayout};
 use crate::pick::{closest_hit, Ray};
@@ -73,6 +74,12 @@ pub struct FrameInput<'a, K> {
     /// that doesn't match its pattern's vertex count falls back to the
     /// theme fill, as if absent.
     pub pattern_colors: Option<&'a [Vec<Color>]>,
+    /// Each pattern's fabric, in the same order as `patterns`, in place of
+    /// the theme fill — a flat tint, or a tiled texture if the material
+    /// has one. Loses to `pattern_colors` (a heatmap) and to selection, the
+    /// same way the theme fill does. `None` for an entry (or a `None`
+    /// `pattern_materials` altogether) falls back to the theme fill.
+    pub pattern_materials: Option<&'a [Option<Material>]>,
 }
 
 pub fn compose_frame<K: PartialEq>(input: FrameInput<'_, K>) -> Frame {
@@ -81,18 +88,28 @@ pub fn compose_frame<K: PartialEq>(input: FrameInput<'_, K>) -> Frame {
     frame.avatar = input.avatar;
     for (i, p) in input.patterns.iter().enumerate() {
         let selected = input.selected.as_ref() == Some(&p.key);
+        let material = input.pattern_materials.and_then(|m| m.get(i)?.as_ref());
         let (fill, line) = if selected {
             (theme.selected, theme.selected)
         } else {
-            (theme.pattern, theme.outline)
+            (
+                material.map_or(theme.pattern, |m| m.base_color),
+                theme.outline,
+            )
         };
         let varying = input
             .pattern_colors
             .and_then(|c| c.get(i))
             .filter(|c| c.len() == p.mesh.positions.len());
-        match varying {
-            Some(colors) => frame.add_surface_varying(&p.mesh, colors),
-            None => frame.add_surface(&p.mesh, fill),
+        match (
+            varying,
+            material.filter(|m| !selected && m.texture.is_some()),
+        ) {
+            (Some(colors), _) => frame.add_surface_varying(&p.mesh, colors),
+            (None, Some(textured)) => {
+                frame.add_textured_surface(&p.mesh, p.normal, textured.clone());
+            }
+            (None, None) => frame.add_surface(&p.mesh, fill),
         }
         frame.add_outline(&p.outline, p.normal, line);
     }
@@ -233,6 +250,7 @@ mod tests {
             selected: Some(2),
             theme: &theme,
             pattern_colors: None,
+            pattern_materials: None,
         });
         let per_pattern = placed[0].mesh.positions.len();
         let selected = frame
@@ -277,6 +295,7 @@ mod tests {
             selected: None,
             theme: &theme,
             pattern_colors: Some(&colors),
+            pattern_materials: None,
         });
         assert!(frame.surfaces[..per_pattern]
             .iter()
@@ -287,5 +306,80 @@ mod tests {
                 .all(|v| v.color == theme.pattern),
             "mismatched color count falls back to the theme fill"
         );
+    }
+
+    #[test]
+    fn fabric_material_tints_or_textures_unselected_patterns() {
+        use crate::material::{plain_weave, Material};
+        let (avatar, placed) = scene();
+        let theme = Theme {
+            avatar: [0.5; 4],
+            pattern: [0.2, 0.3, 0.6, 1.0],
+            selected: [1.0, 0.6, 0.1, 1.0],
+            outline: [0.6, 0.7, 0.9, 1.0],
+            grid: GridColors {
+                minor: [0.1; 4],
+                major: [0.2; 4],
+                axis: [0.3; 4],
+            },
+            shadow: [0.0, 0.0, 0.0, 0.3],
+        };
+        let flat_color: Color = [0.8, 0.1, 0.1, 1.0];
+        let textured = Material::textured(
+            [0.7, 0.7, 0.9, 1.0],
+            std::sync::Arc::new(plain_weave(1, [200, 190, 170], 4)),
+        );
+        let materials = vec![
+            Some(Material::flat(flat_color)),
+            Some(textured.clone()),
+            None,
+        ];
+        let per_pattern = placed[0].mesh.positions.len();
+        let frame = compose_frame(FrameInput {
+            camera: &OrbitCamera::default(),
+            aspect: 1.0,
+            encode_srgb: true,
+            avatar: None,
+            avatar_bounds: avatar.bounds().unwrap(),
+            patterns: &placed[..3],
+            // Pattern 1 (index 1 in `placed`, since keys start at 1) is
+            // selected: its texture should be skipped in favour of the
+            // theme's selection tint.
+            selected: Some(2),
+            theme: &theme,
+            pattern_colors: None,
+            pattern_materials: Some(&materials),
+        });
+        // Pattern 0: a flat fabric tint, drawn in the ordinary surfaces batch.
+        assert!(frame.surfaces[..per_pattern]
+            .iter()
+            .all(|v| v.color == flat_color));
+        // Pattern 1: selected, so it's the theme's selection colour, not
+        // the fabric's texture or tint, and nothing was added to `textured`.
+        assert!(frame.surfaces[per_pattern..per_pattern * 2]
+            .iter()
+            .all(|v| v.color == theme.selected));
+        assert!(frame.textured.is_empty());
+
+        // Nothing selected this time: the textured fabric goes into its
+        // own batch instead of the plain `surfaces` one.
+        let frame = compose_frame(FrameInput {
+            camera: &OrbitCamera::default(),
+            aspect: 1.0,
+            encode_srgb: true,
+            avatar: None,
+            avatar_bounds: avatar.bounds().unwrap(),
+            patterns: &placed[..3],
+            selected: None,
+            theme: &theme,
+            pattern_colors: None,
+            pattern_materials: Some(&materials),
+        });
+        assert_eq!(frame.textured.len(), 1);
+        assert_eq!(frame.textured[0].vertices.len(), per_pattern);
+        assert!(frame.textured[0]
+            .vertices
+            .iter()
+            .all(|v| v.color == textured.base_color));
     }
 }

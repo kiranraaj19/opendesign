@@ -9,6 +9,7 @@ pub mod camera;
 pub mod export;
 pub mod gpu;
 pub mod import;
+pub mod material;
 pub mod mesh;
 pub mod pattern;
 pub mod pick;

@@ -13,6 +13,12 @@ struct Globals {
 
 @group(0) @binding(0) var<uniform> g: Globals;
 
+// A diffuse/base-color texture, multiplied with the vertex color. Surfaces
+// with no fabric texture of their own are bound to a solid white 1x1 pixel
+// (see od_render::gpu::Renderer), so sampling it is a no-op.
+@group(1) @binding(0) var diffuse_tex: texture_2d<f32>;
+@group(1) @binding(1) var diffuse_samp: sampler;
+
 fn encode(c: vec3<f32>) -> vec3<f32> {
     if g.params.x < 0.5 {
         return c;
@@ -29,6 +35,7 @@ struct LitIn {
     @location(0) position: vec3<f32>,
     @location(1) normal: vec3<f32>,
     @location(2) color: vec4<f32>,
+    @location(3) uv: vec2<f32>,
 };
 
 struct LitOut {
@@ -36,6 +43,7 @@ struct LitOut {
     @location(0) world: vec3<f32>,
     @location(1) normal: vec3<f32>,
     @location(2) color: vec4<f32>,
+    @location(3) uv: vec2<f32>,
 };
 
 @vertex
@@ -45,6 +53,7 @@ fn vs_lit(v: LitIn) -> LitOut {
     out.world = v.position;
     out.normal = v.normal;
     out.color = v.color;
+    out.uv = v.uv;
     return out;
 }
 
@@ -58,8 +67,10 @@ fn fs_lit(i: LitOut) -> @location(0) vec4<f32> {
     // A soft highlight from the key light (Blinn-Phong).
     let half_dir = normalize(g.key.xyz + view);
     let spec = pow(max(dot(n, half_dir), 0.0), 40.0) * 0.12 * g.key.w * step(0.0, dot(n, g.key.xyz));
-    let rgb = i.color.rgb * (ambient + vec3<f32>(key + fill)) + vec3<f32>(spec);
-    return vec4<f32>(encode(rgb), i.color.a);
+    let tex = textureSample(diffuse_tex, diffuse_samp, i.uv);
+    let base_color = i.color * tex;
+    let rgb = base_color.rgb * (ambient + vec3<f32>(key + fill)) + vec3<f32>(spec);
+    return vec4<f32>(encode(rgb), base_color.a);
 }
 
 // ---- Unlit lines and the floor shadow ----
