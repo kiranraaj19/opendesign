@@ -85,7 +85,7 @@ pub struct Avatar {
     mesh: Arc<Mesh>,
     bounds: Aabb,
     /// Bumped on every change so the renderer re-uploads the mesh.
-    generation: u64,
+    pub generation: u64,
 }
 
 impl Avatar {
@@ -185,7 +185,12 @@ pub struct Viewport3D {
     /// patterns and sewing data as they stood then; kept (but not
     /// stepped) while paused so the last pose stays on screen.
     pub drape: Option<od_sim::drape::Drape>,
+    /// The avatar's [`Avatar::generation`] the drape's colliders and avatar
+    /// tacks were last built against.
+    drape_avatar: u64,
     pub draping: bool,
+    /// Keep draped pieces from passing through each other.
+    pub cloth_collision: bool,
     /// While draping, clicking the garment pins or unpins the nearest
     /// point instead of selecting a pattern.
     pub pinning: bool,
@@ -220,7 +225,9 @@ impl Viewport3D {
             error: None,
             needs_framing: true,
             drape: None,
+            drape_avatar: 0,
             draping: false,
+            cloth_collision: true,
             pinning: false,
             show_strain: false,
         }
@@ -296,24 +303,36 @@ impl Viewport3D {
         Some((key, ray.at(t)))
     }
 
-    /// What is under `pos` and where: a pattern (`Some`) or the avatar
-    /// (`None`), whichever is in front.
+    /// What is under `pos` and where: a pattern, or a point on the
+    /// avatar's surface, whichever is in front.
     pub fn pick_target(
         &self,
         rect: Rect,
         pos: Pos2,
         placed: &[PlacedPattern<PatternId>],
-    ) -> Option<(Option<PatternId>, glam::Vec3)> {
+    ) -> Option<PickTarget> {
+        use od_render::pick::{closest_hit, ray_mesh_triangle, triangle_weights};
         let ndc = ndc_from_pixel(
             to_glam(pos),
             to_glam(rect.min),
             to_glam(rect.size().to_pos2()),
         );
         let ray = self.camera.ray(ndc, aspect(rect));
-        let items = std::iter::once((None, self.avatar.mesh()))
-            .chain(placed.iter().map(|p| (Some(p.key), &p.mesh)));
-        let (key, t) = od_render::pick::closest_hit(&ray, items)?;
-        Some((key, ray.at(t)))
+        let pattern = closest_hit(&ray, placed.iter().map(|p| (p.key, &p.mesh)));
+        let avatar = ray_mesh_triangle(&ray, self.avatar.mesh());
+        match (pattern, avatar) {
+            (Some((id, t)), avatar) if avatar.is_none_or(|(ta, _)| t <= ta) => {
+                Some(PickTarget::Pattern(id, ray.at(t)))
+            }
+            (_, Some((t, triangle))) => {
+                let corners = self.avatar.mesh().triangles().nth(triangle)?;
+                Some(PickTarget::Avatar {
+                    triangle: triangle as u32,
+                    weights: triangle_weights(corners, ray.at(t)),
+                })
+            }
+            _ => None,
+        }
     }
 
     /// Everything in view, from the current direction.
@@ -321,6 +340,16 @@ impl Viewport3D {
         self.camera
             .frame(view::scene_bounds(self.avatar.bounds, placed), aspect(rect));
     }
+}
+
+/// What [`Viewport3D::pick_target`] found under the pointer.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum PickTarget {
+    /// A pattern, and the world point the click landed on.
+    Pattern(PatternId, glam::Vec3),
+    /// A point on the avatar's surface: one triangle of its mesh and
+    /// barycentric weights in it.
+    Avatar { triangle: u32, weights: [f32; 3] },
 }
 
 fn to_glam(p: Pos2) -> glam::Vec2 {
@@ -428,7 +457,10 @@ pub fn overlays(s: &Session, pal: &theme::Palette) -> Vec<Overlay> {
     };
     let mut out = Vec::new();
     if let Some(drape) = &s.viewport.drape {
-        for ((a, b), tack) in drape.tack_positions().into_iter().zip(&s.doc.tacks) {
+        for (i, a, b) in drape.tack_positions() {
+            let Some(tack) = s.doc.tacks.get(i) else {
+                continue;
+            };
             out.push(Overlay {
                 points: vec![a, b],
                 color: tack_color(tack.id),
@@ -477,7 +509,7 @@ pub fn overlays(s: &Session, pal: &theme::Palette) -> Vec<Overlay> {
     for tack in &s.doc.tacks {
         let to = match &tack.b {
             TackTarget::Pattern(p) => world(p),
-            TackTarget::Avatar(at) => Some(glam::Vec3::from_array(*at)),
+            target => od_sim::cloth::avatar_point(target, Some(s.viewport.avatar.mesh())),
         };
         if let (Some(from), Some(to)) = (world(&tack.a), to) {
             out.push(Overlay {
@@ -491,20 +523,22 @@ pub fn overlays(s: &Session, pal: &theme::Palette) -> Vec<Overlay> {
 }
 
 /// The Tack tool clicked the 3D view: a point on a pattern starts or
-/// finishes a tack, a point on the avatar finishes one. Tacks are placed
-/// on the flat preview; while a drape exists the click does nothing.
+/// finishes a tack, a point on the avatar finishes one. On the flat
+/// preview or the draped cloth alike, the tack holds the flat pattern
+/// point under the click; on the avatar, a point on its surface that
+/// follows the body when it is resized.
 fn tack_click(s: &mut Session, rect: Rect, pos: Pos2, placed: &[PlacedPattern<PatternId>]) {
-    if s.viewport.drape.is_some() {
-        return;
-    }
     let target = match s.viewport.pick_target(rect, pos, placed) {
-        Some((Some(id), at)) => flat_frames(s).get(&id).map(|frame| {
-            TackTarget::Pattern(TackPoint {
-                pattern: id,
-                at: frame.flat(at),
-            })
-        }),
-        Some((None, at)) => Some(TackTarget::Avatar(at.to_array())),
+        Some(PickTarget::Pattern(id, at)) => {
+            let flat = match &s.viewport.drape {
+                Some(drape) => drape.flat_point(id, at),
+                None => flat_frames(s).get(&id).map(|frame| frame.flat(at)),
+            };
+            flat.map(|at| TackTarget::Pattern(TackPoint { pattern: id, at }))
+        }
+        Some(PickTarget::Avatar { triangle, weights }) => {
+            Some(TackTarget::AvatarSurface { triangle, weights })
+        }
         None => None,
     };
     if let Some(target) = target {
@@ -519,21 +553,56 @@ fn toggle_drape(s: &mut Session) {
         s.viewport.draping = false;
         return;
     }
-    let placements = ring_placements(s);
-    let mut drape =
-        od_sim::drape::Drape::new(&s.doc, &placements, &od_sim::cloth::ClothConfig::default());
-    drape
-        .colliders
-        .push(Collider::mesh(s.viewport.avatar.mesh().clone(), 0.005));
-    drape
-        .colliders
-        .push(Collider::ground(s.viewport.avatar.bounds.min.y));
-    s.viewport.drape = Some(drape);
+    s.viewport.drape = Some(new_drape(s));
+    s.viewport.drape_avatar = s.viewport.avatar.generation;
     s.viewport.draping = true;
+}
+
+/// A fresh simulation of the document's patterns, sewing and tacks,
+/// starting from the ring layout and draping against the avatar.
+fn new_drape(s: &Session) -> od_sim::drape::Drape {
+    let avatar = s.viewport.avatar.mesh();
+    let mut drape = od_sim::drape::Drape::new(
+        &s.doc,
+        &ring_placements(s),
+        Some(avatar),
+        &od_sim::cloth::ClothConfig::default(),
+    );
+    drape.colliders = avatar_colliders(&s.viewport.avatar);
+    drape.set_cloth_collision(s.viewport.cloth_collision);
+    drape
+}
+
+/// The avatar and the floor it stands on.
+fn avatar_colliders(avatar: &Avatar) -> Vec<Collider> {
+    vec![
+        Collider::mesh(avatar.mesh().clone(), 0.005),
+        Collider::ground(avatar.bounds.min.y),
+    ]
+}
+
+/// Keep a drape in step with edits made while it exists: tacks placed,
+/// deleted, undone or redone, and the avatar resized or swapped (the cloth
+/// collides with the new body; avatar tacks move with it).
+fn sync_drape(s: &mut Session) {
+    let v = &mut s.viewport;
+    let Some(drape) = &mut v.drape else {
+        return;
+    };
+    drape.set_cloth_collision(v.cloth_collision);
+    let resized = v.drape_avatar != v.avatar.generation;
+    if resized {
+        drape.colliders = avatar_colliders(&v.avatar);
+        v.drape_avatar = v.avatar.generation;
+    }
+    if resized || !drape.has_tacks(&s.doc.tacks) {
+        drape.sync_tacks(&s.doc.tacks, Some(v.avatar.mesh()));
+    }
 }
 
 /// Advance the simulation by this frame's time, if draping is running.
 fn step_drape(ui: &egui::Ui, s: &mut Session) {
+    sync_drape(s);
     if !s.viewport.draping {
         return;
     }
@@ -707,15 +776,7 @@ pub fn export_drape_frames(
         .render_device
         .as_ref()
         .ok_or_else(|| NO_GPU.to_string())?;
-    let placements = ring_placements(s);
-    let mut drape =
-        od_sim::drape::Drape::new(&s.doc, &placements, &od_sim::cloth::ClothConfig::default());
-    drape
-        .colliders
-        .push(Collider::mesh(s.viewport.avatar.mesh().clone(), 0.005));
-    drape
-        .colliders
-        .push(Collider::ground(s.viewport.avatar.bounds.min.y));
+    let mut drape = new_drape(s);
 
     let aspect = export_aspect(size);
     let mut camera = s.viewport.camera;
@@ -831,6 +892,8 @@ fn view_buttons(ui: &mut egui::Ui, s: &mut Session) -> Option<ViewAction> {
     {
         toggle_drape(s);
     }
+    ui.toggle_value(&mut s.viewport.cloth_collision, "Cloth collision")
+        .on_hover_text("Keep draped pieces from passing through each other");
     if s.viewport.drape.is_some() {
         if ui
             .button("Reset drape")
@@ -1038,9 +1101,7 @@ fn paint(ui: &mut egui::Ui, rect: Rect, s: &Session, placed: &[PlacedPattern<Pat
     painter.text(
         rect.left_top() + egui::vec2(10.0, 8.0),
         egui::Align2::LEFT_TOP,
-        if s.tool == Tool::Tack && v.drape.is_some() {
-            "Tack: reset the drape to place tacks on the flat pieces"
-        } else if s.tool == Tool::Tack {
+        if s.tool == Tool::Tack {
             "Tack: click a pattern, then a pattern or the avatar · Esc cancels"
         } else if v.pinning {
             "Click the cloth to pin or unpin a point"
@@ -1340,7 +1401,8 @@ mod tests {
         assert_eq!(trims[0].0, TrimKind::Button);
         let lines = drape.topstitch_positions();
         assert_eq!(lines.len(), 1);
-        assert_eq!(lines[0].len(), 2);
+        // 400 mm resampled to the 20 mm particle distance.
+        assert_eq!(lines[0].len(), 21);
         // Drawing them in `paint` must not panic.
         h.step();
     }
@@ -1966,9 +2028,14 @@ mod tests {
         click_at(&mut h, head);
         let s = h.state();
         assert_eq!(s.doc.tacks.len(), 1);
-        let TackTarget::Avatar(at) = s.doc.tacks[0].b else {
-            panic!("tacked to the avatar");
-        };
+        let target = s.doc.tacks[0].b;
+        assert!(
+            matches!(target, TackTarget::AvatarSurface { .. }),
+            "tacked to the avatar's surface: {target:?}"
+        );
+        let at = od_sim::cloth::avatar_point(&target, Some(s.viewport.avatar.mesh()))
+            .unwrap()
+            .to_array();
         let b = s.viewport.avatar.bounds;
         assert!(at[1] > b.max.y - 0.2 && at[2] > b.center().z, "{at:?}");
         assert!(s.tack_start.is_none());
@@ -1980,8 +2047,8 @@ mod tests {
         h.step();
         let s = h.state();
         let drape = s.viewport.drape.as_ref().unwrap();
-        let (cloth, anchor) = drape.tack_positions()[0];
-        assert_eq!(anchor.to_array(), at);
+        let (_, cloth, anchor) = drape.tack_positions()[0];
+        assert!(anchor.distance(glam::Vec3::from_array(at)) < 1e-6);
         assert!(cloth.distance(anchor) > 0.0);
         assert_eq!(overlays(s, theme::palette(true)).len(), 1);
     }
@@ -2028,5 +2095,67 @@ mod tests {
         );
         let flat = frames[&front].flat(placed[0].outline[2]);
         assert!(flat.distance(Vec2::new(400.0, 500.0)) < 1e-2);
+    }
+
+    #[test]
+    fn tacks_can_be_placed_on_the_draped_cloth() {
+        let mut h = harness();
+        let id = add_block(&mut h);
+        h.get_by_label("Drape").click();
+        h.step();
+        h.step();
+        // Pause, so the cloth stays where the click is aimed.
+        h.get_by_label("Stop draping").click();
+        h.run();
+        h.state_mut().tool = Tool::Tack;
+        h.run();
+        let rect = view_rect(&h);
+        let (piece, head) = {
+            let s = h.state();
+            let drape = s.viewport.drape.as_ref().unwrap();
+            let placed = drape.placed_patterns();
+            let mesh = &placed[0].mesh;
+            // A point on the draped piece, in front of the avatar.
+            let centre = mesh.bounds().unwrap().center();
+            let b = s.viewport.avatar.bounds;
+            let head = glam::Vec3::new(b.center().x, b.max.y - 0.08, b.center().z);
+            let v = &s.viewport;
+            (
+                v.screen_pos(rect, centre).unwrap(),
+                v.screen_pos(rect, head).unwrap(),
+            )
+        };
+        click_at(&mut h, piece);
+        let start = h.state().tack_start.expect("started on the draped piece");
+        assert_eq!(start.pattern, id);
+        let pattern = h.state().doc.pattern(id).unwrap().clone();
+        assert!(
+            pattern.contains(start.at),
+            "{:?} on the flat piece",
+            start.at
+        );
+
+        click_at(&mut h, head);
+        assert_eq!(h.state().doc.tacks.len(), 1);
+        // The running drape picks the new tack up on its next frame,
+        // without a reset.
+        h.run();
+        let s = h.state();
+        let drape = s.viewport.drape.as_ref().unwrap();
+        assert!(drape.has_tacks(&s.doc.tacks));
+        assert_eq!(drape.tack_positions().len(), 1);
+
+        // Undo takes it back out of the drape too.
+        h.state_mut().undo();
+        h.run();
+        let s = h.state();
+        assert!(s.doc.tacks.is_empty());
+        assert!(s
+            .viewport
+            .drape
+            .as_ref()
+            .unwrap()
+            .tack_positions()
+            .is_empty());
     }
 }

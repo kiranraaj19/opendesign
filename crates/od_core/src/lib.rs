@@ -19,8 +19,8 @@ pub use command::{
     AddInternalLine, AddNotch, AddPattern, AddSewingLine, AddTack, AddTopstitch, AddTrim, Command,
     DeletePattern, DeletePoint, DuplicatePattern, FlipSeamSide, InsertPoint, MirrorPattern,
     MovePattern, MovePoint, PatternValue, RemoveInternalLine, RemoveNotch, RemoveSewingLine,
-    RemoveTack, RemoveTopstitch, RemoveTrim, RenamePattern, SetFabric, SetGrading, SetPatternValue,
-    SetPointKind, SetSeamEdge,
+    RemoveTack, RemoveTopstitch, RemoveTrim, RenamePattern, SetFabric, SetGrading,
+    SetParticleDistance, SetPatternValue, SetPointKind, SetSeamEdge, PARTICLE_DISTANCE_RANGE,
 };
 pub use document::{
     Axis, Document, Fabric, FabricTexture, Grading, InternalLine, Notch, OutlinePoint, Pattern,

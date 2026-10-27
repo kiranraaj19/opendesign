@@ -159,7 +159,7 @@ fn bounds(triangles: &[[Vec3; 3]]) -> Option<(Vec3, Vec3)> {
     )
 }
 
-fn closest_on_triangle(a: Vec3, b: Vec3, c: Vec3, p: Vec3) -> Vec3 {
+pub(crate) fn closest_on_triangle(a: Vec3, b: Vec3, c: Vec3, p: Vec3) -> Vec3 {
     // Standard point-to-triangle projection via barycentric clamping.
     let ab = b - a;
     let ac = c - a;

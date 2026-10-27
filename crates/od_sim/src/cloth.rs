@@ -1,10 +1,10 @@
-//! Builds an XPBD [`crate::xpbd::World`] from a garment: particles for each
-//! pattern's flattened outline, structural constraints from its
-//! triangulated mesh, and stitch constraints from
-//! [`od_core::document::SewingLine`]s and [`Tack`]s. This is the "sewn
-//! edges" input the Phase 6 roadmap note describes — the rest of the
-//! pipeline (bending, pins, draping it over the avatar every frame) is
-//! layered on top in [`crate::xpbd::World`] and [`crate::collision`].
+//! Builds an XPBD [`crate::xpbd::World`] from a garment: each pattern
+//! meshed by [`crate::mesher`] (outline plus interior particles about the
+//! particle distance apart), structural and bending constraints from that
+//! mesh, and stitch constraints from [`od_core::document::SewingLine`]s
+//! and [`od_core::document::Tack`]s. The rest of the pipeline (pins,
+//! draping it over the avatar every frame) is layered on top in
+//! [`crate::xpbd::World`] and [`crate::collision`].
 
 use std::collections::{BTreeSet, HashMap};
 use std::ops::Range;
@@ -13,13 +13,19 @@ use od_core::document::{
     Document, FlatPoint, Pattern, PatternId, SeamEdge, TackTarget, TrimKind, TOLERANCE,
 };
 use od_core::geometry::{self, Vec2};
+use od_render::mesh::Mesh;
 use od_render::pattern::Placement;
 
-use crate::xpbd::{DistanceConstraint, Particle};
+use crate::mesher::{self, PatternMesh};
+use crate::xpbd::{DistanceConstraint, Particle, SurfacePoint, SurfaceStitch};
+
+/// Particle spacing for a pattern that doesn't set its own, in mm.
+pub const DEFAULT_PARTICLE_DISTANCE: f32 = 20.0;
 
 /// Tuning for the constraints [`build`] doesn't take from a pattern's
-/// [`od_core::Fabric`]: just the seam, which stitches two sides that might
-/// be cut from different fabrics, so it has no single one to read from.
+/// [`od_core::Fabric`]: the seam, which stitches two sides that might be
+/// cut from different fabrics, so it has no single one to read from; and
+/// how finely patterns are meshed.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ClothConfig {
     pub stitch_compliance: f32,
@@ -27,6 +33,12 @@ pub struct ClothConfig {
     /// fabric or a very finely subdivided pattern can't zero it out and
     /// make the solver divide by zero.
     pub min_particle_mass: f32,
+    /// Spacing between particles, in mm, for a pattern without its own
+    /// [`Pattern::particle_distance`].
+    pub particle_distance: f32,
+    /// Most interior particles one pattern may get, however fine its
+    /// particle distance: keeps a huge piece from stalling the solver.
+    pub max_interior_particles: usize,
 }
 
 impl Default for ClothConfig {
@@ -34,6 +46,8 @@ impl Default for ClothConfig {
         Self {
             stitch_compliance: 1e-7,
             min_particle_mass: 1e-6,
+            particle_distance: DEFAULT_PARTICLE_DISTANCE,
+            max_interior_particles: 4000,
         }
     }
 }
@@ -48,55 +62,121 @@ pub struct ClothScene {
     pub bending: Vec<DistanceConstraint>,
     pub stitches: Vec<DistanceConstraint>,
     pub pattern_ranges: Vec<(PatternId, Range<usize>)>,
-    /// Each pattern's triangulated faces, as indices local to its own
-    /// range (subtract the range's start before indexing `particles`
-    /// directly). What a renderer needs to turn draped particle positions
-    /// back into a surface.
-    pub pattern_faces: Vec<(PatternId, Vec<[u32; 3]>)>,
-    /// Each placed [`od_core::document::Trim`], as the kind to draw and the
-    /// global particle index nearest its flattened position — the same
-    /// "snap to the nearest particle" idea [`Tack`]s use, since the only
-    /// particles a trim can ride along with are the outline's. Draw it at
-    /// that particle's current draped position.
-    pub trims: Vec<(TrimKind, usize)>,
-    /// Each placed [`od_core::document::Topstitch`], as the global
-    /// particle index nearest each of its points, in order — draw a line
+    /// Each pattern's mesh, in its own mm coordinates, with indices local
+    /// to its range (add the range's start to index `particles`). Faces
+    /// turn draped positions back into a surface; vertex positions map a
+    /// draped point back to the flat pattern.
+    pub pattern_meshes: Vec<(PatternId, PatternMesh)>,
+    /// Each placed [`od_core::document::Trim`], as the kind to draw and
+    /// where on the cloth it rides.
+    pub trims: Vec<(TrimKind, SurfacePoint)>,
+    /// Each placed [`od_core::document::Topstitch`], resampled to about
+    /// the particle distance, as points on the cloth in order: draw a line
     /// through their current draped positions.
-    pub topstitches: Vec<Vec<usize>>,
-    /// Each [`Tack`], as the two particles it stitches: the cloth particle
-    /// nearest its pattern point, and the one nearest its other pattern
-    /// point or a fixed anchor particle on the avatar. Draw a thread
-    /// between their current positions.
-    pub tacks: Vec<(usize, usize)>,
+    pub topstitches: Vec<Vec<SurfacePoint>>,
+    /// Each tack the scene could place, by its index in `doc.tacks`: the
+    /// two points it holds together, the second either on the cloth or at
+    /// a fixed anchor particle on the avatar.
+    pub tacks: Vec<(usize, SurfaceStitch)>,
 }
 
 fn to_glam(v: Vec2) -> glam::Vec2 {
     glam::Vec2::new(v.x, v.y)
 }
 
+/// Where a pattern's mesh landed in the scene.
 struct PatternLayout<'a> {
     pattern: &'a Pattern,
     offset: usize,
-    flat: Vec<FlatPoint>,
+    mesh: PatternMesh,
+    /// The mesh's outline vertices with their outline parameters, as local
+    /// vertex index and flat point.
+    boundary: Vec<(usize, FlatPoint)>,
 }
 
-/// Local indices (into `flat`) whose outline parameter falls in
-/// `[start, end]`, travel-ordered, allowing for `end` wrapping past the
-/// outline's length the way [`Pattern::segment_at`] produces.
-fn points_in_range(flat: &[FlatPoint], outline_len: usize, start: f32, end: f32) -> Vec<usize> {
+/// The cloth point at flat position `at` (mm, in the pattern's space) of
+/// a pattern meshed as `mesh` whose particles start at `offset`.
+pub fn surface_point(mesh: &PatternMesh, offset: usize, at: Vec2) -> Option<SurfacePoint> {
+    let (face, weights) = mesh.locate(at)?;
+    let [a, b, c] = mesh.faces[face];
+    Some(SurfacePoint {
+        particles: [a, b, c].map(|v| offset + v as usize),
+        weights,
+    })
+}
+
+impl PatternLayout<'_> {
+    fn surface_point(&self, at: Vec2) -> Option<SurfacePoint> {
+        surface_point(&self.mesh, self.offset, at)
+    }
+}
+
+/// A pattern meshed with just its flattened outline, the way every
+/// pattern was before interior particles: for outlines the mesher can't
+/// handle.
+fn outline_mesh(flat: &[FlatPoint]) -> PatternMesh {
+    let poly: Vec<Vec2> = flat.iter().map(|f| f.pos).collect();
+    PatternMesh {
+        vertices: flat
+            .iter()
+            .map(|f| mesher::MeshVertex {
+                pos: f.pos,
+                param: Some(f.param),
+            })
+            .collect(),
+        faces: geometry::triangulate(&poly),
+        boundary: (0..flat.len() as u32).collect(),
+    }
+}
+
+/// The particle spacing `pattern` simulates at, in mm.
+pub fn particle_distance(pattern: &Pattern, config: &ClothConfig) -> f32 {
+    pattern
+        .particle_distance
+        .unwrap_or(config.particle_distance)
+        .max(1.0)
+}
+
+/// Mesh `pattern` at its particle distance, or `config`'s default.
+pub fn mesh_for(pattern: &Pattern, config: &ClothConfig) -> PatternMesh {
+    let flat = pattern.flatten(TOLERANCE);
+    let lines: Vec<Vec<Vec2>> = pattern
+        .internal_lines
+        .iter()
+        .map(|l| l.points.clone())
+        .collect();
+    mesher::mesh_pattern(
+        &flat,
+        pattern.outline.len(),
+        &lines,
+        particle_distance(pattern, config),
+        config.max_interior_particles,
+    )
+    .unwrap_or_else(|| outline_mesh(&flat))
+}
+
+/// Outline vertices (local index and position) whose outline parameter
+/// falls in `[start, end]`, travel-ordered, allowing for `end` wrapping
+/// past the outline's length the way [`Pattern::segment_at`] produces.
+fn points_in_range(
+    boundary: &[(usize, FlatPoint)],
+    outline_len: usize,
+    start: f32,
+    end: f32,
+) -> Vec<(usize, Vec2)> {
     let nf = outline_len as f32;
-    let mut matches: Vec<(f32, usize)> = Vec::new();
-    for (i, f) in flat.iter().enumerate() {
+    let mut matches: Vec<(f32, usize, Vec2)> = Vec::new();
+    for &(i, f) in boundary {
         for shift in [-nf, 0.0, nf] {
             let p = f.param + shift;
             if p >= start - 1e-4 && p <= end + 1e-4 {
-                matches.push((p, i));
+                matches.push((p, i, f.pos));
             }
         }
     }
     matches.sort_by(|a, b| a.0.total_cmp(&b.0));
-    matches.dedup_by_key(|&mut (_, i)| i);
-    matches.into_iter().map(|(_, i)| i).collect()
+    matches.dedup_by_key(|&mut (_, i, _)| i);
+    matches.into_iter().map(|(_, i, pos)| (i, pos)).collect()
 }
 
 /// For each edge shared by exactly two of `faces` (i.e. not on the
@@ -110,13 +190,16 @@ fn bending_pairs(faces: &[[u32; 3]]) -> Vec<(u32, u32)> {
             opposite.entry((x.min(y), x.max(y))).or_default().push(opp);
         }
     }
-    opposite
+    let mut pairs: Vec<(u32, u32)> = opposite
         .into_values()
         .filter_map(|opps| match opps.as_slice() {
             [p, q] if p != q => Some((*p, *q)),
             _ => None,
         })
-        .collect()
+        .collect();
+    // HashMap order varies from run to run; keep the solver's stable.
+    pairs.sort_unstable();
+    pairs
 }
 
 /// One side of a seam, as the particles it touches in travel order along
@@ -131,14 +214,14 @@ fn side_chain(
             continue;
         };
         let outline_len = layout.pattern.outline.len();
-        let mut points = points_in_range(&layout.flat, outline_len, edge.start, edge.end);
+        let mut points = points_in_range(&layout.boundary, outline_len, edge.start, edge.end);
         // A backwards edge is sewn from its end to its start, so its
         // particles pair up with the other side's in that order.
         if !edge.forward {
             points.reverse();
         }
-        for i in points {
-            chain.push((layout.offset + i, layout.flat[i].pos));
+        for (i, pos) in points {
+            chain.push((layout.offset + i, pos));
         }
     }
     let mut cumulative = 0.0;
@@ -180,38 +263,70 @@ fn nearest_by_fraction(chain: &[(usize, f32)], frac: f32) -> Option<usize> {
     })
 }
 
-/// The particle whose flattened position is closest to `target`, used to
-/// map a [`Tack`]'s exact outline point (which may be a curve control
-/// point not actually on the flattened outline) onto the nearest particle
-/// that is.
-fn nearest_particle(layout: &PatternLayout, target: Vec2) -> usize {
-    layout
-        .flat
-        .iter()
-        .enumerate()
-        .min_by(|(_, a), (_, b)| a.pos.distance(target).total_cmp(&b.pos.distance(target)))
-        .map(|(i, _)| layout.offset + i)
-        .unwrap_or(layout.offset)
+/// An open polyline with extra points so no segment is longer than `spacing`.
+fn resample(points: &[Vec2], spacing: f32) -> Vec<Vec2> {
+    let mut out = Vec::new();
+    for w in points.windows(2) {
+        out.push(w[0]);
+        let steps = (w[0].distance(w[1]) / spacing).ceil() as usize;
+        for k in 1..steps {
+            out.push(w[0].lerp(w[1], k as f32 / steps as f32));
+        }
+    }
+    out.extend(points.last());
+    out
 }
 
-/// Local index (into `flat`) closest to `target`, used the same way as
-/// [`nearest_particle`] but before a pattern's [`PatternLayout`] is built
-/// (trims and topstitches are mapped to particles while a pattern's
-/// particles are still being laid out, not after).
-fn nearest_flat_index(flat: &[FlatPoint], target: Vec2) -> usize {
-    flat.iter()
-        .enumerate()
-        .min_by(|(_, a), (_, b)| a.pos.distance(target).total_cmp(&b.pos.distance(target)))
-        .map(|(i, _)| i)
-        .unwrap_or(0)
+/// Where a tack's avatar end is in the world, on `avatar` as it is now. A
+/// surface point follows the body when it's resized; a fixed point (as
+/// format 9 saved them) stays put. `None` for a pattern target, or a
+/// surface point the mesh doesn't have.
+pub fn avatar_point(target: &TackTarget, avatar: Option<&Mesh>) -> Option<glam::Vec3> {
+    match *target {
+        TackTarget::Pattern(_) => None,
+        TackTarget::Avatar(at) => Some(glam::Vec3::from_array(at)),
+        TackTarget::AvatarSurface { triangle, weights } => {
+            let mesh = avatar?;
+            let base = triangle as usize * 3;
+            let corners = mesh.indices.get(base..base + 3)?;
+            let mut p = glam::Vec3::ZERO;
+            for (&v, w) in corners.iter().zip(weights) {
+                p += *mesh.positions.get(v as usize)? * w;
+            }
+            Some(p)
+        }
+    }
+}
+
+/// The stitch for one tack, or `None` if a pattern it holds isn't
+/// simulated. An avatar end becomes a fixed (massless) particle pushed onto
+/// `particles`: nothing moves it, so the stitch pulls the cloth to it.
+pub fn tack_stitch(
+    tack: &od_core::document::Tack,
+    locate: impl Fn(PatternId, Vec2) -> Option<SurfacePoint>,
+    avatar: Option<&Mesh>,
+    particles: &mut Vec<Particle>,
+    compliance: f32,
+) -> Option<SurfaceStitch> {
+    let a = locate(tack.a.pattern, tack.a.at)?;
+    let b = match &tack.b {
+        TackTarget::Pattern(b) => locate(b.pattern, b.at)?,
+        target => {
+            particles.push(Particle::pinned(avatar_point(target, avatar)?));
+            SurfacePoint::at(particles.len() - 1)
+        }
+    };
+    Some(SurfaceStitch { a, b, compliance })
 }
 
 /// Build particles and constraints for every pattern in `placements`,
 /// stitched together by `doc`'s sewing lines and tacks. Patterns in `doc`
-/// not listed in `placements` are left out of the simulation.
+/// not listed in `placements` are left out of the simulation. `avatar` is
+/// the body as it is now, for tacks held to its surface.
 pub fn build(
     doc: &Document,
     placements: &[(PatternId, Placement)],
+    avatar: Option<&Mesh>,
     config: &ClothConfig,
 ) -> ClothScene {
     let mut particles = Vec::new();
@@ -219,35 +334,29 @@ pub fn build(
     let mut structural = Vec::new();
     let mut bending = Vec::new();
     let mut pattern_ranges = Vec::new();
-    let mut pattern_faces = Vec::new();
-    let mut trims = Vec::new();
-    let mut topstitches = Vec::new();
     let mut layouts: HashMap<PatternId, PatternLayout> = HashMap::new();
+    let mut order = Vec::new();
 
     for (id, placement) in placements {
         let Some(pattern) = doc.pattern(*id) else {
             continue;
         };
-        let flat = pattern.flatten(TOLERANCE);
-        let poly_2d: Vec<Vec2> = flat.iter().map(|f| f.pos).collect();
-        let glam_poly: Vec<glam::Vec2> = poly_2d.iter().copied().map(to_glam).collect();
-        let world = placement.place(&glam_poly);
+        let mesh = mesh_for(pattern, config);
+        let flat: Vec<glam::Vec2> = mesh.vertices.iter().map(|v| to_glam(v.pos)).collect();
+        // Centred on the outline's bounds, which interior points don't
+        // widen, so the piece lands where the flat preview shows it.
+        let world = placement.place(&flat);
 
-        // Spread the fabric's mass per square metre over however many
-        // particles this pattern flattened to, so a bigger or more finely
-        // subdivided piece doesn't end up lighter or heavier overall.
-        let area_m2 = pattern.area() * 1e-6;
-        let per_particle_mass = (area_m2 * pattern.fabric.mass_per_area
-            / world.len().max(1) as f32)
-            .max(config.min_particle_mass);
-        let inv_mass = 1.0 / per_particle_mass;
-
+        // Each particle carries the fabric of the surface around it, so a
+        // finer or coarser mesh weighs the same overall.
         let offset = particles.len();
-        particles.extend(world.iter().map(|&p| Particle::new(p, inv_mass)));
+        for (area, &p) in mesh.vertex_areas().iter().zip(&world) {
+            let mass = (area * 1e-6 * pattern.fabric.mass_per_area).max(config.min_particle_mass);
+            particles.push(Particle::new(p, 1.0 / mass));
+        }
         pattern_ranges.push((*id, offset..particles.len()));
 
-        let faces = geometry::triangulate(&poly_2d);
-        for &[a, b, c] in &faces {
+        for &[a, b, c] in &mesh.faces {
             for (local_a, local_b) in [(a, b), (b, c), (c, a)] {
                 let (ga, gb) = (offset + local_a as usize, offset + local_b as usize);
                 let key = (ga.min(gb), ga.max(gb));
@@ -262,7 +371,7 @@ pub fn build(
                 }
             }
         }
-        for (p, q) in bending_pairs(&faces) {
+        for (p, q) in bending_pairs(&mesh.faces) {
             let (ga, gb) = (offset + p as usize, offset + q as usize);
             let rest_length = world[p as usize].distance(world[q as usize]);
             bending.push(DistanceConstraint::new(
@@ -272,28 +381,51 @@ pub fn build(
                 pattern.fabric.bending_compliance,
             ));
         }
-        pattern_faces.push((*id, faces));
 
-        for trim in &pattern.trims {
-            trims.push((trim.kind, offset + nearest_flat_index(&flat, trim.pos)));
-        }
-        for line in &pattern.topstitches {
-            topstitches.push(
-                line.points
-                    .iter()
-                    .map(|&p| offset + nearest_flat_index(&flat, p))
-                    .collect(),
-            );
-        }
-
+        let boundary = mesh
+            .boundary
+            .iter()
+            .filter_map(|&v| {
+                let vertex = mesh.vertices[v as usize];
+                Some((
+                    v as usize,
+                    FlatPoint {
+                        pos: vertex.pos,
+                        param: vertex.param?,
+                    },
+                ))
+            })
+            .collect();
+        order.push(*id);
         layouts.insert(
             *id,
             PatternLayout {
                 pattern,
                 offset,
-                flat,
+                mesh,
+                boundary,
             },
         );
+    }
+
+    let mut trims = Vec::new();
+    let mut topstitches = Vec::new();
+    for id in &order {
+        let layout = &layouts[id];
+        let spacing = particle_distance(layout.pattern, config);
+        for trim in &layout.pattern.trims {
+            if let Some(at) = layout.surface_point(trim.pos) {
+                trims.push((trim.kind, at));
+            }
+        }
+        for line in &layout.pattern.topstitches {
+            topstitches.push(
+                resample(&line.points, spacing)
+                    .into_iter()
+                    .filter_map(|p| layout.surface_point(p))
+                    .collect(),
+            );
+        }
     }
 
     let mut stitch_pairs: BTreeSet<(usize, usize)> = BTreeSet::new();
@@ -312,45 +444,36 @@ pub fn build(
         }
     }
     stitch_pairs.retain(|&(a, b)| a != b);
-
-    // Particles only run along outlines, so a tacked point inside a
-    // pattern is held by the outline particle nearest it.
-    let mut tacks = Vec::new();
-    for tack in &doc.tacks {
-        let Some(la) = layouts.get(&tack.a.pattern) else {
-            continue;
-        };
-        let ia = nearest_particle(la, tack.a.at);
-        let ib = match tack.b {
-            TackTarget::Pattern(b) => match layouts.get(&b.pattern) {
-                Some(lb) => nearest_particle(lb, b.at),
-                None => continue,
-            },
-            // A fixed particle on the avatar: it has no mass, so nothing
-            // moves it and the stitch pulls the cloth to it.
-            TackTarget::Avatar(at) => {
-                particles.push(Particle::pinned(glam::Vec3::from_array(at)));
-                particles.len() - 1
-            }
-        };
-        if ia != ib {
-            stitch_pairs.insert((ia.min(ib), ia.max(ib)));
-            tacks.push((ia, ib));
-        }
-    }
-
     let stitches = stitch_pairs
         .into_iter()
         .map(|(a, b)| DistanceConstraint::new(a, b, 0.0, config.stitch_compliance))
         .collect();
 
+    let locate = |pattern: PatternId, at: Vec2| layouts.get(&pattern)?.surface_point(at);
+    let mut tacks = Vec::new();
+    for (i, tack) in doc.tacks.iter().enumerate() {
+        if let Some(stitch) = tack_stitch(
+            tack,
+            locate,
+            avatar,
+            &mut particles,
+            config.stitch_compliance,
+        ) {
+            tacks.push((i, stitch));
+        }
+    }
+
+    let pattern_meshes = order
+        .into_iter()
+        .filter_map(|id| layouts.remove(&id).map(|l| (id, l.mesh)))
+        .collect();
     ClothScene {
         particles,
         structural,
         bending,
         stitches,
         pattern_ranges,
-        pattern_faces,
+        pattern_meshes,
         trims,
         topstitches,
         tacks,
@@ -360,7 +483,7 @@ pub fn build(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::xpbd::World;
+    use crate::xpbd::{SurfacePoint, World};
     use od_core::document::{
         OutlinePoint, PatternId as Pid, SewingLine, SewingLineId, Tack, TackId, TackPoint,
     };
@@ -377,6 +500,15 @@ mod tests {
                 OutlinePoint::corner(Vec2::new(0.0, h)),
             ],
         )
+    }
+
+    /// Meshed with just the outline, as before interior particles: for
+    /// tests that count or index particles by corner.
+    fn coarse() -> ClothConfig {
+        ClothConfig {
+            particle_distance: 1000.0,
+            ..ClothConfig::default()
+        }
     }
 
     fn placements_for(doc: &Document) -> Vec<(PatternId, Placement)> {
@@ -396,10 +528,14 @@ mod tests {
         let mut doc = Document::new("test");
         doc.patterns.push(rectangle(1, "panel", 200.0, 300.0));
         let placements = placements_for(&doc);
-        let scene = build(&doc, &placements, &ClothConfig::default());
+        let scene = build(&doc, &placements, None, &coarse());
         assert_eq!(scene.particles.len(), 4);
-        assert_eq!(scene.pattern_faces.len(), 1);
-        assert_eq!(scene.pattern_faces[0].1.len(), 2, "a quad is 2 triangles");
+        assert_eq!(scene.pattern_meshes.len(), 1);
+        assert_eq!(
+            scene.pattern_meshes[0].1.faces.len(),
+            2,
+            "a quad is 2 triangles"
+        );
         // A quad triangulates into 2 triangles sharing a diagonal: 5 unique edges.
         assert_eq!(scene.structural.len(), 5);
         // One bending constraint, across the diagonal, between the quad's
@@ -413,7 +549,7 @@ mod tests {
         let mut doc = Document::new("test");
         doc.patterns.push(rectangle(1, "panel", 300.0, 300.0));
         let placements = placements_for(&doc);
-        let scene = build(&doc, &placements, &ClothConfig::default());
+        let scene = build(&doc, &placements, None, &coarse());
 
         // Pin one edge (corners 0, 1) and let gravity fold the rest down;
         // measure how far the opposite corner (3) sags after settling.
@@ -471,7 +607,7 @@ mod tests {
             }],
         });
         let placements = placements_for(&doc);
-        let scene = build(&doc, &placements, &ClothConfig::default());
+        let scene = build(&doc, &placements, None, &ClothConfig::default());
         assert!(!scene.stitches.is_empty());
         // Every stitch constraint should cross between the two patterns' ranges.
         let (front_range, back_range) = (
@@ -509,14 +645,27 @@ mod tests {
         });
         doc.patterns.push(panel);
         let placements = placements_for(&doc);
-        let scene = build(&doc, &placements, &ClothConfig::default());
+        let scene = build(&doc, &placements, None, &ClothConfig::default());
+        let world = |flat: Vec2| {
+            placements[0].1.place(&[
+                glam::Vec2::new(0.0, 0.0),
+                glam::Vec2::new(200.0, 300.0),
+                glam::Vec2::new(flat.x, flat.y),
+            ])[2]
+        };
 
+        // Each sits exactly where it was placed, not at the nearest corner.
         assert_eq!(scene.trims.len(), 1);
         assert_eq!(scene.trims[0].0, TrimKind::Button);
-        assert_eq!(scene.trims[0].1, 1, "closest particle is corner 1");
+        let at = scene.trims[0].1.position(&scene.particles);
+        assert!(at.distance(world(Vec2::new(195.0, 5.0))) < 1e-4, "{at}");
 
+        // The 190 mm line resampled to the 20 mm particle distance.
         assert_eq!(scene.topstitches.len(), 1);
-        assert_eq!(scene.topstitches[0], vec![0, 1]);
+        let line = &scene.topstitches[0];
+        assert_eq!(line.len(), 11);
+        let end = line[10].position(&scene.particles);
+        assert!(end.distance(world(Vec2::new(195.0, 2.0))) < 1e-4, "{end}");
     }
 
     #[test]
@@ -536,10 +685,17 @@ mod tests {
             }),
         });
         let placements = placements_for(&doc);
-        let scene = build(&doc, &placements, &ClothConfig::default());
-        assert_eq!(scene.stitches.len(), 1);
-        assert_eq!(scene.stitches[0].rest_length, 0.0);
+        let scene = build(&doc, &placements, None, &ClothConfig::default());
+        assert!(scene.stitches.is_empty(), "no seams");
         assert_eq!(scene.tacks.len(), 1);
+        let (index, stitch) = scene.tacks[0];
+        assert_eq!(index, 0);
+        let (front, back) = (
+            scene.pattern_ranges[0].1.clone(),
+            scene.pattern_ranges[1].1.clone(),
+        );
+        assert!(stitch.a.particles.iter().all(|i| front.contains(i)));
+        assert!(stitch.b.particles.iter().all(|i| back.contains(i)));
     }
 
     #[test]
@@ -549,7 +705,7 @@ mod tests {
         let anchor = [0.0, 1.2, 0.05];
         doc.tacks.push(Tack {
             id: TackId(1),
-            // Inside the pattern: held by the nearest outline particle.
+            // Inside the pattern: held right there.
             a: TackPoint {
                 pattern: Pid(1),
                 at: Vec2::new(195.0, 150.0),
@@ -557,31 +713,99 @@ mod tests {
             b: TackTarget::Avatar(anchor),
         });
         let placements = placements_for(&doc);
-        let scene = build(&doc, &placements, &ClothConfig::default());
+        let scene = build(&doc, &placements, None, &ClothConfig::default());
         let cloth = scene.pattern_ranges[0].1.clone();
         assert_eq!(scene.particles.len(), cloth.end + 1, "one anchor particle");
         let fixed = &scene.particles[cloth.end];
         assert_eq!(fixed.inv_mass, 0.0);
         assert_eq!(fixed.position.to_array(), anchor);
-        assert_eq!(scene.tacks, [(scene.tacks[0].0, cloth.end)]);
-        assert!(cloth.contains(&scene.tacks[0].0));
+        let stitch = scene.tacks[0].1;
+        assert_eq!(stitch.b, SurfacePoint::at(cloth.end));
+        assert!(stitch.a.particles.iter().all(|i| cloth.contains(i)));
 
         // Stepping pulls the tacked cloth towards the anchor; the anchor stays.
         let mut world = World::new(scene.particles.clone());
         world.distance_constraints = scene.structural.clone();
-        world.distance_constraints.extend(scene.stitches.clone());
-        let held = scene.tacks[0].0;
-        let start = world.particles[held]
-            .position
-            .distance(glam::Vec3::from_array(anchor));
+        world.surface_stitches = vec![stitch];
+        let gap = |world: &World| {
+            stitch
+                .a
+                .position(&world.particles)
+                .distance(glam::Vec3::from_array(anchor))
+        };
+        let start = gap(&world);
         for _ in 0..30 {
             world.step(1.0 / 60.0, 8, &[]);
         }
-        let end = world.particles[held]
-            .position
-            .distance(glam::Vec3::from_array(anchor));
+        let end = gap(&world);
         assert!(end < start * 0.5, "{start} -> {end}");
         assert_eq!(world.particles[cloth.end].position.to_array(), anchor);
+    }
+
+    #[test]
+    fn a_pattern_gets_interior_particles_at_its_particle_distance() {
+        let mut doc = Document::new("test");
+        let mut panel = rectangle(1, "panel", 200.0, 300.0);
+        doc.patterns.push(panel.clone());
+        let placements = placements_for(&doc);
+        let fine = build(&doc, &placements, None, &ClothConfig::default());
+        assert!(fine.particles.len() > 150, "{}", fine.particles.len());
+        // The whole piece weighs what its fabric says, however it's meshed.
+        let mass: f32 = fine.particles.iter().map(|p| 1.0 / p.inv_mass).sum();
+        let expected = 0.2 * 0.3 * panel.fabric.mass_per_area;
+        assert!(
+            (mass - expected).abs() < expected * 0.01,
+            "{mass} vs {expected}"
+        );
+
+        // A pattern's own particle distance overrides the default.
+        panel.particle_distance = Some(40.0);
+        doc.patterns[0] = panel;
+        let coarser = build(&doc, &placements, None, &ClothConfig::default());
+        assert!(coarser.particles.len() < fine.particles.len() / 2);
+    }
+
+    #[test]
+    fn avatar_surface_tacks_anchor_on_the_avatar_as_it_is_now() {
+        use od_render::mesh::Mesh;
+        let mut doc = Document::new("test");
+        doc.patterns.push(rectangle(1, "front", 200.0, 300.0));
+        doc.tacks.push(Tack {
+            id: TackId(1),
+            a: TackPoint {
+                pattern: Pid(1),
+                at: Vec2::new(100.0, 150.0),
+            },
+            b: TackTarget::AvatarSurface {
+                triangle: 0,
+                weights: [0.5, 0.5, 0.0],
+            },
+        });
+        let placements = placements_for(&doc);
+        let mut body = Mesh {
+            positions: vec![
+                glam::Vec3::new(0.0, 1.0, 0.1),
+                glam::Vec3::new(0.2, 1.0, 0.1),
+                glam::Vec3::new(0.0, 1.2, 0.1),
+            ],
+            normals: vec![glam::Vec3::Z; 3],
+            indices: vec![0, 1, 2],
+        };
+        let anchor_on = |body: &Mesh| {
+            let scene = build(&doc, &placements, Some(body), &ClothConfig::default());
+            scene.particles.last().unwrap().position
+        };
+        let [i, j] = [body.indices[0], body.indices[1]].map(|v| v as usize);
+        let midpoint = (body.positions[i] + body.positions[j]) * 0.5;
+        assert!(anchor_on(&body).distance(midpoint) < 1e-6);
+
+        // A bigger body moves the anchor with it.
+        body.scale_translate(2.0, glam::Vec3::ZERO);
+        assert!(anchor_on(&body).distance(midpoint * 2.0) < 1e-6);
+
+        // Without the avatar mesh there's nothing to anchor to.
+        let scene = build(&doc, &placements, None, &ClothConfig::default());
+        assert!(scene.tacks.is_empty());
     }
 
     #[test]
@@ -594,7 +818,7 @@ mod tests {
             panel.fabric = fabric;
             doc.patterns.push(panel);
             let placements = placements_for(&doc);
-            build(&doc, &placements, &ClothConfig::default())
+            build(&doc, &placements, None, &ClothConfig::default())
         };
 
         let silk = scene_for(Fabric::silk());
@@ -628,7 +852,7 @@ mod tests {
             min_particle_mass: 0.002,
             ..ClothConfig::default()
         };
-        let scene = build(&doc, &placements, &config);
+        let scene = build(&doc, &placements, None, &config);
         assert_eq!(scene.particles[0].inv_mass, 1.0 / 0.002);
     }
 }

@@ -3,8 +3,10 @@
 
 use od_core::{
     document_bom, total_area_m2, Axis, Fabric, Grading, Pattern, PatternId, PatternValue,
-    PointKind, RemoveInternalLine, RenamePattern, SetFabric, SetGrading, SetPatternValue,
+    PointKind, RemoveInternalLine, RenamePattern, SetFabric, SetGrading, SetParticleDistance,
+    SetPatternValue, PARTICLE_DISTANCE_RANGE,
 };
+use od_sim::cloth::DEFAULT_PARTICLE_DISTANCE;
 
 use crate::app::Session;
 
@@ -17,6 +19,8 @@ pub struct PropertiesState {
     /// A grading percentage being dragged but not yet committed, mirroring
     /// `pending` above.
     grading_pending: Option<(PatternId, f32)>,
+    /// A particle distance being dragged or typed but not yet committed.
+    distance_pending: Option<(PatternId, f32)>,
 }
 
 impl PropertiesState {
@@ -118,6 +122,7 @@ pub fn ui(ui: &mut egui::Ui, s: &mut Session) {
         });
 
     fabric_section(ui, s, id);
+    simulation_section(ui, s, id);
     grading_section(ui, s, id);
 
     if let Some(pattern) = s.doc.pattern(id) {
@@ -213,6 +218,45 @@ fn fabric_section(ui: &mut egui::Ui, s: &mut Session, id: PatternId) {
         fabric.mass_per_area * 1000.0,
         fabric.friction
     ));
+}
+
+/// How finely the pattern is meshed for draping: its own particle
+/// distance, or the default. Takes effect the next time draping starts.
+fn simulation_section(ui: &mut egui::Ui, s: &mut Session, id: PatternId) {
+    let Some(own) = s.doc.pattern(id).map(|p| p.particle_distance) else {
+        return;
+    };
+    let current = own.unwrap_or(DEFAULT_PARTICLE_DISTANCE);
+    ui.add_space(8.0);
+    ui.label("Simulation");
+    ui.horizontal(|ui| {
+        ui.label("Particle distance");
+        let mut value = match s.props.distance_pending {
+            Some((pid, v)) if pid == id => v,
+            _ => current,
+        };
+        let response = ui.add(
+            egui::DragValue::new(&mut value)
+                .range(PARTICLE_DISTANCE_RANGE)
+                .suffix(" mm")
+                .speed(0.5)
+                .max_decimals(1),
+        );
+        if response.changed() {
+            s.props.distance_pending = Some((id, value));
+        }
+        let busy = response.dragged() || response.has_focus();
+        if !busy {
+            if let Some((pid, value)) = s.props.distance_pending.take() {
+                if pid == id && value != current {
+                    s.execute(SetParticleDistance::new(id, Some(value)));
+                }
+            }
+        }
+        if own.is_some() && ui.button("Default").clicked() {
+            s.execute(SetParticleDistance::new(id, None));
+        }
+    });
 }
 
 /// The point picked with the Edit points tool.
@@ -457,7 +501,7 @@ fn tack_section(ui: &mut egui::Ui, s: &mut Session, id: od_core::TackId) {
     let from = name(tack.a.pattern);
     let (to, distance) = match tack.b {
         TackTarget::Pattern(b) => (name(b.pattern), Some(tack.a.at.distance(b.at))),
-        TackTarget::Avatar(_) => ("Avatar".to_owned(), None),
+        TackTarget::Avatar(_) | TackTarget::AvatarSurface { .. } => ("Avatar".to_owned(), None),
     };
 
     ui.heading("Tack");

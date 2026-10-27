@@ -6,14 +6,18 @@
 use std::ops::Range;
 
 use glam::Vec3;
-use od_core::document::{Document, PatternId, TrimKind};
+use od_core::document::{Document, PatternId, Tack, TrimKind};
+use od_core::geometry::Vec2;
+use od_render::mesh::Mesh;
 use od_render::pattern::Placement;
 use od_render::view::PlacedPattern;
 
 use crate::cloth::{self, ClothConfig};
-use crate::collision::Collider;
+use crate::collision::{closest_on_triangle, Collider};
 use crate::mesh::draped_mesh;
-use crate::xpbd::{Pin, World};
+use crate::mesher::PatternMesh;
+use crate::self_collision::{SelfCollision, DEFAULT_THICKNESS};
+use crate::xpbd::{Pin, SurfacePoint, World};
 
 /// A garment mid-simulation: the XPBD world plus enough of `ClothScene`'s
 /// layout to turn particle positions back into meshes per pattern.
@@ -21,46 +25,203 @@ pub struct Drape {
     pub world: World,
     pub colliders: Vec<Collider>,
     pattern_ranges: Vec<(PatternId, Range<usize>)>,
-    pattern_faces: Vec<(PatternId, Vec<[u32; 3]>)>,
+    pattern_meshes: Vec<(PatternId, PatternMesh)>,
     /// `world.distance_constraints[..structural_count]` are the
     /// structural (stretch) ones, in that fixed prefix — see
     /// [`Self::strain`].
     structural_count: usize,
-    trims: Vec<(TrimKind, usize)>,
-    topstitches: Vec<Vec<usize>>,
-    tacks: Vec<(usize, usize)>,
+    trims: Vec<(TrimKind, SurfacePoint)>,
+    topstitches: Vec<Vec<SurfacePoint>>,
+    /// The tacks the stitches in `world.surface_stitches` were built from,
+    /// so a change to the document's tacks can be spotted and synced.
+    tacks: Vec<Tack>,
+    /// For each of `world.surface_stitches`, the index in `tacks` of the
+    /// tack it holds.
+    tack_indices: Vec<usize>,
+    /// Particles from here on are tack anchors on the avatar, rebuilt
+    /// whenever the tacks are.
+    anchor_start: usize,
+    stitch_compliance: f32,
+    /// Particles joined by seams, which cloth-to-cloth collision leaves
+    /// out so it doesn't push apart the panels a seam joins.
+    seam_particles: Vec<usize>,
 }
 
 impl Drape {
     /// Build particles and constraints for `doc` at `placements` (its
     /// patterns' starting position and orientation, e.g. from
     /// [`od_render::pattern::RingLayout`]) and wrap them ready to step.
-    /// Has no colliders yet; add them (e.g. the avatar) before stepping.
+    /// `avatar` is the body tacks to its surface hold to. Has no
+    /// colliders yet; add them (e.g. the avatar) before stepping.
     pub fn new(
         doc: &Document,
         placements: &[(PatternId, Placement)],
+        avatar: Option<&Mesh>,
         config: &ClothConfig,
     ) -> Self {
-        let scene = cloth::build(doc, placements, config);
+        let scene = cloth::build(doc, placements, avatar, config);
         let structural_count = scene.structural.len();
+        let anchor_start = scene
+            .pattern_ranges
+            .iter()
+            .map(|(_, r)| r.end)
+            .max()
+            .unwrap_or(0);
+        let seam_particles = scene.stitches.iter().flat_map(|c| [c.a, c.b]).collect();
+        let triangles = scene
+            .pattern_ranges
+            .iter()
+            .zip(&scene.pattern_meshes)
+            .flat_map(|((_, range), (_, mesh))| {
+                mesh.faces
+                    .iter()
+                    .map(move |f| f.map(|v| range.start + v as usize))
+            })
+            .collect();
         let mut world = World::new(scene.particles);
         world.distance_constraints = scene.structural;
         world.distance_constraints.extend(scene.bending);
         world.distance_constraints.extend(scene.stitches);
-        Self {
+        let (tack_indices, stitches) = scene.tacks.into_iter().unzip();
+        world.surface_stitches = stitches;
+        world.self_collision = Some(SelfCollision::new(triangles, Vec::new(), DEFAULT_THICKNESS));
+        let mut drape = Self {
             world,
             colliders: Vec::new(),
             pattern_ranges: scene.pattern_ranges,
-            pattern_faces: scene.pattern_faces,
+            pattern_meshes: scene.pattern_meshes,
             structural_count,
             trims: scene.trims,
             topstitches: scene.topstitches,
-            tacks: scene.tacks,
+            tacks: doc.tacks.clone(),
+            tack_indices,
+            anchor_start,
+            stitch_compliance: config.stitch_compliance,
+            seam_particles,
+        };
+        drape.update_collision_skip();
+        drape
+    }
+
+    /// Particles cloth-to-cloth collision leaves out: seam and tack ends,
+    /// and the avatar anchors.
+    fn update_collision_skip(&mut self) {
+        let mut skip = vec![false; self.world.particles.len()];
+        for &i in &self.seam_particles {
+            skip[i] = true;
+        }
+        for s in &self.world.surface_stitches {
+            for side in [s.a, s.b] {
+                for (&i, w) in side.particles.iter().zip(side.weights) {
+                    if w > 0.0 {
+                        skip[i] = true;
+                    }
+                }
+            }
+        }
+        for flag in skip.iter_mut().skip(self.anchor_start) {
+            *flag = true;
+        }
+        if let Some(collision) = &mut self.world.self_collision {
+            collision.set_skip(skip);
+        }
+    }
+
+    /// Whether cloth-to-cloth collision is on.
+    pub fn cloth_collision(&self) -> bool {
+        self.world
+            .self_collision
+            .as_ref()
+            .is_some_and(|c| c.enabled)
+    }
+
+    /// Turn cloth-to-cloth collision on or off.
+    pub fn set_cloth_collision(&mut self, on: bool) {
+        if let Some(collision) = &mut self.world.self_collision {
+            collision.enabled = on;
         }
     }
 
     pub fn step(&mut self, dt: f32, substeps: u32) {
         self.world.step(dt, substeps, &self.colliders);
+    }
+
+    fn range_of(&self, pattern: PatternId) -> Option<Range<usize>> {
+        self.pattern_ranges
+            .iter()
+            .find(|(id, _)| *id == pattern)
+            .map(|(_, range)| range.clone())
+    }
+
+    fn mesh_of(&self, pattern: PatternId) -> Option<&PatternMesh> {
+        self.pattern_meshes
+            .iter()
+            .find(|(id, _)| *id == pattern)
+            .map(|(_, mesh)| mesh)
+    }
+
+    /// Whether the stitches already hold exactly `tacks`.
+    pub fn has_tacks(&self, tacks: &[Tack]) -> bool {
+        self.tacks == tacks
+    }
+
+    /// Rebuild the tack stitches from `tacks`, without restarting the
+    /// simulation: for a tack placed, deleted or undone while draping, or
+    /// an avatar resized under avatar tacks (their anchors move with it).
+    /// Tacks on patterns this drape doesn't simulate are skipped.
+    pub fn sync_tacks(&mut self, tacks: &[Tack], avatar: Option<&Mesh>) {
+        self.world.particles.truncate(self.anchor_start);
+        self.world.pins.retain(|p| p.particle < self.anchor_start);
+        let mut stitches = Vec::new();
+        let mut indices = Vec::new();
+        let ranges = &self.pattern_ranges;
+        let meshes = &self.pattern_meshes;
+        let locate = |pattern: PatternId, at: Vec2| {
+            let offset = ranges.iter().find(|(id, _)| *id == pattern)?.1.start;
+            let mesh = &meshes.iter().find(|(id, _)| *id == pattern)?.1;
+            cloth::surface_point(mesh, offset, at)
+        };
+        for (i, tack) in tacks.iter().enumerate() {
+            if let Some(stitch) = cloth::tack_stitch(
+                tack,
+                locate,
+                avatar,
+                &mut self.world.particles,
+                self.stitch_compliance,
+            ) {
+                stitches.push(stitch);
+                indices.push(i);
+            }
+        }
+        self.world.surface_stitches = stitches;
+        self.tack_indices = indices;
+        self.tacks = tacks.to_vec();
+        self.update_collision_skip();
+    }
+
+    /// The flat point (mm, in `pattern`'s own space) under a world point on
+    /// its draped surface: for placing a tack on the draped cloth.
+    pub fn flat_point(&self, pattern: PatternId, point: Vec3) -> Option<Vec2> {
+        let offset = self.range_of(pattern)?.start;
+        let mesh = self.mesh_of(pattern)?;
+        let pos = |v: u32| self.world.particles[offset + v as usize].position;
+        let (face, q) = mesh
+            .faces
+            .iter()
+            .map(|&[a, b, c]| (pos(a), pos(b), pos(c)))
+            .enumerate()
+            .map(|(i, (a, b, c))| (i, closest_on_triangle(a, b, c, point)))
+            .min_by(|(_, p), (_, q)| p.distance(point).total_cmp(&q.distance(point)))?;
+        let [a, b, c] = mesh.faces[face];
+        let weights = od_render::pick::triangle_weights([pos(a), pos(b), pos(c)], q);
+        Some(
+            [a, b, c]
+                .iter()
+                .zip(weights)
+                .fold(Vec2::ZERO, |acc, (&v, w)| {
+                    acc + mesh.vertices[v as usize].pos * w
+                }),
+        )
     }
 
     /// Pin the particle of `pattern` closest to `point` where it currently
@@ -69,12 +230,7 @@ impl Drape {
     /// whether a pin now exists there (`false` if `pattern` isn't in this
     /// scene, or was just unpinned).
     pub fn toggle_pin_near(&mut self, pattern: PatternId, point: Vec3) -> bool {
-        let Some(range) = self
-            .pattern_ranges
-            .iter()
-            .find(|(id, _)| *id == pattern)
-            .map(|(_, range)| range.clone())
-        else {
+        let Some(range) = self.range_of(pattern) else {
             return false;
         };
         let Some(particle) = self.world.particles[range.clone()]
@@ -109,18 +265,21 @@ impl Drape {
     pub fn trim_positions(&self) -> Vec<(TrimKind, Vec3)> {
         self.trims
             .iter()
-            .map(|&(kind, i)| (kind, self.world.particles[i].position))
+            .map(|&(kind, at)| (kind, at.position(&self.world.particles)))
             .collect()
     }
 
-    /// Where each tack's two ends currently sit, for drawing its thread.
-    pub fn tack_positions(&self) -> Vec<(Vec3, Vec3)> {
-        self.tacks
+    /// Where each tack's two ends currently sit, for drawing its thread,
+    /// with the tack's index in the document's tacks.
+    pub fn tack_positions(&self) -> Vec<(usize, Vec3, Vec3)> {
+        self.tack_indices
             .iter()
-            .map(|&(a, b)| {
+            .zip(&self.world.surface_stitches)
+            .map(|(&i, s)| {
                 (
-                    self.world.particles[a].position,
-                    self.world.particles[b].position,
+                    i,
+                    s.a.position(&self.world.particles),
+                    s.b.position(&self.world.particles),
                 )
             })
             .collect()
@@ -133,7 +292,7 @@ impl Drape {
             .iter()
             .map(|line| {
                 line.iter()
-                    .map(|&i| self.world.particles[i].position)
+                    .map(|at| at.position(&self.world.particles))
                     .collect()
             })
             .collect()
@@ -172,11 +331,7 @@ impl Drape {
         let strain = self.strain();
         self.pattern_ranges
             .iter()
-            .filter(|(id, _)| {
-                self.pattern_faces
-                    .iter()
-                    .any(|(pid, f)| pid == id && !f.is_empty())
-            })
+            .filter(|(id, _)| self.mesh_of(*id).is_some_and(|m| !m.faces.is_empty()))
             .map(|(id, range)| {
                 let front: Vec<[f32; 4]> = strain[range.clone()]
                     .iter()
@@ -190,7 +345,8 @@ impl Drape {
     }
 
     /// The current draped shape, one [`PlacedPattern`] per pattern that
-    /// had faces to build a mesh from.
+    /// had faces to build a mesh from. Its outline is the pattern's
+    /// outline particles, in order.
     pub fn placed_patterns(&self) -> Vec<PlacedPattern<PatternId>> {
         self.pattern_ranges
             .iter()
@@ -199,7 +355,8 @@ impl Drape {
                     .iter()
                     .map(|p| p.position)
                     .collect();
-                let faces = &self.pattern_faces.iter().find(|(pid, _)| pid == id)?.1;
+                let pattern_mesh = self.mesh_of(*id)?;
+                let faces = &pattern_mesh.faces;
                 let mesh = draped_mesh(&positions, faces)?;
                 let normal = faces
                     .first()
@@ -212,10 +369,15 @@ impl Drape {
                         (pb - pa).cross(pc - pa).normalize_or_zero()
                     })
                     .unwrap_or(Vec3::Y);
+                let outline = pattern_mesh
+                    .boundary
+                    .iter()
+                    .map(|&v| positions[v as usize])
+                    .collect();
                 Some(PlacedPattern {
                     key: *id,
                     mesh,
-                    outline: positions,
+                    outline,
                     normal,
                 })
             })
@@ -243,6 +405,14 @@ mod tests {
         )
     }
 
+    /// Meshed with just the outline: for tests that index particles by corner.
+    fn coarse() -> ClothConfig {
+        ClothConfig {
+            particle_distance: 1000.0,
+            ..ClothConfig::default()
+        }
+    }
+
     fn placements_for(doc: &Document, height: f32) -> Vec<(PatternId, Placement)> {
         let ring = RingLayout {
             radius: 0.5,
@@ -260,7 +430,7 @@ mod tests {
         let mut doc = Document::new("test");
         doc.patterns.push(rectangle(1, 200.0, 300.0));
         let placements = placements_for(&doc, 1.5);
-        let mut drape = Drape::new(&doc, &placements, &ClothConfig::default());
+        let mut drape = Drape::new(&doc, &placements, None, &ClothConfig::default());
         drape.colliders.push(Collider::ground(0.0));
         for _ in 0..300 {
             drape.step(1.0 / 60.0, 8);
@@ -275,7 +445,7 @@ mod tests {
         let mut doc = Document::new("test");
         doc.patterns.push(rectangle(1, 200.0, 300.0));
         let placements = placements_for(&doc, 1.5);
-        let mut drape = Drape::new(&doc, &placements, &ClothConfig::default());
+        let mut drape = Drape::new(&doc, &placements, None, &ClothConfig::default());
         let near_corner = drape.world.particles[0].position;
 
         assert!(drape.toggle_pin_near(PatternId(1), near_corner));
@@ -316,26 +486,25 @@ mod tests {
         });
         doc.patterns.push(panel);
         let placements = placements_for(&doc, 1.5);
-        let mut drape = Drape::new(&doc, &placements, &ClothConfig::default());
+        let mut drape = Drape::new(&doc, &placements, None, &ClothConfig::default());
 
         let trims = drape.trim_positions();
         assert_eq!(trims.len(), 1);
         assert_eq!(trims[0].0, TrimKind::Snap);
-        assert_eq!(trims[0].1, drape.world.particles[0].position);
+        assert!(trims[0].1.distance(drape.world.particles[0].position) < 1e-5);
 
+        // Resampled to the 20 mm particle distance.
         let lines = drape.topstitch_positions();
         assert_eq!(lines.len(), 1);
-        assert_eq!(lines[0].len(), 2);
+        assert_eq!(lines[0].len(), 11);
 
         for _ in 0..60 {
             drape.step(1.0 / 60.0, 8);
         }
         // Positions track the particles they were anchored to as the
         // cloth moves, not the pattern's flat starting position.
-        assert_eq!(
-            drape.trim_positions()[0].1,
-            drape.world.particles[0].position
-        );
+        let trim = drape.trim_positions()[0].1;
+        assert!(trim.distance(drape.world.particles[0].position) < 1e-5);
     }
 
     #[test]
@@ -343,7 +512,7 @@ mod tests {
         let mut doc = Document::new("test");
         doc.patterns.push(rectangle(1, 200.0, 300.0));
         let placements = placements_for(&doc, 1.5);
-        let mut drape = Drape::new(&doc, &placements, &ClothConfig::default());
+        let mut drape = Drape::new(&doc, &placements, None, &ClothConfig::default());
         assert!(!drape.toggle_pin_near(PatternId(99), Vec3::ZERO));
         assert!(drape.pin_positions().is_empty());
     }
@@ -353,7 +522,7 @@ mod tests {
         let mut doc = Document::new("test");
         doc.patterns.push(rectangle(1, 200.0, 300.0));
         let placements = placements_for(&doc, 1.5);
-        let drape = Drape::new(&doc, &placements, &ClothConfig::default());
+        let drape = Drape::new(&doc, &placements, None, &ClothConfig::default());
         assert!(drape.strain().iter().all(|&s| s < 1e-4), "starts relaxed");
     }
 
@@ -362,7 +531,7 @@ mod tests {
         let mut doc = Document::new("test");
         doc.patterns.push(rectangle(1, 200.0, 300.0));
         let placements = placements_for(&doc, 1.5);
-        let mut drape = Drape::new(&doc, &placements, &ClothConfig::default());
+        let mut drape = Drape::new(&doc, &placements, None, &coarse());
         // Pull corner 1 far from its neighbours without giving the solver
         // a chance to correct it, as if caught mid-overstretch.
         drape.world.particles[1].position += Vec3::new(5.0, 0.0, 0.0);
@@ -382,7 +551,7 @@ mod tests {
         let mut doc = Document::new("test");
         doc.patterns.push(rectangle(1, 200.0, 300.0));
         let placements = placements_for(&doc, 1.5);
-        let drape = Drape::new(&doc, &placements, &ClothConfig::default());
+        let drape = Drape::new(&doc, &placements, None, &coarse());
         let colors = drape.strain_colors(|s| [s, s, s, 1.0]);
         assert_eq!(colors.len(), 1);
         assert_eq!(colors[0].0, PatternId(1));
@@ -414,7 +583,7 @@ mod tests {
             }],
         });
         let placements = placements_for(&doc, 1.5);
-        let mut drape = Drape::new(&doc, &placements, &ClothConfig::default());
+        let mut drape = Drape::new(&doc, &placements, None, &ClothConfig::default());
         for _ in 0..300 {
             drape.step(1.0 / 60.0, 8);
         }
@@ -423,5 +592,167 @@ mod tests {
         for p in &placed {
             assert!(!p.mesh.positions.is_empty());
         }
+    }
+
+    #[test]
+    fn the_draped_outline_is_the_outline_particles_only() {
+        let mut doc = Document::new("test");
+        doc.patterns.push(rectangle(1, 200.0, 300.0));
+        let placements = placements_for(&doc, 1.5);
+        let drape = Drape::new(&doc, &placements, None, &ClothConfig::default());
+        let placed = drape.placed_patterns();
+        // 1000 mm of outline at 20 mm: 50 points, out of many more particles.
+        assert_eq!(placed[0].outline.len(), 50);
+        assert!(drape.world.particles.len() > 150);
+        assert_eq!(placed[0].outline[0], drape.world.particles[0].position);
+        // The mesh covers every particle, front and back.
+        assert_eq!(
+            placed[0].mesh.positions.len(),
+            2 * drape.world.particles.len()
+        );
+    }
+
+    #[test]
+    fn a_draped_point_maps_back_to_its_flat_position() {
+        let mut doc = Document::new("test");
+        doc.patterns.push(rectangle(1, 200.0, 300.0));
+        let placements = placements_for(&doc, 1.5);
+        let mut drape = Drape::new(&doc, &placements, None, &ClothConfig::default());
+        for _ in 0..30 {
+            drape.step(1.0 / 60.0, 8);
+        }
+        // A particle's draped position maps back to where it was cut.
+        let mesh = drape.mesh_of(PatternId(1)).unwrap().clone();
+        let v = mesh.vertices.len() / 2;
+        let flat = drape
+            .flat_point(PatternId(1), drape.world.particles[v].position)
+            .unwrap();
+        assert!(flat.distance(mesh.vertices[v].pos) < 1e-2, "{flat:?}");
+        assert!(drape.flat_point(PatternId(9), Vec3::ZERO).is_none());
+    }
+
+    #[test]
+    fn tacks_sync_into_a_running_drape() {
+        use od_core::document::{Tack, TackId, TackPoint, TackTarget};
+        let mut doc = Document::new("test");
+        doc.patterns.push(rectangle(1, 200.0, 300.0));
+        let placements = placements_for(&doc, 1.5);
+        let mut drape = Drape::new(&doc, &placements, None, &ClothConfig::default());
+        let cloth = drape.world.particles.len();
+        assert!(drape.has_tacks(&doc.tacks));
+
+        let tack = Tack {
+            id: TackId(1),
+            a: TackPoint {
+                pattern: PatternId(1),
+                at: Vec2::new(100.0, 150.0),
+            },
+            b: TackTarget::Avatar([0.0, 2.0, 0.0]),
+        };
+        doc.tacks.push(tack);
+        assert!(!drape.has_tacks(&doc.tacks));
+        drape.sync_tacks(&doc.tacks, None);
+        assert!(drape.has_tacks(&doc.tacks));
+        assert_eq!(drape.world.particles.len(), cloth + 1, "one anchor");
+        assert_eq!(drape.tack_positions().len(), 1);
+        assert_eq!(drape.tack_positions()[0].2, Vec3::new(0.0, 2.0, 0.0));
+
+        // Held up by the tack, the middle of the piece doesn't fall.
+        for _ in 0..120 {
+            drape.step(1.0 / 60.0, 8);
+        }
+        let (_, held, anchor) = drape.tack_positions()[0];
+        assert!(held.distance(anchor) < 0.02, "{held} vs {anchor}");
+
+        // Removing it drops the anchor and the stitch.
+        doc.tacks.clear();
+        drape.sync_tacks(&doc.tacks, None);
+        assert_eq!(drape.world.particles.len(), cloth);
+        assert!(drape.tack_positions().is_empty());
+    }
+
+    /// Two panels lying flat, one dropped onto the other, as placements.
+    fn stacked(doc: &Document) -> Vec<(PatternId, Placement)> {
+        doc.patterns
+            .iter()
+            .enumerate()
+            .map(|(i, p)| {
+                (
+                    p.id,
+                    Placement {
+                        center: Vec3::new(0.0, 0.02 + 0.03 * i as f32, 0.0),
+                        right: Vec3::X,
+                        up: Vec3::Z,
+                    },
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn cloth_collision_keeps_stacked_panels_apart() {
+        let mut doc = Document::new("test");
+        doc.patterns.push(rectangle(1, 200.0, 200.0));
+        doc.patterns.push(rectangle(2, 200.0, 200.0));
+        let placements = stacked(&doc);
+        // How far the top panel ends up above the bottom one, at the middle.
+        let gap = |collide: bool| {
+            let mut drape = Drape::new(&doc, &placements, None, &ClothConfig::default());
+            drape.set_cloth_collision(collide);
+            assert_eq!(drape.cloth_collision(), collide);
+            // The bottom panel rests on the floor; the top falls onto it.
+            drape.colliders.push(Collider::ground(0.0));
+            for _ in 0..90 {
+                drape.step(1.0 / 60.0, 8);
+            }
+            let middle = |id| {
+                let range = drape.range_of(PatternId(id)).unwrap();
+                let mesh = drape.mesh_of(PatternId(id)).unwrap();
+                let (v, _) = mesh
+                    .vertices
+                    .iter()
+                    .enumerate()
+                    .min_by(|(_, a), (_, b)| {
+                        let centre = Vec2::new(100.0, 100.0);
+                        a.pos.distance(centre).total_cmp(&b.pos.distance(centre))
+                    })
+                    .unwrap();
+                drape.world.particles[range.start + v].position.y
+            };
+            middle(2) - middle(1)
+        };
+        let apart = gap(true);
+        assert!(apart > 0.002, "the top panel rests on the bottom: {apart}");
+        let through = gap(false);
+        assert!(
+            through.abs() < 0.001,
+            "without collision they meet: {through}"
+        );
+    }
+
+    /// A T-shirt's worth of cloth stays fast enough to drape live. Timing
+    /// only means something in an optimised build, so debug runs skip it.
+    #[test]
+    #[cfg_attr(debug_assertions, ignore)]
+    fn a_garment_sized_drape_steps_in_real_time() {
+        let mut doc = Document::new("test");
+        for id in 1..=4 {
+            doc.patterns.push(rectangle(id, 500.0, 700.0));
+        }
+        let placements = placements_for(&doc, 1.2);
+        let mut drape = Drape::new(&doc, &placements, None, &ClothConfig::default());
+        drape.colliders.push(Collider::ground(0.0));
+        let particles = drape.world.particles.len();
+        assert!(particles > 3000, "{particles}");
+        drape.step(1.0 / 60.0, 8);
+        let start = std::time::Instant::now();
+        for _ in 0..10 {
+            drape.step(1.0 / 60.0, 8);
+        }
+        let per_frame = start.elapsed() / 10;
+        assert!(
+            per_frame < std::time::Duration::from_millis(50),
+            "{particles} particles took {per_frame:?} per frame"
+        );
     }
 }

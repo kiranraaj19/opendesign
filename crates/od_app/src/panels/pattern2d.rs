@@ -293,7 +293,9 @@ impl Canvas2D {
                     TackTarget::Pattern(b) => geometry::closest_on_segment(tack.a.at, b.at, p)
                         .0
                         .distance(p),
-                    TackTarget::Avatar(_) => tack.a.at.distance(p),
+                    TackTarget::Avatar(_) | TackTarget::AvatarSurface { .. } => {
+                        tack.a.at.distance(p)
+                    }
                 };
                 (gap, tack.id)
             })
@@ -1396,7 +1398,7 @@ fn draw_sewing_lines(painter: &egui::Painter, rect: Rect, s: &Session, pal: &the
                     4.0,
                 ));
             }
-            TackTarget::Avatar(_) => {
+            TackTarget::Avatar(_) | TackTarget::AvatarSurface { .. } => {
                 painter.text(
                     from + Px::new(8.0, -8.0),
                     Align2::LEFT_BOTTOM,

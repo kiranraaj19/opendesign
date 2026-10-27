@@ -151,8 +151,17 @@ pub struct TackPoint {
 pub enum TackTarget {
     Pattern(TackPoint),
     /// A point on the avatar's surface, in metres in the 3D view's world
-    /// (Y up). Kept as placed: resizing the avatar doesn't move it.
+    /// (Y up). Kept as placed: resizing the avatar doesn't move it. Tacks
+    /// placed before format 10 hold these.
     Avatar([f32; 3]),
+    /// A point on the avatar's surface: one triangle of its mesh (by index
+    /// into its triangle list) and barycentric weights in it. The built-in
+    /// bodies keep the same triangles at every size, so the point follows
+    /// the body when it is resized.
+    AvatarSurface {
+        triangle: u32,
+        weights: [f32; 3],
+    },
 }
 
 /// A point-to-point stitch: holds a point on a pattern to a point on
@@ -170,7 +179,7 @@ impl Tack {
     pub fn points(&self) -> impl Iterator<Item = &TackPoint> {
         let b = match &self.b {
             TackTarget::Pattern(p) => Some(p),
-            TackTarget::Avatar(_) => None,
+            _ => None,
         };
         std::iter::once(&self.a).chain(b)
     }
@@ -178,7 +187,7 @@ impl Tack {
     pub fn points_mut(&mut self) -> impl Iterator<Item = &mut TackPoint> {
         let b = match &mut self.b {
             TackTarget::Pattern(p) => Some(p),
-            TackTarget::Avatar(_) => None,
+            _ => None,
         };
         std::iter::once(&mut self.a).chain(b)
     }
@@ -446,6 +455,9 @@ pub struct Pattern {
     pub trims: Vec<Trim>,
     /// How this piece's outline changes across the document's size chart.
     pub grading: Grading,
+    /// Target spacing between this piece's simulation particles, in mm.
+    /// `None` uses the simulation's default; smaller is finer and slower.
+    pub particle_distance: Option<f32>,
 }
 
 /// Seam allowance given to new patterns, in mm.
@@ -466,6 +478,7 @@ impl Pattern {
             topstitches: Vec::new(),
             trims: Vec::new(),
             grading: Grading::default(),
+            particle_distance: None,
         }
     }
 

@@ -6,3 +6,11 @@ members = ["crates/od_core", "crates/od_render", "crates/od_sim", "crates/od_app
 version = "0.1.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
+
+# The cloth solver steps thousands of particles every frame; unoptimised,
+# debug runs of the app and its tests crawl.
+[profile.dev.package.od_sim]
+opt-level = 3
+
+[profile.dev.package.spade]
+opt-level = 3

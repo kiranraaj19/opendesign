@@ -76,6 +76,76 @@ impl DistanceConstraint {
     }
 }
 
+/// A point on the cloth's surface: a weighted mix of up to three
+/// particles (a triangle and barycentric weights), so it can sit between
+/// particles and still move with them.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SurfacePoint {
+    pub particles: [usize; 3],
+    pub weights: [f32; 3],
+}
+
+impl SurfacePoint {
+    /// Exactly at one particle.
+    pub fn at(particle: usize) -> Self {
+        Self {
+            particles: [particle; 3],
+            weights: [1.0, 0.0, 0.0],
+        }
+    }
+
+    pub fn position(&self, particles: &[Particle]) -> Vec3 {
+        self.particles
+            .iter()
+            .zip(self.weights)
+            .map(|(&i, w)| particles[i].position * w)
+            .sum()
+    }
+}
+
+/// Pulls two surface points together (rest length zero), softened by
+/// `compliance`: a tack that can hold anywhere on a triangle, not only at
+/// a particle. The correction is shared among each side's particles by
+/// their weights.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SurfaceStitch {
+    pub a: SurfacePoint,
+    pub b: SurfacePoint,
+    pub compliance: f32,
+}
+
+impl SurfaceStitch {
+    fn solve(&self, particles: &mut [Particle], lambda: &mut f32, alpha_tilde: f32) {
+        let delta = self.b.position(particles) - self.a.position(particles);
+        let dist = delta.length();
+        if dist < 1e-9 {
+            return;
+        }
+        let dir = delta / dist;
+        let side_weight = |s: &SurfacePoint, particles: &[Particle]| -> f32 {
+            s.particles
+                .iter()
+                .zip(s.weights)
+                .map(|(&i, w)| w * w * particles[i].inv_mass)
+                .sum()
+        };
+        let w_sum = side_weight(&self.a, particles) + side_weight(&self.b, particles);
+        if w_sum == 0.0 {
+            return;
+        }
+        let dlambda = (-dist - alpha_tilde * *lambda) / (w_sum + alpha_tilde);
+        *lambda += dlambda;
+        for (&i, w) in self.a.particles.iter().zip(self.a.weights) {
+            let m = particles[i].inv_mass;
+            particles[i].position -= dir * (w * m * dlambda);
+        }
+        for (&i, w) in self.b.particles.iter().zip(self.b.weights) {
+            let m = particles[i].inv_mass;
+            particles[i].position += dir * (w * m * dlambda);
+        }
+    }
+}
+
 /// A particle that must not move (e.g. a user-placed pin, or an anchor to
 /// the avatar). Enforced by snapping back every substep, so it holds even
 /// through a particle with nonzero inverse mass.
@@ -91,7 +161,10 @@ pub struct Pin {
 pub struct World {
     pub particles: Vec<Particle>,
     pub distance_constraints: Vec<DistanceConstraint>,
+    pub surface_stitches: Vec<SurfaceStitch>,
     pub pins: Vec<Pin>,
+    /// Keeps the cloth from passing through itself, if set.
+    pub self_collision: Option<crate::self_collision::SelfCollision>,
     pub gravity: Vec3,
     /// Fraction of velocity kept each full step (`1.0` = no damping).
     pub damping: f32,
@@ -102,7 +175,9 @@ impl World {
         Self {
             particles,
             distance_constraints: Vec::new(),
+            surface_stitches: Vec::new(),
             pins: Vec::new(),
+            self_collision: None,
             gravity: Vec3::new(0.0, -9.81, 0.0),
             damping: 0.995,
         }
@@ -134,6 +209,15 @@ impl World {
         for (c, lambda) in self.distance_constraints.iter().zip(lambdas.iter_mut()) {
             let alpha_tilde = c.compliance / (h * h);
             c.solve(&mut self.particles, lambda, alpha_tilde);
+        }
+        let mut lambdas = vec![0.0_f32; self.surface_stitches.len()];
+        for (c, lambda) in self.surface_stitches.iter().zip(lambdas.iter_mut()) {
+            let alpha_tilde = c.compliance / (h * h);
+            c.solve(&mut self.particles, lambda, alpha_tilde);
+        }
+
+        if let Some(collision) = &self.self_collision {
+            collision.resolve(&mut self.particles, &prev_positions);
         }
 
         for pin in &self.pins {
@@ -226,6 +310,32 @@ mod tests {
             .position
             .distance(world.particles[1].position);
         assert!(dist < 0.05, "stitched distance {dist}");
+    }
+
+    #[test]
+    fn surface_stitch_pulls_a_point_between_particles_to_another() {
+        // A rigid bar of two particles, and a free particle tacked to the
+        // bar's midpoint.
+        let mut world = World::new(vec![
+            Particle::pinned(Vec3::new(0.0, 2.0, 0.0)),
+            Particle::pinned(Vec3::new(1.0, 2.0, 0.0)),
+            Particle::new(Vec3::new(0.5, 1.0, 0.0), 1.0),
+        ]);
+        let mid = SurfacePoint {
+            particles: [0, 1, 1],
+            weights: [0.5, 0.5, 0.0],
+        };
+        assert_eq!(mid.position(&world.particles), Vec3::new(0.5, 2.0, 0.0));
+        world.surface_stitches.push(SurfaceStitch {
+            a: mid,
+            b: SurfacePoint::at(2),
+            compliance: 1e-7,
+        });
+        settle(&mut world, 1.0);
+        let gap = world.particles[2]
+            .position
+            .distance(Vec3::new(0.5, 2.0, 0.0));
+        assert!(gap < 0.01, "{gap}");
     }
 
     #[test]

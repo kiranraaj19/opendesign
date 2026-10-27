@@ -7,5 +7,6 @@ license.workspace = true
 
 [dependencies]
 glam = "0.30"
+spade = "2.15"
 od_core = { path = "../od_core" }
 od_render = { path = "../od_render" }

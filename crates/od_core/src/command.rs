@@ -419,6 +419,46 @@ impl Command for SetPatternValue {
     }
 }
 
+/// Particle distances a pattern may be given, in mm: finer than this is
+/// too slow to simulate, coarser stops looking like cloth.
+pub const PARTICLE_DISTANCE_RANGE: std::ops::RangeInclusive<f32> = 5.0..=100.0;
+
+/// Set (or with `None`, clear back to the default) how finely a pattern is
+/// meshed for simulation.
+pub struct SetParticleDistance {
+    id: PatternId,
+    value: Option<f32>,
+}
+
+impl SetParticleDistance {
+    pub fn new(id: PatternId, value: Option<f32>) -> Self {
+        let (lo, hi) = (
+            *PARTICLE_DISTANCE_RANGE.start(),
+            *PARTICLE_DISTANCE_RANGE.end(),
+        );
+        Self {
+            id,
+            value: value.map(|v| v.clamp(lo, hi)),
+        }
+    }
+}
+
+impl Command for SetParticleDistance {
+    fn label(&self) -> String {
+        "Set particle distance".into()
+    }
+
+    fn apply(&mut self, doc: &mut Document) {
+        if let Some(p) = doc.pattern_mut(self.id) {
+            std::mem::swap(&mut p.particle_distance, &mut self.value);
+        }
+    }
+
+    fn undo(&mut self, doc: &mut Document) {
+        self.apply(doc);
+    }
+}
+
 /// Assign a pattern's fabric, e.g. from the properties panel's picker.
 pub struct SetFabric {
     id: PatternId,

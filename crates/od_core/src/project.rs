@@ -1,7 +1,7 @@
 //! Project files (`.odproj`): a versioned JSON wrapper around a [`Document`].
 //!
 //! ```json
-//! { "format": "opendesign-project", "version": 9, "document": { ... } }
+//! { "format": "opendesign-project", "version": 10, "document": { ... } }
 //! ```
 //!
 //! Older versions are upgraded on load by the `migrate_*` steps below, so a
@@ -34,7 +34,10 @@ pub const FORMAT: &str = "opendesign-project";
 /// - 9: seam edges gain a sewing direction; tacks hold a point anywhere on
 ///   a pattern (not an outline point index) to another pattern or the
 ///   avatar.
-pub const VERSION: u32 = 9;
+/// - 10: patterns gain an optional particle distance for simulation; a
+///   tack can hold a point on the avatar's surface (a triangle and
+///   barycentric weights) that follows the body when it is resized.
+pub const VERSION: u32 = 10;
 
 #[derive(Debug)]
 pub enum ProjectError {
@@ -253,6 +256,18 @@ fn migrate_v8(doc: &mut serde_json::Value) {
     }
 }
 
+/// Upgrade a version 9 document to version 10 in place: every pattern
+/// simulates at the default particle distance. Tacks keep their format.
+fn migrate_v9(doc: &mut serde_json::Value) {
+    use serde_json::Value;
+    let Some(patterns) = doc.get_mut("patterns").and_then(Value::as_array_mut) else {
+        return; // leave it for deserialisation to report
+    };
+    for pattern in patterns.iter_mut().filter_map(Value::as_object_mut) {
+        pattern.insert("particle_distance".into(), Value::Null);
+    }
+}
+
 pub fn to_json(doc: &Document) -> String {
     let file = FileOut {
         format: FORMAT,
@@ -306,6 +321,9 @@ pub fn from_json(text: &str) -> Result<Document, ProjectError> {
     }
     if header.version < 9 {
         migrate_v8(&mut body);
+    }
+    if header.version < 10 {
+        migrate_v9(&mut body);
     }
     let mut doc: Document = serde_json::from_value(body).map_err(ProjectError::Malformed)?;
     doc.validate()?;
@@ -384,7 +402,7 @@ mod tests {
             Err(ProjectError::NotAProject)
         ));
         assert!(matches!(
-            from_json(&good.replace("\"version\": 9", "\"version\": 99")),
+            from_json(&good.replace("\"version\": 10", "\"version\": 99")),
             Err(ProjectError::UnsupportedVersion(99))
         ));
         let dup = good.replace("\"id\": 2", "\"id\": 1");
@@ -407,7 +425,7 @@ mod tests {
         doc.patterns[0].seam_allowance = 7.5;
 
         let text = to_json(&doc);
-        assert!(text.contains("\"version\": 9"));
+        assert!(text.contains("\"version\": 10"));
         assert!(text.contains("\"kind\": \"curve\""));
         assert_eq!(from_json(&text).unwrap(), doc);
     }
@@ -456,7 +474,7 @@ mod tests {
 
         // Saving writes the current version, which loads back the same.
         let resaved = to_json(&doc);
-        assert!(resaved.contains("\"version\": 9"));
+        assert!(resaved.contains("\"version\": 10"));
         assert_eq!(from_json(&resaved).unwrap(), doc);
     }
 
@@ -514,7 +532,7 @@ mod tests {
 
         // Saving writes the current version, which loads back the same.
         let resaved = to_json(&doc);
-        assert!(resaved.contains("\"version\": 9"));
+        assert!(resaved.contains("\"version\": 10"));
         assert_eq!(from_json(&resaved).unwrap(), doc);
     }
 
@@ -564,7 +582,7 @@ mod tests {
         assert_eq!(doc.tacks.len(), 1);
 
         let resaved = to_json(&doc);
-        assert!(resaved.contains("\"version\": 9"));
+        assert!(resaved.contains("\"version\": 10"));
         assert_eq!(from_json(&resaved).unwrap(), doc);
     }
 
@@ -627,7 +645,7 @@ mod tests {
         );
 
         let resaved = to_json(&doc);
-        assert!(resaved.contains("\"version\": 9"));
+        assert!(resaved.contains("\"version\": 10"));
         assert_eq!(from_json(&resaved).unwrap(), doc);
     }
 
@@ -668,7 +686,7 @@ mod tests {
         assert_eq!(doc.patterns[0].fabric, crate::document::Fabric::cotton());
 
         let resaved = to_json(&doc);
-        assert!(resaved.contains("\"version\": 9"));
+        assert!(resaved.contains("\"version\": 10"));
         assert_eq!(from_json(&resaved).unwrap(), doc);
     }
 
@@ -687,7 +705,7 @@ mod tests {
         assert_eq!(doc.patterns[0].trims.len(), 1);
 
         let resaved = to_json(&doc);
-        assert!(resaved.contains("\"version\": 9"));
+        assert!(resaved.contains("\"version\": 10"));
         assert_eq!(from_json(&resaved).unwrap(), doc);
     }
 
@@ -751,7 +769,7 @@ mod tests {
         assert_ne!(doc.patterns[0].graded_outline(1), doc.patterns[0].outline);
 
         let resaved = to_json(&doc);
-        assert!(resaved.contains("\"version\": 9"));
+        assert!(resaved.contains("\"version\": 10"));
         assert_eq!(from_json(&resaved).unwrap(), doc);
     }
 
@@ -839,6 +857,26 @@ mod tests {
                 at: Vec2::ZERO
             })
         );
+    }
+
+    #[test]
+    fn version_9_files_load_with_the_default_particle_distance() {
+        let mut doc = sample();
+        doc.patterns[0].particle_distance = Some(12.0);
+        let mut file: serde_json::Value = serde_json::from_str(&to_json(&doc)).unwrap();
+        file["version"] = 9.into();
+        for pattern in file["document"]["patterns"].as_array_mut().unwrap() {
+            pattern.as_object_mut().unwrap().remove("particle_distance");
+        }
+        let loaded = from_json(&file.to_string()).unwrap();
+        assert!(loaded
+            .patterns
+            .iter()
+            .all(|p| p.particle_distance.is_none()));
+
+        // The current version keeps it.
+        let kept = from_json(&to_json(&doc)).unwrap();
+        assert_eq!(kept.patterns[0].particle_distance, Some(12.0));
     }
 
     #[test]

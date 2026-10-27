@@ -50,9 +50,30 @@ pub fn ray_triangle(ray: &Ray, [a, b, c]: [Vec3; 3]) -> Option<f32> {
 
 /// Nearest hit on a mesh.
 pub fn ray_mesh(ray: &Ray, mesh: &Mesh) -> Option<f32> {
+    ray_mesh_triangle(ray, mesh).map(|(t, _)| t)
+}
+
+/// Nearest hit on a mesh, with which triangle (by index into its
+/// triangle list) it landed on.
+pub fn ray_mesh_triangle(ray: &Ray, mesh: &Mesh) -> Option<(f32, usize)> {
     mesh.triangles()
-        .filter_map(|tri| ray_triangle(ray, tri))
-        .min_by(f32::total_cmp)
+        .enumerate()
+        .filter_map(|(i, tri)| ray_triangle(ray, tri).map(|t| (t, i)))
+        .min_by(|a, b| a.0.total_cmp(&b.0))
+}
+
+/// Barycentric weights of `p`, a point on the triangle `a b c`.
+pub fn triangle_weights([a, b, c]: [Vec3; 3], p: Vec3) -> [f32; 3] {
+    let (v0, v1, v2) = (b - a, c - a, p - a);
+    let (d00, d01, d11) = (v0.dot(v0), v0.dot(v1), v1.dot(v1));
+    let (d20, d21) = (v2.dot(v0), v2.dot(v1));
+    let den = d00 * d11 - d01 * d01;
+    if den.abs() < 1e-18 {
+        return [1.0, 0.0, 0.0];
+    }
+    let v = (d11 * d20 - d01 * d21) / den;
+    let w = (d00 * d21 - d01 * d20) / den;
+    [1.0 - v - w, v, w]
 }
 
 /// The item whose mesh the ray hits first, with the hit distance.
@@ -93,6 +114,19 @@ mod tests {
         assert_eq!(ray_triangle(&behind, TRI), None);
         let parallel = Ray::new(Vec3::new(-1.0, 0.25, 0.0), Vec3::X);
         assert_eq!(ray_triangle(&parallel, TRI), None);
+    }
+
+    #[test]
+    fn a_mesh_hit_names_its_triangle_and_weights() {
+        let mesh = cube();
+        let ray = Ray::new(Vec3::new(0.25, 0.5, -10.0), Vec3::Z);
+        let (t, i) = ray_mesh_triangle(&ray, &mesh).unwrap();
+        assert!((t - 10.0).abs() < 1e-5);
+        let tri = mesh.triangles().nth(i).unwrap();
+        let w = triangle_weights(tri, ray.at(t));
+        let back = tri[0] * w[0] + tri[1] * w[1] + tri[2] * w[2];
+        assert!(back.distance(ray.at(t)) < 1e-5);
+        assert!(w.iter().all(|&x| (-1e-5..=1.0 + 1e-5).contains(&x)));
     }
 
     #[test]

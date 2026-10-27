@@ -50,7 +50,9 @@ without this step.
 | Sew | Sew tool (`S`): click a segment (or drag along an outline for a free stretch, which may cross the outline's start), `Tab` for the other side, `Enter` sews; add more stretches per side for one-to-many. Pick both sides near matching ends and the seam is sewn untwisted. Click a sewn edge to unsew it |
 | Edit a seam | Select tool: click a seam to see its side lengths in Properties; drag the handles at its ends to move them along the outline; Flip side B untwists it, `Del` deletes it |
 | Check sewing length | View → Check sewing length (on, 3% by default): mismatched seams show in the warning colour, and the status bar counts them (click to select the first) |
-| Tack | Tack tool (`K`): click a point on a pattern, then a point on another pattern (2D or 3D view) or on the avatar (3D view, before draping). `Esc` cancels; select a tack and `Del` deletes it. Clicking two exact outline points with the Sew tool also tacks them |
+| Tack | Tack tool (`K`): click a point on a pattern, then a point on another pattern (2D or 3D view) or on the avatar (3D view). Works on the flat pieces and on the draped cloth; an avatar tack stays on the body when it is resized. `Esc` cancels; select a tack and `Del` deletes it. Clicking two exact outline points with the Sew tool also tacks them |
+| Drape | Drape button above the 3D view; Pin and Strain toggles while draping; Cloth collision keeps pieces from passing through each other |
+| Particle distance | Properties -> Simulation: spacing of a piece's simulation particles (default 20 mm; smaller is finer and slower) |
 | Select / move | Select tool (`V`), click or drag a pattern |
 | Delete | `Del` (the selected point when editing points), or the button in Properties |
 | Undo / redo | `Ctrl+Z` / `Ctrl+Y` (or `Ctrl+Shift+Z`) |
@@ -70,7 +72,7 @@ the default arrangement.
 ### Project files
 
 Projects are saved as `.odproj`: versioned JSON
-(`{"format": "opendesign-project", "version": 9, "document": {...}}`).
+(`{"format": "opendesign-project", "version": 10, "document": {...}}`).
 Older versions are upgraded when opened.
 Saves go through a temporary file and a rename, so a crash mid-save never
 leaves a half-written project. The title bar shows `*` and the status bar
@@ -127,7 +129,8 @@ without opening a window.
    drape untwisted), one-to-many seams, seams and tacks kept in step with
    outline edits, seam selection and end-dragging, a tunable length check,
    tacks anywhere on a pattern or to the avatar, seam and tack threads in 3D
-6. Cloth simulation
+6. Cloth simulation ✅ XPBD with interior particles at a set spacing,
+   avatar and cloth-to-cloth collision, pins, strain maps
 7. Fabrics and materials
 8. Asset library
 9. Import/export (OBJ, glTF, DXF-AAMA)

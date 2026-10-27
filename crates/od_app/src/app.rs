@@ -218,7 +218,7 @@ impl Session {
     pub fn tack_to(&mut self, target: TackTarget) {
         match (self.tack_start.take(), target) {
             (None, TackTarget::Pattern(start)) => self.tack_start = Some(start),
-            (None, TackTarget::Avatar(_)) => {}
+            (None, _) => {}
             (Some(start), target) => {
                 self.execute(AddTack::new(start, target));
                 // A new tack goes last; select it so it shows in Properties.
@@ -1669,8 +1669,8 @@ mod tests {
             .get_all_by_role(Role::SpinButton)
             .map(|n| n.rect().center())
             .collect();
-        // Seam allowance, grainline, and the new grading-percent field.
-        assert_eq!(fields.len(), 3);
+        // Seam allowance, grainline, particle distance and grading percent.
+        assert_eq!(fields.len(), 4);
         drag(&mut h, fields[0], fields[0] + egui::vec2(40.0, 0.0));
         assert_eq!(last_step(&h), "Set seam allowance");
         let allowance = h.state().session.doc.patterns[0].seam_allowance;
