@@ -1,0 +1,88 @@
+name: Release
+
+# Build a release binary for Linux and Windows and publish them as
+# downloadable archives on a GitHub Release. This is deliberately not a
+# one-click installer: no code signing, no MSI/Inno Setup, no .deb/AppImage
+# — see packaging/README.md for why. Users download the archive and run
+# the binary directly; Windows users will see one unsigned-binary
+# SmartScreen prompt to click through, since there's no signing cert.
+#
+# Push a tag like `v0.2.0` to build and publish a release. `workflow_dispatch`
+# lets you run the build jobs on demand (e.g. to sanity-check them on a
+# branch) without publishing anything — only a tag push creates a release.
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      # eframe/egui (winit, rfd) need these dev headers to *compile* on
+      # Linux, even though the resulting binary needs a display to *run*.
+      - name: Install Linux build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libgtk-3-dev \
+            libxcb-render0-dev \
+            libxcb-shape0-dev \
+            libxcb-xfixes0-dev \
+            libxkbcommon-dev \
+            libssl-dev \
+            pkg-config
+
+      - name: Build and package
+        run: packaging/package-linux.sh
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-archive
+          path: dist/*.tar.gz
+          if-no-files-found: error
+
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build and package
+        run: ./packaging/package-windows.ps1
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-archive
+          path: dist/*.zip
+          if-no-files-found: error
+
+  release:
+    needs: [build-linux, build-windows]
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true
