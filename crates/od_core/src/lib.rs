@@ -13,14 +13,15 @@ pub mod plugin;
 pub mod project;
 
 pub use command::{
-    AddInternalLine, AddNotch, AddPattern, AddSewingLine, AddTack, Command, DeletePattern,
-    DeletePoint, DuplicatePattern, InsertPoint, MirrorPattern, MovePattern, MovePoint,
-    PatternValue, RemoveInternalLine, RemoveNotch, RemoveSewingLine, RemoveTack, RenamePattern,
-    SetFabric, SetPatternValue, SetPointKind,
+    AddInternalLine, AddNotch, AddPattern, AddSewingLine, AddTack, AddTopstitch, AddTrim, Command,
+    DeletePattern, DeletePoint, DuplicatePattern, InsertPoint, MirrorPattern, MovePattern,
+    MovePoint, PatternValue, RemoveInternalLine, RemoveNotch, RemoveSewingLine, RemoveTack,
+    RemoveTopstitch, RemoveTrim, RenamePattern, SetFabric, SetPatternValue, SetPointKind,
 };
 pub use document::{
     Axis, Document, Fabric, FabricTexture, InternalLine, Notch, OutlinePoint, Pattern, PatternId,
-    PointKind, SeamEdge, SeamPoint, SewingLine, SewingLineId, Tack, TackId,
+    PointKind, SeamEdge, SeamPoint, SewingLine, SewingLineId, Tack, TackId, Topstitch, Trim,
+    TrimKind,
 };
 pub use geometry::Vec2;
 pub use history::History;

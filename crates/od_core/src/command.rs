@@ -3,7 +3,8 @@
 
 use crate::document::{
     normalize_degrees, Axis, Document, Fabric, InternalLine, Notch, OutlinePoint, Pattern,
-    PatternId, PointKind, SeamEdge, SeamPoint, SewingLine, SewingLineId, Tack, TackId,
+    PatternId, PointKind, SeamEdge, SeamPoint, SewingLine, SewingLineId, Tack, TackId, Topstitch,
+    Trim, TrimKind,
 };
 use crate::geometry::Vec2;
 
@@ -546,6 +547,143 @@ impl Command for RemoveInternalLine {
     }
 }
 
+pub struct AddTopstitch {
+    id: PatternId,
+    line: Topstitch,
+}
+
+impl AddTopstitch {
+    pub fn new(id: PatternId, points: Vec<Vec2>) -> Self {
+        Self {
+            id,
+            line: Topstitch { points },
+        }
+    }
+}
+
+impl Command for AddTopstitch {
+    fn label(&self) -> String {
+        "Add topstitch".into()
+    }
+
+    fn apply(&mut self, doc: &mut Document) {
+        if let Some(p) = doc.pattern_mut(self.id) {
+            p.topstitches.push(self.line.clone());
+        }
+    }
+
+    fn undo(&mut self, doc: &mut Document) {
+        if let Some(p) = doc.pattern_mut(self.id) {
+            p.topstitches.pop();
+        }
+    }
+}
+
+pub struct RemoveTopstitch {
+    id: PatternId,
+    index: usize,
+    removed: Option<Topstitch>,
+}
+
+impl RemoveTopstitch {
+    pub fn new(id: PatternId, index: usize) -> Self {
+        Self {
+            id,
+            index,
+            removed: None,
+        }
+    }
+}
+
+impl Command for RemoveTopstitch {
+    fn label(&self) -> String {
+        "Remove topstitch".into()
+    }
+
+    fn apply(&mut self, doc: &mut Document) {
+        if let Some(p) = doc.pattern_mut(self.id) {
+            if self.index < p.topstitches.len() {
+                self.removed = Some(p.topstitches.remove(self.index));
+            }
+        }
+    }
+
+    fn undo(&mut self, doc: &mut Document) {
+        if let (Some(p), Some(line)) = (doc.pattern_mut(self.id), self.removed.take()) {
+            p.topstitches
+                .insert(self.index.min(p.topstitches.len()), line);
+        }
+    }
+}
+
+pub struct AddTrim {
+    id: PatternId,
+    trim: Trim,
+}
+
+impl AddTrim {
+    pub fn new(id: PatternId, kind: TrimKind, pos: Vec2) -> Self {
+        Self {
+            id,
+            trim: Trim { kind, pos },
+        }
+    }
+}
+
+impl Command for AddTrim {
+    fn label(&self) -> String {
+        "Add trim".into()
+    }
+
+    fn apply(&mut self, doc: &mut Document) {
+        if let Some(p) = doc.pattern_mut(self.id) {
+            p.trims.push(self.trim);
+        }
+    }
+
+    fn undo(&mut self, doc: &mut Document) {
+        if let Some(p) = doc.pattern_mut(self.id) {
+            p.trims.pop();
+        }
+    }
+}
+
+pub struct RemoveTrim {
+    id: PatternId,
+    index: usize,
+    removed: Option<Trim>,
+}
+
+impl RemoveTrim {
+    pub fn new(id: PatternId, index: usize) -> Self {
+        Self {
+            id,
+            index,
+            removed: None,
+        }
+    }
+}
+
+impl Command for RemoveTrim {
+    fn label(&self) -> String {
+        "Remove trim".into()
+    }
+
+    fn apply(&mut self, doc: &mut Document) {
+        if let Some(p) = doc.pattern_mut(self.id) {
+            if self.index < p.trims.len() {
+                self.removed = Some(p.trims.remove(self.index));
+            }
+        }
+    }
+
+    fn undo(&mut self, doc: &mut Document) {
+        if let (Some(p), Some(trim)) = (doc.pattern_mut(self.id), self.removed.take()) {
+            p.trims.insert(self.index.min(p.trims.len()), trim);
+        }
+    }
+}
+
 /// Flip a pattern in place about its own centre line.
 pub struct MirrorPattern {
     id: PatternId,
@@ -953,6 +1091,48 @@ mod tests {
     }
 
     #[test]
+    fn topstitches_round_trip() {
+        let line = vec![Vec2::new(5.0, 5.0), Vec2::new(45.0, 5.0)];
+        round_trip(AddTopstitch::new(ID, line.clone()), |d| {
+            assert_eq!(pat(d).topstitches[0].points, line);
+        });
+        let (mut doc, id) = doc_with_rect();
+        AddTopstitch::new(id, line).apply(&mut doc);
+        let before = doc.clone();
+        let mut remove = RemoveTopstitch::new(id, 0);
+        remove.apply(&mut doc);
+        assert!(doc.pattern(id).unwrap().topstitches.is_empty());
+        remove.undo(&mut doc);
+        assert_eq!(doc, before);
+    }
+
+    #[test]
+    fn trims_round_trip() {
+        round_trip(
+            AddTrim::new(ID, TrimKind::Button, Vec2::new(20.0, 20.0)),
+            |d| {
+                assert_eq!(
+                    pat(d).trims,
+                    [Trim {
+                        kind: TrimKind::Button,
+                        pos: Vec2::new(20.0, 20.0)
+                    }]
+                );
+            },
+        );
+        let (mut doc, id) = doc_with_rect();
+        AddTrim::new(id, TrimKind::Button, Vec2::new(10.0, 10.0)).apply(&mut doc);
+        AddTrim::new(id, TrimKind::Snap, Vec2::new(30.0, 10.0)).apply(&mut doc);
+        let before = doc.clone();
+        let mut remove = RemoveTrim::new(id, 0);
+        remove.apply(&mut doc);
+        assert_eq!(doc.pattern(id).unwrap().trims.len(), 1);
+        assert_eq!(doc.pattern(id).unwrap().trims[0].kind, TrimKind::Snap);
+        remove.undo(&mut doc);
+        assert_eq!(doc, before);
+    }
+
+    #[test]
     fn move_pattern_undo_is_exact() {
         // 0.1 and 0.7 are not exact in binary, so p + d - d can drift.
         let (mut doc, id) = doc_with_rect();
@@ -968,11 +1148,18 @@ mod tests {
     fn move_pattern_carries_internal_lines() {
         let (mut doc, id) = doc_with_rect();
         AddInternalLine::new(id, vec![Vec2::ZERO, Vec2::new(5.0, 5.0)]).apply(&mut doc);
+        AddTopstitch::new(id, vec![Vec2::ZERO, Vec2::new(5.0, 5.0)]).apply(&mut doc);
+        AddTrim::new(id, TrimKind::Button, Vec2::ZERO).apply(&mut doc);
         MovePattern::new(id, Vec2::new(10.0, 0.0)).apply(&mut doc);
         assert_eq!(
             doc.pattern(id).unwrap().internal_lines[0].points[0],
             Vec2::new(10.0, 0.0)
         );
+        assert_eq!(
+            doc.pattern(id).unwrap().topstitches[0].points[0],
+            Vec2::new(10.0, 0.0)
+        );
+        assert_eq!(doc.pattern(id).unwrap().trims[0].pos, Vec2::new(10.0, 0.0));
     }
 
     #[test]
