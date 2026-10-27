@@ -73,24 +73,26 @@ pub struct InternalLine {
 #[serde(transparent)]
 pub struct SewingLineId(pub u64);
 
-/// One side of a seam: a corner-to-corner run of a pattern's outline (see
-/// [`Pattern::segment_at`]). `end` is the outline index that closes the run;
-/// it may be `>= outline.len()` when the run wraps past the end of the
-/// array, in the same way [`FlatPoint::param`] wraps are represented
-/// elsewhere.
+/// One run of a pattern's outline, as outline parameters (see
+/// [`FlatPoint::param`]): a whole number of corner spans for segment sewing
+/// (see [`Pattern::segment_at`]), or any sub-range for free sewing. `end`
+/// may exceed `outline.len()` when the run wraps past the end of the array.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct SeamEdge {
     pub pattern: PatternId,
-    pub start: usize,
-    pub end: usize,
+    pub start: f32,
+    pub end: f32,
 }
 
-/// A seam: two edges, on the same or different patterns, sewn together.
+/// A seam: two groups of edges, on the same or different patterns, sewn
+/// together along their combined length. Both groups normally hold one
+/// edge each; a group with more than one is the "many" side of a
+/// one-to-many seam (a sleeve cap sewn to a front and a back armhole, say).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SewingLine {
     pub id: SewingLineId,
-    pub a: SeamEdge,
-    pub b: SeamEdge,
+    pub a: Vec<SeamEdge>,
+    pub b: Vec<SeamEdge>,
 }
 
 /// How much two sewn edges may differ in length, as a fraction of the
@@ -121,27 +123,38 @@ pub struct Tack {
 }
 
 impl SewingLine {
-    /// The lengths in mm of edges `a` and `b`. `None` if either referenced
-    /// pattern no longer exists.
-    fn edge_lengths(&self, doc: &Document) -> Option<(f32, f32)> {
-        let len = |e: &SeamEdge| {
-            doc.pattern(e.pattern)
-                .map(|p| p.segment_length(e.start, e.end, TOLERANCE))
-        };
-        Some((len(&self.a)?, len(&self.b)?))
+    /// Total length in mm of one side's edges. `None` if any of their
+    /// patterns no longer exists.
+    fn group_length(doc: &Document, group: &[SeamEdge]) -> Option<f32> {
+        group
+            .iter()
+            .map(|e| {
+                doc.pattern(e.pattern)
+                    .map(|p| p.segment_length(e.start, e.end, TOLERANCE))
+            })
+            .sum()
     }
 
-    /// Difference in length between the two sewn edges, in mm. Positive
-    /// means `a` is longer than `b`. `None` if either referenced pattern no
-    /// longer exists.
+    /// The combined lengths in mm of sides `a` and `b`. `None` if either
+    /// side has an edge whose pattern no longer exists.
+    fn side_lengths(&self, doc: &Document) -> Option<(f32, f32)> {
+        Some((
+            Self::group_length(doc, &self.a)?,
+            Self::group_length(doc, &self.b)?,
+        ))
+    }
+
+    /// Difference in combined length between the two sides, in mm. Positive
+    /// means `a` is longer than `b`. `None` if either side has an edge
+    /// whose pattern no longer exists.
     pub fn length_mismatch(&self, doc: &Document) -> Option<f32> {
-        self.edge_lengths(doc).map(|(a, b)| a - b)
+        self.side_lengths(doc).map(|(a, b)| a - b)
     }
 
-    /// Whether the two edges differ in length by more than
+    /// Whether the two sides differ in combined length by more than
     /// [`LENGTH_MISMATCH_TOLERANCE`] of the shorter one.
     pub fn is_length_mismatched(&self, doc: &Document) -> bool {
-        self.edge_lengths(doc).is_some_and(|(a, b)| {
+        self.side_lengths(doc).is_some_and(|(a, b)| {
             let shorter = a.min(b);
             shorter > 0.0 && (a - b).abs() / shorter > LENGTH_MISMATCH_TOLERANCE
         })
@@ -289,11 +302,11 @@ impl Pattern {
     /// `end` may be `>= outline.len()` if the span wraps past the end of
     /// the array; a pattern with no corners (all curve points) is one span,
     /// the whole outline.
-    pub fn segment_at(&self, param: f32) -> (usize, usize) {
+    pub fn segment_at(&self, param: f32) -> (f32, f32) {
         let n = self.outline.len();
         let corners = self.corner_indices();
         let Some(&base) = corners.first() else {
-            return (0, n);
+            return (0.0, n as f32);
         };
         let rel = |i: usize| (i as f32 - base as f32).rem_euclid(n as f32);
         let p_rel = (param - base as f32).rem_euclid(n as f32);
@@ -307,42 +320,77 @@ impl Pattern {
         let idx = corners.iter().position(|&c| c == best).unwrap();
         let next = corners[(idx + 1) % corners.len()];
         let end = if next as f32 <= best as f32 {
-            next + n
+            (next + n) as f32
         } else {
-            next
+            next as f32
         };
-        (best, end)
+        (best as f32, end)
     }
 
-    /// The flattened points of the outline between outline parameters
-    /// `start` and `end` (as returned by [`Pattern::segment_at`]), in
-    /// travel order.
-    pub fn segment_points(&self, start: usize, end: usize, tolerance: f32) -> Vec<Vec2> {
-        let n = self.outline.len();
-        if n == 0 || end <= start {
-            return Vec::new();
-        }
-        let nf = n as f32;
-        // Three laps of the flattened outline's parameters, so a window
-        // anywhere within one lap of `start..end` is contiguous in the
-        // combined, sorted list regardless of where the outline itself
-        // happens to wrap.
+    /// The flattened outline's points, unwrapped into three laps (at
+    /// `param - n`, `param`, `param + n`), sorted by parameter. A window
+    /// anywhere within one lap of any outline parameter range is therefore
+    /// contiguous in the result, regardless of where the outline itself
+    /// happens to wrap.
+    fn unwrapped_flat(&self, tolerance: f32) -> Vec<(f32, Vec2)> {
+        let nf = self.outline.len() as f32;
         let mut pts: Vec<(f32, Vec2)> = self
             .flatten(tolerance)
             .into_iter()
             .flat_map(|f| [-nf, 0.0, nf].map(|shift| (f.param + shift, f.pos)))
             .collect();
         pts.sort_by(|a, b| a.0.total_cmp(&b.0));
-        let (s, e) = (start as f32, end as f32);
-        pts.into_iter()
-            .filter(|&(param, _)| param >= s - 1e-3 && param <= e + 1e-3)
-            .map(|(_, pos)| pos)
-            .collect()
+        pts
+    }
+
+    /// The position on the outline at outline parameter `param`, including
+    /// fractions between flattened points (for a free-sewn edge that
+    /// doesn't start or end exactly on one).
+    pub fn pos_at_param(&self, param: f32, tolerance: f32) -> Vec2 {
+        let pts = self.unwrapped_flat(tolerance);
+        let Some(&(_, first)) = pts.first() else {
+            return Vec2::ZERO;
+        };
+        let i = pts.partition_point(|&(p, _)| p <= param);
+        if i == 0 {
+            return first;
+        }
+        let Some(&(_, last)) = pts.last() else {
+            return first;
+        };
+        if i >= pts.len() {
+            return last;
+        }
+        let (p0, v0) = pts[i - 1];
+        let (p1, v1) = pts[i];
+        if p1 <= p0 {
+            return v0;
+        }
+        v0.lerp(v1, (param - p0) / (p1 - p0))
+    }
+
+    /// The outline's points between outline parameters `start` and `end`
+    /// (as returned by [`Pattern::segment_at`], or any sub-range for free
+    /// sewing), in travel order, starting and ending exactly at `start` and
+    /// `end` even if they fall between flattened points.
+    pub fn segment_points(&self, start: f32, end: f32, tolerance: f32) -> Vec<Vec2> {
+        if self.outline.is_empty() || end <= start {
+            return Vec::new();
+        }
+        let mut out = vec![self.pos_at_param(start, tolerance)];
+        out.extend(
+            self.unwrapped_flat(tolerance)
+                .into_iter()
+                .filter(|&(p, _)| p > start + 1e-4 && p < end - 1e-4)
+                .map(|(_, pos)| pos),
+        );
+        out.push(self.pos_at_param(end, tolerance));
+        out
     }
 
     /// Length in mm of the outline between outline parameters `start` and
     /// `end`. Used to check that two sewn edges are a comparable length.
-    pub fn segment_length(&self, start: usize, end: usize, tolerance: f32) -> f32 {
+    pub fn segment_length(&self, start: f32, end: f32, tolerance: f32) -> f32 {
         self.segment_points(start, end, tolerance)
             .windows(2)
             .map(|w| w[0].distance(w[1]))
@@ -695,45 +743,50 @@ mod tests {
         let p = rect_with_curve();
         // Anywhere from the first corner up to (not including) the next
         // corner is the same span, curve point and all.
-        assert_eq!(p.segment_at(0.0), (0, 2));
-        assert_eq!(p.segment_at(0.5), (0, 2));
-        assert_eq!(p.segment_at(1.9), (0, 2));
+        assert_eq!(p.segment_at(0.0), (0.0, 2.0));
+        assert_eq!(p.segment_at(0.5), (0.0, 2.0));
+        assert_eq!(p.segment_at(1.9), (0.0, 2.0));
         // The last edge wraps past the end of the array.
-        assert_eq!(p.segment_at(4.0), (4, 5));
-        assert_eq!(p.segment_at(4.5), (4, 5));
+        assert_eq!(p.segment_at(4.0), (4.0, 5.0));
+        assert_eq!(p.segment_at(4.5), (4.0, 5.0));
     }
 
     #[test]
     fn segment_at_with_no_corners_is_the_whole_outline() {
         let p = pattern(&[(0.0, 0.0, Q), (100.0, 0.0, Q), (50.0, 50.0, Q)]);
-        assert_eq!(p.segment_at(1.3), (0, 3));
+        assert_eq!(p.segment_at(1.3), (0.0, 3.0));
     }
 
     #[test]
     fn segment_points_cover_only_the_requested_span() {
         let p = rect_with_curve();
-        let straight = p.segment_points(2, 3, TOLERANCE);
+        let straight = p.segment_points(2.0, 3.0, TOLERANCE);
         assert_eq!(
             straight,
             vec![Vec2::new(100.0, 0.0), Vec2::new(100.0, 50.0)]
         );
         // The curved span starts and ends at the same points as the plain
         // outline, with extra points for the bend in between.
-        let curved = p.segment_points(0, 2, TOLERANCE);
+        let curved = p.segment_points(0.0, 2.0, TOLERANCE);
         assert_eq!(curved.first(), Some(&Vec2::new(0.0, 0.0)));
         assert_eq!(curved.last(), Some(&Vec2::new(100.0, 0.0)));
         assert!(curved.len() > 2, "the curve should be subdivided");
         // A span that wraps past the end of the array still joins up.
-        let wrapped = p.segment_points(4, 5, TOLERANCE);
+        let wrapped = p.segment_points(4.0, 5.0, TOLERANCE);
         assert_eq!(wrapped, vec![Vec2::new(0.0, 50.0), Vec2::new(0.0, 0.0)]);
+        // Free sewing: a sub-range that starts and ends mid-edge.
+        let free = p.segment_points(2.25, 2.75, TOLERANCE);
+        assert_eq!(free, vec![Vec2::new(100.0, 12.5), Vec2::new(100.0, 37.5)]);
     }
 
     #[test]
     fn segment_length_matches_a_straight_edge_and_exceeds_the_chord_on_a_curve() {
         let p = rect_with_curve();
-        assert_eq!(p.segment_length(2, 3, TOLERANCE), 50.0);
-        let curved = p.segment_length(0, 2, TOLERANCE);
+        assert_eq!(p.segment_length(2.0, 3.0, TOLERANCE), 50.0);
+        let curved = p.segment_length(0.0, 2.0, TOLERANCE);
         assert!(curved > 100.0, "{curved} should be longer than the chord");
+        // Half of the 50 mm straight edge.
+        assert_eq!(p.segment_length(2.0, 2.5, TOLERANCE), 25.0);
     }
 
     fn doc_with_two_rects(sizes: [(f32, f32); 2]) -> Document {
@@ -751,22 +804,22 @@ mod tests {
         doc
     }
 
+    fn edge(pattern: PatternId, start: f32, end: f32) -> SeamEdge {
+        SeamEdge {
+            pattern,
+            start,
+            end,
+        }
+    }
+
     #[test]
     fn matching_edges_are_not_mismatched() {
         let doc = doc_with_two_rects([(100.0, 50.0), (100.0, 80.0)]);
         // The 100 mm sides of each rectangle (edge 0: index 0 to 1).
         let seam = SewingLine {
             id: SewingLineId(1),
-            a: SeamEdge {
-                pattern: PatternId(1),
-                start: 0,
-                end: 1,
-            },
-            b: SeamEdge {
-                pattern: PatternId(2),
-                start: 0,
-                end: 1,
-            },
+            a: vec![edge(PatternId(1), 0.0, 1.0)],
+            b: vec![edge(PatternId(2), 0.0, 1.0)],
         };
         assert_eq!(seam.length_mismatch(&doc), Some(0.0));
         assert!(!seam.is_length_mismatched(&doc));
@@ -779,16 +832,8 @@ mod tests {
         // against the 80 mm side of the second (edge 0: index 0 to 1).
         let seam = SewingLine {
             id: SewingLineId(1),
-            a: SeamEdge {
-                pattern: PatternId(1),
-                start: 1,
-                end: 2,
-            },
-            b: SeamEdge {
-                pattern: PatternId(2),
-                start: 0,
-                end: 1,
-            },
+            a: vec![edge(PatternId(1), 1.0, 2.0)],
+            b: vec![edge(PatternId(2), 0.0, 1.0)],
         };
         assert_eq!(seam.length_mismatch(&doc), Some(-30.0));
         assert!(seam.is_length_mismatched(&doc));
@@ -799,18 +844,23 @@ mod tests {
         let doc = doc_with_two_rects([(100.0, 50.0), (100.0, 50.0)]);
         let seam = SewingLine {
             id: SewingLineId(1),
-            a: SeamEdge {
-                pattern: PatternId(1),
-                start: 0,
-                end: 1,
-            },
-            b: SeamEdge {
-                pattern: PatternId(99),
-                start: 0,
-                end: 1,
-            },
+            a: vec![edge(PatternId(1), 0.0, 1.0)],
+            b: vec![edge(PatternId(99), 0.0, 1.0)],
         };
         assert_eq!(seam.length_mismatch(&doc), None);
+        assert!(!seam.is_length_mismatched(&doc));
+    }
+
+    #[test]
+    fn one_to_many_seam_sums_the_many_side() {
+        // A 100 mm edge sewn to two 50 mm edges that together match it.
+        let doc = doc_with_two_rects([(100.0, 50.0), (50.0, 20.0)]);
+        let seam = SewingLine {
+            id: SewingLineId(1),
+            a: vec![edge(PatternId(1), 0.0, 1.0)],
+            b: vec![edge(PatternId(2), 0.0, 1.0), edge(PatternId(2), 2.0, 3.0)],
+        };
+        assert_eq!(seam.length_mismatch(&doc), Some(0.0));
         assert!(!seam.is_length_mismatched(&doc));
     }
 }

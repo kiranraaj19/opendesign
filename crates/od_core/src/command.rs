@@ -622,16 +622,17 @@ impl Command for DuplicatePattern {
     }
 }
 
-/// Sew two edges together.
+/// Sew two sides together: each a group of one or more edges, so a group
+/// with more than one edge makes a one-to-many seam.
 pub struct AddSewingLine {
-    a: SeamEdge,
-    b: SeamEdge,
+    a: Vec<SeamEdge>,
+    b: Vec<SeamEdge>,
     /// Assigned on first apply so redo recreates the same id.
     id: Option<SewingLineId>,
 }
 
 impl AddSewingLine {
-    pub fn new(a: SeamEdge, b: SeamEdge) -> Self {
+    pub fn new(a: Vec<SeamEdge>, b: Vec<SeamEdge>) -> Self {
         Self { a, b, id: None }
     }
 
@@ -650,8 +651,8 @@ impl Command for AddSewingLine {
         let id = *self.id.get_or_insert_with(|| doc.allocate_sewing_id());
         doc.sewing_lines.push(SewingLine {
             id,
-            a: self.a,
-            b: self.b,
+            a: self.a.clone(),
+            b: self.b.clone(),
         });
     }
 
@@ -971,17 +972,24 @@ mod tests {
         // so compare the sewing lines rather than the whole document.
         let before = doc.sewing_lines.clone();
 
-        let a = SeamEdge {
+        let a = vec![SeamEdge {
             pattern: id,
-            start: 0,
-            end: 1,
-        };
-        let b = SeamEdge {
-            pattern: id2,
-            start: 2,
-            end: 3,
-        };
-        let mut sew = AddSewingLine::new(a, b);
+            start: 0.0,
+            end: 1.0,
+        }];
+        let b = vec![
+            SeamEdge {
+                pattern: id2,
+                start: 2.0,
+                end: 3.0,
+            },
+            SeamEdge {
+                pattern: id2,
+                start: 3.0,
+                end: 4.0,
+            },
+        ];
+        let mut sew = AddSewingLine::new(a.clone(), b.clone());
         sew.apply(&mut doc);
         let seam_id = sew.id().unwrap();
         assert_eq!(doc.sewing_lines.len(), 1);

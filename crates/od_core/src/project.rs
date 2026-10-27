@@ -1,7 +1,7 @@
 //! Project files (`.odproj`): a versioned JSON wrapper around a [`Document`].
 //!
 //! ```json
-//! { "format": "opendesign-project", "version": 4, "document": { ... } }
+//! { "format": "opendesign-project", "version": 5, "document": { ... } }
 //! ```
 //!
 //! Older versions are upgraded on load by the `migrate_*` steps below, so a
@@ -25,7 +25,10 @@ pub const FORMAT: &str = "opendesign-project";
 ///   allowance, grainline, notches and internal lines.
 /// - 3: the document gains sewing lines.
 /// - 4: the document gains tacks.
-pub const VERSION: u32 = 4;
+/// - 5: a sewing line's two sides are each a group of edges (one-to-many
+///   seams), not one edge each; edge parameters are fractional (free
+///   sewing), not whole outline indices.
+pub const VERSION: u32 = 5;
 
 #[derive(Debug)]
 pub enum ProjectError {
@@ -119,6 +122,23 @@ fn migrate_v3(doc: &mut serde_json::Value) {
     object.insert("next_tack_id".into(), json!(1));
 }
 
+/// Upgrade a version 4 document to version 5 in place: each sewing line's
+/// `a` and `b` become one-edge groups (whole-number outline indices read
+/// back fine as the new fractional parameters, with no change needed).
+fn migrate_v4(doc: &mut serde_json::Value) {
+    use serde_json::{json, Value};
+    let Some(lines) = doc.get_mut("sewing_lines").and_then(Value::as_array_mut) else {
+        return; // leave it for deserialisation to report
+    };
+    for line in lines.iter_mut().filter_map(Value::as_object_mut) {
+        for side in ["a", "b"] {
+            if let Some(edge) = line.remove(side) {
+                line.insert(side.into(), json!([edge]));
+            }
+        }
+    }
+}
+
 pub fn to_json(doc: &Document) -> String {
     let file = FileOut {
         format: FORMAT,
@@ -157,6 +177,9 @@ pub fn from_json(text: &str) -> Result<Document, ProjectError> {
     }
     if header.version < 4 {
         migrate_v3(&mut body);
+    }
+    if header.version < 5 {
+        migrate_v4(&mut body);
     }
     let mut doc: Document = serde_json::from_value(body).map_err(ProjectError::Malformed)?;
     doc.validate().map_err(ProjectError::DuplicateId)?;
@@ -235,7 +258,7 @@ mod tests {
             Err(ProjectError::NotAProject)
         ));
         assert!(matches!(
-            from_json(&good.replace("\"version\": 4", "\"version\": 99")),
+            from_json(&good.replace("\"version\": 5", "\"version\": 99")),
             Err(ProjectError::UnsupportedVersion(99))
         ));
         let dup = good.replace("\"id\": 2", "\"id\": 1");
@@ -258,7 +281,7 @@ mod tests {
         doc.patterns[0].seam_allowance = 7.5;
 
         let text = to_json(&doc);
-        assert!(text.contains("\"version\": 4"));
+        assert!(text.contains("\"version\": 5"));
         assert!(text.contains("\"kind\": \"curve\""));
         assert_eq!(from_json(&text).unwrap(), doc);
     }
@@ -307,7 +330,7 @@ mod tests {
 
         // Saving writes the current version, which loads back the same.
         let resaved = to_json(&doc);
-        assert!(resaved.contains("\"version\": 4"));
+        assert!(resaved.contains("\"version\": 5"));
         assert_eq!(from_json(&resaved).unwrap(), doc);
     }
 
@@ -347,23 +370,23 @@ mod tests {
         // with anything the old file might have implied.
         let id = doc.patterns[0].id;
         let mut sew = crate::command::AddSewingLine::new(
-            crate::document::SeamEdge {
+            vec![crate::document::SeamEdge {
                 pattern: id,
-                start: 0,
-                end: 1,
-            },
-            crate::document::SeamEdge {
+                start: 0.0,
+                end: 1.0,
+            }],
+            vec![crate::document::SeamEdge {
                 pattern: id,
-                start: 2,
-                end: 3,
-            },
+                start: 2.0,
+                end: 3.0,
+            }],
         );
         sew.apply(&mut doc);
         assert_eq!(doc.sewing_lines.len(), 1);
 
         // Saving writes the current version, which loads back the same.
         let resaved = to_json(&doc);
-        assert!(resaved.contains("\"version\": 4"));
+        assert!(resaved.contains("\"version\": 5"));
         assert_eq!(from_json(&resaved).unwrap(), doc);
     }
 
@@ -416,7 +439,68 @@ mod tests {
         assert_eq!(doc.tacks.len(), 1);
 
         let resaved = to_json(&doc);
-        assert!(resaved.contains("\"version\": 4"));
+        assert!(resaved.contains("\"version\": 5"));
+        assert_eq!(from_json(&resaved).unwrap(), doc);
+    }
+
+    /// A file exactly as the tacks commit (format version 4) wrote it: one
+    /// sewing line with a single edge on each side, in the old shape.
+    const V4_FILE: &str = r#"{
+  "format": "opendesign-project",
+  "version": 4,
+  "document": {
+    "name": "Old shirt",
+    "patterns": [
+      {
+        "id": 4,
+        "name": "Front",
+        "outline": [
+          { "x": 0.0, "y": 0.0, "kind": "corner" },
+          { "x": 500.0, "y": 0.0, "kind": "corner" },
+          { "x": 500.0, "y": 600.0, "kind": "corner" },
+          { "x": 0.0, "y": 600.0, "kind": "corner" }
+        ],
+        "seam_allowance": 10.0,
+        "grain_angle": 0.0,
+        "notches": [],
+        "internal_lines": []
+      }
+    ],
+    "sewing_lines": [
+      { "id": 1, "a": { "pattern": 4, "start": 0, "end": 1 }, "b": { "pattern": 4, "start": 2, "end": 3 } }
+    ],
+    "tacks": [],
+    "next_id": 5,
+    "next_sewing_id": 2,
+    "next_tack_id": 1
+  }
+}"#;
+
+    #[test]
+    fn version_4_files_load_each_side_as_a_one_edge_group() {
+        use crate::document::SeamEdge;
+        let doc = from_json(V4_FILE).unwrap();
+        let id = doc.patterns[0].id;
+        assert_eq!(doc.sewing_lines.len(), 1);
+        assert_eq!(
+            doc.sewing_lines[0].a,
+            vec![SeamEdge {
+                pattern: id,
+                start: 0.0,
+                end: 1.0
+            }]
+        );
+        assert_eq!(
+            doc.sewing_lines[0].b,
+            vec![SeamEdge {
+                pattern: id,
+                start: 2.0,
+                end: 3.0
+            }]
+        );
+
+        let resaved = to_json(&doc);
+        assert!(resaved.contains("\"version\": 5"));
         assert_eq!(from_json(&resaved).unwrap(), doc);
     }
 

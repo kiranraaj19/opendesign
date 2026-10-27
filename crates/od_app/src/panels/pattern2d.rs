@@ -61,16 +61,22 @@ pub struct Canvas2D {
     cursor: Option<(Vec2, Option<Snapped>)>,
     /// Outline point selected with the edit-points tool.
     pub selected_point: Option<(PatternId, usize)>,
-    /// First edge or point picked with the sew tool, waiting for a second
-    /// to match.
-    sew_pending: Option<SewPick>,
+    /// What the sew tool is building: a seam (two sides of edges, each
+    /// possibly more than one for a one-to-many seam) or a tack (a single
+    /// point waiting for its match).
+    sew_pending: Option<SewBuild>,
 }
 
-/// What the sew tool has picked so far: a whole edge to sew, or an exact
-/// outline point to tack.
-#[derive(Debug, Clone, Copy, PartialEq)]
-enum SewPick {
-    Edge(SeamEdge),
+/// What the sew tool has picked so far.
+#[derive(Debug, Clone, PartialEq)]
+enum SewBuild {
+    /// Two sides being built up by edge picks; `active` says which one the
+    /// next pick joins (or removes from, if already present there).
+    Edges {
+        sides: [Vec<SeamEdge>; 2],
+        active: usize,
+    },
+    /// A single point, waiting for a second to tack to.
     Point(SeamPoint),
 }
 
@@ -337,10 +343,17 @@ pub fn ui(ui: &mut egui::Ui, s: &mut Session) {
             "Click inside a pattern to draw a line · Enter or double-click finishes · Esc cancels"
         }
         Tool::Notch => "Click an outline to add a notch · click a notch to remove it",
-        Tool::Sew => match s.canvas.sew_pending {
-            Some(_) => "Click the matching edge or point to finish · Esc cancels",
+        Tool::Sew => match &s.canvas.sew_pending {
+            Some(SewBuild::Edges { active, .. }) => {
+                if *active == 0 {
+                    "Click/drag edges for this side · Tab: other side · Enter sews them · Esc cancels"
+                } else {
+                    "Click/drag edges for the other side · Tab: first side · Enter sews them · Esc cancels"
+                }
+            }
+            Some(SewBuild::Point(_)) => "Click the matching point to finish the tack · Esc cancels",
             None => {
-                "Click an edge to sew, or an exact point to tack · click a sewn edge or tack to remove it"
+                "Click/drag an edge to sew (Tab/Enter for one-to-many), or an exact point to tack · click a sewn edge or tack to remove it"
             }
         },
     };
@@ -630,78 +643,145 @@ fn handle_notch(response: &egui::Response, rect: Rect, s: &mut Session) {
     }
 }
 
-/// Click an outline edge to pick it for sewing; click a second edge to sew
-/// it to the first; click an already-sewn edge to unsew it. Clicking an
-/// exact outline point (rather than along an edge) picks it for a tack
-/// instead: a point-to-point stitch, for dart tips and single alignment
-/// marks that shouldn't imply a whole sewn seam.
+/// Build up a seam or a tack. A plain click on an edge picks its whole
+/// corner-to-corner span (see [`Pattern::segment_at`]); dragging along an
+/// edge instead picks an arbitrary sub-range, for free sewing. Each pick
+/// joins (or, if already there, leaves) the side of the seam that is
+/// currently being built; Tab switches sides, Enter sews them together —
+/// a side with more than one edge makes a one-to-many seam. Esc cancels.
+///
+/// Clicking an exact outline point, rather than along an edge, picks it
+/// for a tack instead: a point-to-point stitch that commits as soon as a
+/// second point is picked, since a tack is always one-to-one.
+///
+/// Clicking an edge or point that is already sewn or tacked, with no pick
+/// in progress, removes it.
 fn handle_sew(response: &egui::Response, rect: Rect, s: &mut Session) {
-    if response.ctx.input(|i| i.key_pressed(Key::Escape)) {
+    let ctx = response.ctx.clone();
+    if ctx.input(|i| i.key_pressed(Key::Escape)) {
         s.canvas.sew_pending = None;
     }
-    if !response.clicked() {
+    if ctx.input(|i| i.key_pressed(Key::Tab)) {
+        if let Some(SewBuild::Edges { active, .. }) = &mut s.canvas.sew_pending {
+            *active = 1 - *active;
+        }
+    }
+    if ctx.input(|i| i.key_pressed(Key::Enter)) {
+        if let Some(SewBuild::Edges { sides, .. }) = &s.canvas.sew_pending {
+            if !sides[0].is_empty() && !sides[1].is_empty() {
+                let [a, b] = sides.clone();
+                s.execute(AddSewingLine::new(a, b));
+                s.canvas.sew_pending = None;
+            }
+        }
+    }
+
+    if !response.clicked() && !response.drag_stopped() {
         return;
     }
-    let Some(p) = response
+    let Some(release) = response
         .interact_pointer_pos()
         .map(|p| s.canvas.to_doc(rect, p))
     else {
         return;
     };
 
-    if let Some((id, index)) = s.canvas.point_at(&s.doc, s.selection, p) {
-        handle_sew_pick(s, id, SewPick::Point(SeamPoint { pattern: id, index }));
-        return;
+    // An exact point takes priority over an edge, but only while no
+    // multi-edge seam is already being built (that takes over point
+    // clicks near a corner, so edges there can still be picked).
+    if !matches!(s.canvas.sew_pending, Some(SewBuild::Edges { .. })) {
+        if let Some((id, index)) = s.canvas.point_at(&s.doc, s.selection, release) {
+            handle_sew_point(s, SeamPoint { pattern: id, index });
+            return;
+        }
     }
-    let Some(hit) = s.canvas.edge_at(&s.doc, s.selection, p) else {
-        return;
+
+    let press = press_origin(response, rect, &s.canvas);
+    let dragged = press.is_some_and(|p| p.distance(release) > s.canvas.px(PICK_PX));
+    let edge = if dragged {
+        let (a, b) = (
+            s.canvas.edge_at(&s.doc, s.selection, press.unwrap()),
+            s.canvas.edge_at(&s.doc, s.selection, release),
+        );
+        match (a, b) {
+            (Some(a), Some(b)) if a.id == b.id => Some(SeamEdge {
+                pattern: a.id,
+                start: a.param.min(b.param),
+                end: a.param.max(b.param),
+            }),
+            _ => None,
+        }
+    } else {
+        s.canvas
+            .edge_at(&s.doc, s.selection, release)
+            .and_then(|hit| {
+                s.doc.pattern(hit.id).map(|pattern| {
+                    let (start, end) = pattern.segment_at(hit.param);
+                    SeamEdge {
+                        pattern: hit.id,
+                        start,
+                        end,
+                    }
+                })
+            })
     };
-    let Some(pattern) = s.doc.pattern(hit.id) else {
-        return;
-    };
-    let (start, end) = pattern.segment_at(hit.param);
-    let edge = SeamEdge {
-        pattern: hit.id,
-        start,
-        end,
-    };
-    handle_sew_pick(s, hit.id, SewPick::Edge(edge));
+    if let Some(edge) = edge {
+        handle_sew_edge(s, edge);
+    }
 }
 
-/// Handle one click of the sew tool once it has worked out what was picked:
-/// unsew an existing match, complete a pending pick into a seam or tack, or
-/// start a new pending pick.
-fn handle_sew_pick(s: &mut Session, pattern: PatternId, pick: SewPick) {
-    s.selection = Some(pattern);
-    match pick {
-        SewPick::Edge(edge) => {
-            let sewn = s
-                .doc
-                .sewing_lines
-                .iter()
-                .find(|sl| sl.a == edge || sl.b == edge);
-            if let Some(sewn) = sewn {
-                s.canvas.sew_pending = None;
-                s.execute(RemoveSewingLine::new(sewn.id));
-                return;
-            }
-        }
-        SewPick::Point(point) => {
-            let tacked = s.doc.tacks.iter().find(|t| t.a == point || t.b == point);
-            if let Some(tacked) = tacked {
-                s.canvas.sew_pending = None;
-                s.execute(RemoveTack::new(tacked.id));
-                return;
-            }
+/// Handle one edge pick: unsew an existing seam that uses it, remove it
+/// from (or add it to) the side currently being built, or start a new
+/// build with it.
+fn handle_sew_edge(s: &mut Session, edge: SeamEdge) {
+    s.selection = Some(edge.pattern);
+    if s.canvas.sew_pending.is_none() {
+        let sewn = s
+            .doc
+            .sewing_lines
+            .iter()
+            .find(|sl| sl.a.contains(&edge) || sl.b.contains(&edge));
+        if let Some(sewn) = sewn {
+            s.execute(RemoveSewingLine::new(sewn.id));
+            return;
         }
     }
+    let Some(SewBuild::Edges { sides, active }) = &mut s.canvas.sew_pending else {
+        // Nothing pending, or a tack pick was: start a fresh seam build.
+        s.canvas.sew_pending = Some(SewBuild::Edges {
+            sides: [vec![edge], Vec::new()],
+            active: 0,
+        });
+        return;
+    };
+    let side = &mut sides[*active];
+    match side.iter().position(|&e| e == edge) {
+        Some(i) => {
+            side.remove(i);
+        }
+        None => side.push(edge),
+    }
+    if sides[0].is_empty() && sides[1].is_empty() {
+        s.canvas.sew_pending = None;
+    }
+}
 
-    match (s.canvas.sew_pending.take(), pick) {
-        (Some(first), second) if first == second => {} // clicked the same spot again: cancel
-        (Some(SewPick::Edge(a)), SewPick::Edge(b)) => s.execute(AddSewingLine::new(a, b)),
-        (Some(SewPick::Point(a)), SewPick::Point(b)) => s.execute(AddTack::new(a, b)),
-        // Mixing an edge pick with a point pick starts over with the new one.
-        (_, pick) => s.canvas.sew_pending = Some(pick),
+/// Handle one point pick: untack an existing tack that uses it, complete a
+/// pending point into a tack, or start a new pending point.
+fn handle_sew_point(s: &mut Session, point: SeamPoint) {
+    s.selection = Some(point.pattern);
+    if s.canvas.sew_pending.is_none() {
+        let tacked = s.doc.tacks.iter().find(|t| t.a == point || t.b == point);
+        if let Some(tacked) = tacked {
+            s.execute(RemoveTack::new(tacked.id));
+            return;
+        }
+    }
+    match s.canvas.sew_pending.take() {
+        Some(SewBuild::Point(first)) if first == point => {} // same point again: cancel
+        Some(SewBuild::Point(first)) => s.execute(AddTack::new(first, point)),
+        // Nothing pending, or an edge build was: start a fresh tack pick.
+        _ => s.canvas.sew_pending = Some(SewBuild::Point(point)),
     }
 }
 
@@ -848,6 +928,11 @@ fn draw_sewing_lines(painter: &egui::Painter, rect: Rect, s: &Session, pal: &the
             painter.add(Shape::line(points, stroke));
         }
     };
+    let draw_group = |group: &[SeamEdge], stroke: Stroke| {
+        for edge in group {
+            draw_edge(edge, stroke);
+        }
+    };
     let tack_radius = s.canvas.px(5.0);
     let draw_point = |point: &SeamPoint, color: Color32| {
         let Some(pos) = s
@@ -869,9 +954,9 @@ fn draw_sewing_lines(painter: &egui::Painter, rect: Rect, s: &Session, pal: &the
         let mismatch = line.length_mismatch(&s.doc);
         if line.is_length_mismatched(&s.doc) {
             let stroke = Stroke::new(3.0, pal.warning);
-            draw_edge(&line.a, stroke);
-            draw_edge(&line.b, stroke);
-            let a_points = edge_points(&line.a);
+            draw_group(&line.a, stroke);
+            draw_group(&line.b, stroke);
+            let a_points: Vec<Pos2> = line.a.iter().flat_map(edge_points).collect();
             if let (Some(mismatch), Some(&mid)) = (mismatch, a_points.get(a_points.len() / 2)) {
                 painter.text(
                     mid + Px::new(8.0, -8.0),
@@ -883,13 +968,16 @@ fn draw_sewing_lines(painter: &egui::Painter, rect: Rect, s: &Session, pal: &the
             }
         } else {
             let stroke = Stroke::new(3.0, pal.accent);
-            draw_edge(&line.a, stroke);
-            draw_edge(&line.b, stroke);
+            draw_group(&line.a, stroke);
+            draw_group(&line.b, stroke);
         }
     }
     match &s.canvas.sew_pending {
-        Some(SewPick::Edge(edge)) => draw_edge(edge, Stroke::new(3.0, pal.selected)),
-        Some(SewPick::Point(point)) => draw_point(point, pal.selected),
+        Some(SewBuild::Edges { sides, .. }) => {
+            draw_group(&sides[0], Stroke::new(3.0, pal.selected));
+            draw_group(&sides[1], Stroke::new(3.0, pal.preview));
+        }
+        Some(SewBuild::Point(point)) => draw_point(point, pal.selected),
         None => {}
     }
 }
