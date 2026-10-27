@@ -10,7 +10,7 @@ use std::sync::Arc;
 
 use eframe::egui_wgpu;
 use egui::{Color32, PointerButton, Pos2, Rect, Sense, UiBuilder};
-use od_core::{Pattern, PatternId, Vec2};
+use od_core::{Pattern, PatternId, TrimKind, Vec2};
 use od_render::avatar::{avatar_mesh, AvatarKind, Measurements};
 use od_render::camera::{ndc_from_pixel, OrbitCamera, ViewPreset};
 use od_render::glam;
@@ -544,6 +544,24 @@ fn paint(ui: &mut egui::Ui, rect: Rect, s: &Session, placed: &[PlacedPattern<Pat
                 painter.circle_stroke(screen, 5.0, (1.0, pal.canvas_bg));
             }
         }
+        for line in drape.topstitch_positions() {
+            let pts: Vec<Pos2> = line.iter().filter_map(|&p| v.screen_pos(rect, p)).collect();
+            if pts.len() >= 2 {
+                painter.add(egui::Shape::dashed_line(&pts, (1.5, pal.preview), 5.0, 3.0));
+            }
+        }
+        for (kind, pos) in drape.trim_positions() {
+            if let Some(screen) = v.screen_pos(rect, pos) {
+                match kind {
+                    TrimKind::Button => {
+                        painter.circle_filled(screen, 4.0, pal.selected);
+                    }
+                    TrimKind::Snap => {
+                        painter.circle_stroke(screen, 4.0, (1.5, pal.selected));
+                    }
+                }
+            }
+        }
     }
 
     painter.text(
@@ -819,6 +837,32 @@ mod tests {
         h.run();
         assert!(h.state().viewport.drape.is_none());
         h.get_by_label("Drape");
+    }
+
+    #[test]
+    fn trims_and_topstitches_follow_the_drape() {
+        use od_core::{AddTopstitch, AddTrim, Command, TrimKind};
+        let mut h = harness();
+        let id = add_block(&mut h);
+        AddTrim::new(id, TrimKind::Button, Vec2::new(0.0, 0.0)).apply(&mut h.state_mut().doc);
+        AddTopstitch::new(id, vec![Vec2::new(0.0, 0.0), Vec2::new(400.0, 0.0)])
+            .apply(&mut h.state_mut().doc);
+        h.run();
+
+        h.get_by_label("Drape").click();
+        h.step();
+        for _ in 0..5 {
+            h.step();
+        }
+        let drape = h.state().viewport.drape.as_ref().unwrap();
+        let trims = drape.trim_positions();
+        assert_eq!(trims.len(), 1);
+        assert_eq!(trims[0].0, TrimKind::Button);
+        let lines = drape.topstitch_positions();
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0].len(), 2);
+        // Drawing them in `paint` must not panic.
+        h.step();
     }
 
     #[test]

@@ -9,7 +9,7 @@
 use std::collections::{BTreeSet, HashMap};
 use std::ops::Range;
 
-use od_core::document::{Document, FlatPoint, Pattern, PatternId, SeamEdge, TOLERANCE};
+use od_core::document::{Document, FlatPoint, Pattern, PatternId, SeamEdge, TrimKind, TOLERANCE};
 use od_core::geometry::{self, Vec2};
 use od_render::pattern::Placement;
 
@@ -57,6 +57,16 @@ pub struct ClothScene {
     /// directly). What a renderer needs to turn draped particle positions
     /// back into a surface.
     pub pattern_faces: Vec<(PatternId, Vec<[u32; 3]>)>,
+    /// Each placed [`od_core::document::Trim`], as the kind to draw and the
+    /// global particle index nearest its flattened position — the same
+    /// "snap to the nearest particle" idea [`Tack`]s use, since the only
+    /// particles a trim can ride along with are the outline's. Draw it at
+    /// that particle's current draped position.
+    pub trims: Vec<(TrimKind, usize)>,
+    /// Each placed [`od_core::document::Topstitch`], as the global
+    /// particle index nearest each of its points, in order — draw a line
+    /// through their current draped positions.
+    pub topstitches: Vec<Vec<usize>>,
 }
 
 fn to_glam(v: Vec2) -> glam::Vec2 {
@@ -177,6 +187,18 @@ fn nearest_particle(layout: &PatternLayout, target: Vec2) -> usize {
         .unwrap_or(layout.offset)
 }
 
+/// Local index (into `flat`) closest to `target`, used the same way as
+/// [`nearest_particle`] but before a pattern's [`PatternLayout`] is built
+/// (trims and topstitches are mapped to particles while a pattern's
+/// particles are still being laid out, not after).
+fn nearest_flat_index(flat: &[FlatPoint], target: Vec2) -> usize {
+    flat.iter()
+        .enumerate()
+        .min_by(|(_, a), (_, b)| a.pos.distance(target).total_cmp(&b.pos.distance(target)))
+        .map(|(i, _)| i)
+        .unwrap_or(0)
+}
+
 /// Build particles and constraints for every pattern in `placements`,
 /// stitched together by `doc`'s sewing lines and tacks. Patterns in `doc`
 /// not listed in `placements` are left out of the simulation.
@@ -193,6 +215,8 @@ pub fn build(
     let mut bending = Vec::new();
     let mut pattern_ranges = Vec::new();
     let mut pattern_faces = Vec::new();
+    let mut trims = Vec::new();
+    let mut topstitches = Vec::new();
     let mut layouts: HashMap<PatternId, PatternLayout> = HashMap::new();
 
     for (id, placement) in placements {
@@ -235,6 +259,18 @@ pub fn build(
             ));
         }
         pattern_faces.push((*id, faces));
+
+        for trim in &pattern.trims {
+            trims.push((trim.kind, offset + nearest_flat_index(&flat, trim.pos)));
+        }
+        for line in &pattern.topstitches {
+            topstitches.push(
+                line.points
+                    .iter()
+                    .map(|&p| offset + nearest_flat_index(&flat, p))
+                    .collect(),
+            );
+        }
 
         layouts.insert(
             *id,
@@ -287,6 +323,8 @@ pub fn build(
         stitches,
         pattern_ranges,
         pattern_faces,
+        trims,
+        topstitches,
     }
 }
 
@@ -414,6 +452,32 @@ mod tests {
             assert!(in_front && in_back, "stitch {s:?} should cross patterns");
             assert_eq!(s.rest_length, 0.0);
         }
+    }
+
+    #[test]
+    fn trims_and_topstitches_map_to_the_nearest_particle() {
+        use od_core::document::{Topstitch, Trim};
+        let mut doc = Document::new("test");
+        let mut panel = rectangle(1, "front", 200.0, 300.0);
+        panel.trims.push(Trim {
+            kind: TrimKind::Button,
+            // Near corner 1 (200.0, 0.0).
+            pos: Vec2::new(195.0, 5.0),
+        });
+        panel.topstitches.push(Topstitch {
+            // Near corners 0 and 1.
+            points: vec![Vec2::new(5.0, 2.0), Vec2::new(195.0, 2.0)],
+        });
+        doc.patterns.push(panel);
+        let placements = placements_for(&doc);
+        let scene = build(&doc, &placements, &ClothConfig::default());
+
+        assert_eq!(scene.trims.len(), 1);
+        assert_eq!(scene.trims[0].0, TrimKind::Button);
+        assert_eq!(scene.trims[0].1, 1, "closest particle is corner 1");
+
+        assert_eq!(scene.topstitches.len(), 1);
+        assert_eq!(scene.topstitches[0], vec![0, 1]);
     }
 
     #[test]

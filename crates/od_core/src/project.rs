@@ -1,7 +1,7 @@
 //! Project files (`.odproj`): a versioned JSON wrapper around a [`Document`].
 //!
 //! ```json
-//! { "format": "opendesign-project", "version": 5, "document": { ... } }
+//! { "format": "opendesign-project", "version": 6, "document": { ... } }
 //! ```
 //!
 //! Older versions are upgraded on load by the `migrate_*` steps below, so a
@@ -28,7 +28,8 @@ pub const FORMAT: &str = "opendesign-project";
 /// - 5: a sewing line's two sides are each a group of edges (one-to-many
 ///   seams), not one edge each; edge parameters are fractional (free
 ///   sewing), not whole outline indices.
-pub const VERSION: u32 = 5;
+/// - 6: patterns gain topstitch lines and point trims (buttons, snaps).
+pub const VERSION: u32 = 6;
 
 #[derive(Debug)]
 pub enum ProjectError {
@@ -139,6 +140,19 @@ fn migrate_v4(doc: &mut serde_json::Value) {
     }
 }
 
+/// Upgrade a version 5 document to version 6 in place: no pattern had
+/// topstitches or trims yet.
+fn migrate_v5(doc: &mut serde_json::Value) {
+    use serde_json::{json, Value};
+    let Some(patterns) = doc.get_mut("patterns").and_then(Value::as_array_mut) else {
+        return; // leave it for deserialisation to report
+    };
+    for pattern in patterns.iter_mut().filter_map(Value::as_object_mut) {
+        pattern.insert("topstitches".into(), json!([]));
+        pattern.insert("trims".into(), json!([]));
+    }
+}
+
 pub fn to_json(doc: &Document) -> String {
     let file = FileOut {
         format: FORMAT,
@@ -180,6 +194,9 @@ pub fn from_json(text: &str) -> Result<Document, ProjectError> {
     }
     if header.version < 5 {
         migrate_v4(&mut body);
+    }
+    if header.version < 6 {
+        migrate_v5(&mut body);
     }
     let mut doc: Document = serde_json::from_value(body).map_err(ProjectError::Malformed)?;
     doc.validate().map_err(ProjectError::DuplicateId)?;
@@ -258,7 +275,7 @@ mod tests {
             Err(ProjectError::NotAProject)
         ));
         assert!(matches!(
-            from_json(&good.replace("\"version\": 5", "\"version\": 99")),
+            from_json(&good.replace("\"version\": 6", "\"version\": 99")),
             Err(ProjectError::UnsupportedVersion(99))
         ));
         let dup = good.replace("\"id\": 2", "\"id\": 1");
@@ -281,7 +298,7 @@ mod tests {
         doc.patterns[0].seam_allowance = 7.5;
 
         let text = to_json(&doc);
-        assert!(text.contains("\"version\": 5"));
+        assert!(text.contains("\"version\": 6"));
         assert!(text.contains("\"kind\": \"curve\""));
         assert_eq!(from_json(&text).unwrap(), doc);
     }
@@ -330,7 +347,7 @@ mod tests {
 
         // Saving writes the current version, which loads back the same.
         let resaved = to_json(&doc);
-        assert!(resaved.contains("\"version\": 5"));
+        assert!(resaved.contains("\"version\": 6"));
         assert_eq!(from_json(&resaved).unwrap(), doc);
     }
 
@@ -386,7 +403,7 @@ mod tests {
 
         // Saving writes the current version, which loads back the same.
         let resaved = to_json(&doc);
-        assert!(resaved.contains("\"version\": 5"));
+        assert!(resaved.contains("\"version\": 6"));
         assert_eq!(from_json(&resaved).unwrap(), doc);
     }
 
@@ -439,7 +456,7 @@ mod tests {
         assert_eq!(doc.tacks.len(), 1);
 
         let resaved = to_json(&doc);
-        assert!(resaved.contains("\"version\": 5"));
+        assert!(resaved.contains("\"version\": 6"));
         assert_eq!(from_json(&resaved).unwrap(), doc);
     }
 
@@ -500,7 +517,57 @@ mod tests {
         );
 
         let resaved = to_json(&doc);
-        assert!(resaved.contains("\"version\": 5"));
+        assert!(resaved.contains("\"version\": 6"));
+        assert_eq!(from_json(&resaved).unwrap(), doc);
+    }
+
+    /// A file exactly as the one-to-many seam commit (format version 5)
+    /// wrote it: no pattern has topstitches or trims yet.
+    const V5_FILE: &str = r#"{
+  "format": "opendesign-project",
+  "version": 5,
+  "document": {
+    "name": "Old shirt",
+    "patterns": [
+      {
+        "id": 4,
+        "name": "Front",
+        "outline": [
+          { "x": 0.0, "y": 0.0, "kind": "corner" },
+          { "x": 500.0, "y": 0.0, "kind": "corner" },
+          { "x": 500.0, "y": 600.0, "kind": "corner" },
+          { "x": 0.0, "y": 600.0, "kind": "corner" }
+        ],
+        "seam_allowance": 10.0,
+        "grain_angle": 0.0,
+        "notches": [],
+        "internal_lines": []
+      }
+    ],
+    "sewing_lines": [],
+    "tacks": [],
+    "next_id": 5,
+    "next_sewing_id": 1,
+    "next_tack_id": 1
+  }
+}"#;
+
+    #[test]
+    fn version_5_files_load_with_no_topstitches_or_trims() {
+        use crate::document::TrimKind;
+        let mut doc = from_json(V5_FILE).unwrap();
+        assert!(doc.patterns[0].topstitches.is_empty());
+        assert!(doc.patterns[0].trims.is_empty());
+
+        let id = doc.patterns[0].id;
+        crate::command::AddTopstitch::new(id, vec![Vec2::new(10.0, 10.0), Vec2::new(90.0, 10.0)])
+            .apply(&mut doc);
+        crate::command::AddTrim::new(id, TrimKind::Button, Vec2::new(50.0, 50.0)).apply(&mut doc);
+        assert_eq!(doc.patterns[0].topstitches.len(), 1);
+        assert_eq!(doc.patterns[0].trims.len(), 1);
+
+        let resaved = to_json(&doc);
+        assert!(resaved.contains("\"version\": 6"));
         assert_eq!(from_json(&resaved).unwrap(), doc);
     }
 

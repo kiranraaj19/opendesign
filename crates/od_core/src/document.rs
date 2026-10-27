@@ -69,6 +69,32 @@ pub struct InternalLine {
     pub points: Vec<Vec2>,
 }
 
+/// A topstitch line: visually and structurally like an [`InternalLine`]
+/// (an open polyline in the pattern's own mm coordinates), but drawn and
+/// draped as a decorative/reinforcing line of stitching — typically offset
+/// a few mm in from a seamed edge — rather than a cut or fold mark.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Topstitch {
+    pub points: Vec<Vec2>,
+}
+
+/// What kind of point trim is placed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TrimKind {
+    #[default]
+    Button,
+    Snap,
+}
+
+/// A point trim (button, snap) placed on a pattern's outline or interior,
+/// in the pattern's own mm coordinates.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct Trim {
+    pub kind: TrimKind,
+    pub pos: Vec2,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct SewingLineId(pub u64);
@@ -206,6 +232,8 @@ pub struct Pattern {
     pub grain_angle: f32,
     pub notches: Vec<Notch>,
     pub internal_lines: Vec<InternalLine>,
+    pub topstitches: Vec<Topstitch>,
+    pub trims: Vec<Trim>,
 }
 
 /// Seam allowance given to new patterns, in mm.
@@ -222,6 +250,8 @@ impl Pattern {
             grain_angle: 0.0,
             notches: Vec::new(),
             internal_lines: Vec::new(),
+            topstitches: Vec::new(),
+            trims: Vec::new(),
         }
     }
 
@@ -275,6 +305,14 @@ impl Pattern {
                 *p = axis.reflect(*p, about);
             }
         }
+        for line in &mut self.topstitches {
+            for p in &mut line.points {
+                *p = axis.reflect(*p, about);
+            }
+        }
+        for trim in &mut self.trims {
+            trim.pos = axis.reflect(trim.pos, about);
+        }
         self.grain_angle = normalize_degrees(-self.grain_angle);
     }
 
@@ -283,6 +321,12 @@ impl Pattern {
         self.outline.iter_mut().for_each(|p| p.pos += delta);
         for line in &mut self.internal_lines {
             line.points.iter_mut().for_each(|p| *p += delta);
+        }
+        for line in &mut self.topstitches {
+            line.points.iter_mut().for_each(|p| *p += delta);
+        }
+        for trim in &mut self.trims {
+            trim.pos += delta;
         }
     }
 
@@ -710,10 +754,19 @@ mod tests {
         p.internal_lines.push(InternalLine {
             points: vec![Vec2::new(10.0, 10.0), Vec2::new(20.0, 10.0)],
         });
+        p.topstitches.push(Topstitch {
+            points: vec![Vec2::new(5.0, 5.0), Vec2::new(15.0, 5.0)],
+        });
+        p.trims.push(Trim {
+            kind: TrimKind::Button,
+            pos: Vec2::new(30.0, 10.0),
+        });
         p.mirror(Axis::Vertical, 0.0);
         assert_eq!(p.outline[1].pos, Vec2::new(-100.0, 0.0));
         assert_eq!(p.outline[1].kind, PointKind::Curve);
         assert_eq!(p.internal_lines[0].points[1], Vec2::new(-20.0, 10.0));
+        assert_eq!(p.topstitches[0].points[1], Vec2::new(-15.0, 5.0));
+        assert_eq!(p.trims[0].pos, Vec2::new(-30.0, 10.0));
         assert_eq!(p.grain_angle, -30.0);
         p.mirror(Axis::Horizontal, 10.0);
         assert_eq!(p.outline[2].pos, Vec2::new(-100.0, -30.0));

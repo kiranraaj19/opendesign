@@ -44,11 +44,13 @@ pub enum Tool {
     InternalLine,
     Notch,
     Sew,
+    Topstitch,
+    Trim,
 }
 
 impl Tool {
     /// Toolbar order, with button label, shortcut key and tooltip.
-    const BUTTONS: [(Tool, &'static str, Key, &'static str); 7] = [
+    const BUTTONS: [(Tool, &'static str, Key, &'static str); 9] = [
         (
             Tool::Select,
             "Select",
@@ -91,6 +93,18 @@ impl Tool {
             Key::S,
             "Click two edges to sew them together; click a sewn edge to unsew it (S)",
         ),
+        (
+            Tool::Topstitch,
+            "Topstitch",
+            Key::T,
+            "Draw a topstitch line inside a pattern (T)",
+        ),
+        (
+            Tool::Trim,
+            "Trim",
+            Key::B,
+            "Click to place a button; Shift+click for a snap; click a trim to remove it (B)",
+        ),
     ];
 
     pub fn name(self) -> &'static str {
@@ -102,6 +116,8 @@ impl Tool {
             Tool::InternalLine => "Internal line",
             Tool::Notch => "Notch",
             Tool::Sew => "Sew",
+            Tool::Topstitch => "Topstitch",
+            Tool::Trim => "Trim",
         }
     }
 }
@@ -1401,6 +1417,56 @@ mod tests {
         assert_eq!(last_step(&h), "Remove notch");
         press(&mut h, Modifiers::COMMAND, Key::Z);
         assert_eq!(h.state().session.doc.patterns[0].notches, notches);
+    }
+
+    #[test]
+    fn trim_tool_places_a_button_and_a_snap_and_removes_them() {
+        let mut h = harness();
+        click(&mut h, "+ Skirt panel");
+        click(&mut h, "Trim");
+        let outline = h.state().session.doc.patterns[0].outline.clone();
+        let inside = (outline[0].pos + outline[2].pos) * 0.5;
+
+        // A plain click places a button.
+        let at = screen(&h, inside.x, inside.y);
+        click_at(&mut h, at, Modifiers::NONE);
+        let trims = h.state().session.doc.patterns[0].trims.clone();
+        assert_eq!(trims.len(), 1);
+        assert_eq!(trims[0].kind, od_core::TrimKind::Button);
+
+        // Shift+click elsewhere places a snap.
+        let other = screen(&h, inside.x + 20.0, inside.y + 20.0);
+        click_at(&mut h, other, Modifiers::SHIFT);
+        let trims = h.state().session.doc.patterns[0].trims.clone();
+        assert_eq!(trims.len(), 2);
+        assert_eq!(trims[1].kind, od_core::TrimKind::Snap);
+
+        // Clicking an existing trim removes it.
+        click_at(&mut h, at, Modifiers::NONE);
+        assert_eq!(h.state().session.doc.patterns[0].trims.len(), 1);
+        assert_eq!(last_step(&h), "Remove trim");
+        press(&mut h, Modifiers::COMMAND, Key::Z);
+        assert_eq!(h.state().session.doc.patterns[0].trims.len(), 2);
+    }
+
+    #[test]
+    fn topstitch_tool_draws_a_line() {
+        let mut h = harness();
+        click(&mut h, "+ Skirt panel");
+        click(&mut h, "Topstitch");
+        let outline = h.state().session.doc.patterns[0].outline.clone();
+        let inside = (outline[0].pos + outline[2].pos) * 0.5;
+        // Far enough apart (default grid snap is 50 mm here) that the two
+        // points don't snap onto the same grid cell.
+        for (dx, dy) in [(-100.0, 0.0), (100.0, 0.0)] {
+            let at = screen(&h, inside.x + dx, inside.y + dy);
+            click_at(&mut h, at, Modifiers::NONE);
+        }
+        press(&mut h, Modifiers::NONE, Key::Enter);
+        let lines = &h.state().session.doc.patterns[0].topstitches;
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0].points.len(), 2);
+        assert_eq!(last_step(&h), "Add topstitch");
     }
 
     #[test]

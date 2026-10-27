@@ -6,7 +6,7 @@
 use std::ops::Range;
 
 use glam::Vec3;
-use od_core::document::{Document, PatternId};
+use od_core::document::{Document, PatternId, TrimKind};
 use od_render::pattern::Placement;
 use od_render::view::PlacedPattern;
 
@@ -26,6 +26,8 @@ pub struct Drape {
     /// structural (stretch) ones, in that fixed prefix — see
     /// [`Self::strain`].
     structural_count: usize,
+    trims: Vec<(TrimKind, usize)>,
+    topstitches: Vec<Vec<usize>>,
 }
 
 impl Drape {
@@ -50,6 +52,8 @@ impl Drape {
             pattern_ranges: scene.pattern_ranges,
             pattern_faces: scene.pattern_faces,
             structural_count,
+            trims: scene.trims,
+            topstitches: scene.topstitches,
         }
     }
 
@@ -96,6 +100,28 @@ impl Drape {
     /// Where each pin currently holds its particle, for drawing markers.
     pub fn pin_positions(&self) -> Vec<Vec3> {
         self.world.pins.iter().map(|p| p.target).collect()
+    }
+
+    /// Where each placed trim (button, snap) currently sits, for drawing
+    /// markers at its draped position.
+    pub fn trim_positions(&self) -> Vec<(TrimKind, Vec3)> {
+        self.trims
+            .iter()
+            .map(|&(kind, i)| (kind, self.world.particles[i].position))
+            .collect()
+    }
+
+    /// Where each placed topstitch line's points currently sit, in order,
+    /// for drawing a line through its draped position.
+    pub fn topstitch_positions(&self) -> Vec<Vec<Vec3>> {
+        self.topstitches
+            .iter()
+            .map(|line| {
+                line.iter()
+                    .map(|&i| self.world.particles[i].position)
+                    .collect()
+            })
+            .collect()
     }
 
     /// How stretched the fabric is at each particle: the largest fraction
@@ -258,6 +284,42 @@ mod tests {
         assert!(
             drape.world.particles[0].position.y < held.y - 0.1,
             "unpinned particle should fall"
+        );
+    }
+
+    #[test]
+    fn trim_and_topstitch_positions_follow_the_drape() {
+        use od_core::document::{Topstitch, Trim};
+        let mut doc = Document::new("test");
+        let mut panel = rectangle(1, 200.0, 300.0);
+        panel.trims.push(Trim {
+            kind: TrimKind::Snap,
+            pos: Vec2::new(0.0, 0.0),
+        });
+        panel.topstitches.push(Topstitch {
+            points: vec![Vec2::new(0.0, 0.0), Vec2::new(200.0, 0.0)],
+        });
+        doc.patterns.push(panel);
+        let placements = placements_for(&doc, 1.5);
+        let mut drape = Drape::new(&doc, &placements, &ClothConfig::default());
+
+        let trims = drape.trim_positions();
+        assert_eq!(trims.len(), 1);
+        assert_eq!(trims[0].0, TrimKind::Snap);
+        assert_eq!(trims[0].1, drape.world.particles[0].position);
+
+        let lines = drape.topstitch_positions();
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0].len(), 2);
+
+        for _ in 0..60 {
+            drape.step(1.0 / 60.0, 8);
+        }
+        // Positions track the particles they were anchored to as the
+        // cloth moves, not the pattern's flat starting position.
+        assert_eq!(
+            drape.trim_positions()[0].1,
+            drape.world.particles[0].position
         );
     }
 

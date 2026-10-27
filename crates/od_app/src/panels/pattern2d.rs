@@ -7,9 +7,10 @@ use egui::{
 };
 use od_core::document::TOLERANCE;
 use od_core::{
-    geometry, AddInternalLine, AddNotch, AddSewingLine, AddTack, Document, InsertPoint,
-    MovePattern, MovePoint, OutlinePoint, Pattern, PatternId, PatternValue, PointKind, RemoveNotch,
-    RemoveSewingLine, RemoveTack, SeamEdge, SeamPoint, SetPointKind, Vec2,
+    geometry, AddInternalLine, AddNotch, AddSewingLine, AddTack, AddTopstitch, AddTrim, Document,
+    InsertPoint, MovePattern, MovePoint, OutlinePoint, Pattern, PatternId, PatternValue, PointKind,
+    RemoveNotch, RemoveSewingLine, RemoveTack, RemoveTrim, SeamEdge, SeamPoint, SetPointKind,
+    TrimKind, Vec2,
 };
 
 use crate::app::{Session, Tool};
@@ -338,10 +339,13 @@ pub fn ui(ui: &mut egui::Ui, s: &mut Session) {
     let typing = ui.memory(|m| m.focused().is_some());
     match s.tool {
         Tool::Select | Tool::Rectangle => handle_drag_tools(&response, rect, s),
-        Tool::Pen | Tool::InternalLine => handle_draft(ui, &response, rect, s, typing),
+        Tool::Pen | Tool::InternalLine | Tool::Topstitch => {
+            handle_draft(ui, &response, rect, s, typing);
+        }
         Tool::EditPoints => handle_edit_points(&response, rect, s),
         Tool::Notch => handle_notch(&response, rect, s),
         Tool::Sew => handle_sew(&response, rect, s),
+        Tool::Trim => handle_trim(ui, &response, rect, s),
     }
 
     // Background and grid.
@@ -366,7 +370,13 @@ pub fn ui(ui: &mut egui::Ui, s: &mut Session) {
         Tool::InternalLine => {
             "Click inside a pattern to draw a line · Enter or double-click finishes · Esc cancels"
         }
+        Tool::Topstitch => {
+            "Click inside a pattern to draw a topstitch line · Enter or double-click finishes · Esc cancels"
+        }
         Tool::Notch => "Click an outline to add a notch · click a notch to remove it",
+        Tool::Trim => {
+            "Click to place a button (Shift+click: snap) · click a trim to remove it"
+        }
         Tool::Sew => match &s.canvas.sew_pending {
             Some(SewBuild::Edges { active, .. }) => {
                 if *active == 0 {
@@ -473,6 +483,7 @@ fn handle_draft(
     typing: bool,
 ) {
     let pen = s.tool == Tool::Pen;
+    let open_line = s.tool == Tool::InternalLine || s.tool == Tool::Topstitch;
     if response.clicked() {
         if let Some(screen) = response.interact_pointer_pos() {
             let raw = s.canvas.to_doc(rect, screen);
@@ -486,7 +497,7 @@ fn handle_draft(
                 finish_draft(s);
                 return;
             }
-            if !pen && s.canvas.draft.is_empty() {
+            if open_line && s.canvas.draft.is_empty() {
                 // A line belongs to the pattern it starts in (or on).
                 s.canvas.draft_owner = s
                     .doc
@@ -539,6 +550,11 @@ fn finish_draft(s: &mut Session) {
                     id,
                     draft.iter().map(|p| p.pos).collect(),
                 ));
+            }
+        }
+        Tool::Topstitch if draft.len() >= 2 => {
+            if let Some(id) = s.canvas.draft_owner.take() {
+                s.execute(AddTopstitch::new(id, draft.iter().map(|p| p.pos).collect()));
             }
         }
         _ => {}
@@ -663,6 +679,46 @@ fn handle_notch(response: &egui::Response, rect: Rect, s: &mut Session) {
             if let Some((at, _)) = geometry::distance_along(&poly, hit.pos) {
                 s.execute(AddNotch::new(hit.id, at));
             }
+        }
+    }
+}
+
+/// Place or remove a point trim (button or snap). A click on or inside a
+/// pattern with no trim nearby adds one (a button, or Shift+click for a
+/// snap); a click near an existing trim removes it instead.
+fn handle_trim(ui: &egui::Ui, response: &egui::Response, rect: Rect, s: &mut Session) {
+    if !response.clicked() {
+        return;
+    }
+    let Some(screen) = response.interact_pointer_pos() else {
+        return;
+    };
+    let p = s.canvas.to_doc(rect, screen);
+    let Some(id) = s
+        .doc
+        .pattern_at(p)
+        .or_else(|| s.canvas.edge_at(&s.doc, s.selection, p).map(|h| h.id))
+    else {
+        return;
+    };
+    s.selection = Some(id);
+    let Some(pattern) = s.doc.pattern(id) else {
+        return;
+    };
+    let reach = s.canvas.px(PICK_PX);
+    let existing = pattern
+        .trims
+        .iter()
+        .position(|t| t.pos.distance(p) <= reach);
+    match existing {
+        Some(index) => s.execute(RemoveTrim::new(id, index)),
+        None => {
+            let kind = if ui.input(|i| i.modifiers.shift) {
+                TrimKind::Snap
+            } else {
+                TrimKind::Button
+            };
+            s.execute(AddTrim::new(id, kind, p));
         }
     }
 }
@@ -909,6 +965,32 @@ fn draw_pattern(
         painter.add(Shape::line(pts, Stroke::new(1.5, pal.pattern_stroke)));
     }
 
+    // Topstitch lines: dashed, so they read as stitching rather than a
+    // dart or placement mark.
+    for line in &pattern.topstitches {
+        let pts: Vec<Pos2> = line.points.iter().map(|p| to_screen(*p)).collect();
+        painter.extend(Shape::dashed_line(
+            &pts,
+            Stroke::new(1.5, pal.preview),
+            5.0,
+            3.0,
+        ));
+    }
+
+    // Point trims: a filled dot for a button, a ring for a snap.
+    for trim in &pattern.trims {
+        let at = to_screen(trim.pos);
+        let r = canvas.px(4.0).max(3.0);
+        match trim.kind {
+            TrimKind::Button => {
+                painter.circle_filled(at, r, pal.selected);
+            }
+            TrimKind::Snap => {
+                painter.circle_stroke(at, r, Stroke::new(1.5, pal.selected));
+            }
+        }
+    }
+
     if let Some((min, max)) = geometry::bounds(&poly) {
         let angle = s
             .props
@@ -1125,7 +1207,7 @@ fn draw_overlays(painter: &egui::Painter, rect: Rect, s: &Session, pal: &theme::
         );
     }
 
-    let drafting = matches!(s.tool, Tool::Pen | Tool::InternalLine);
+    let drafting = matches!(s.tool, Tool::Pen | Tool::InternalLine | Tool::Topstitch);
     if drafting && !canvas.draft.is_empty() {
         let stroke = Stroke::new(1.5, pal.preview);
         let mut pts: Vec<Pos2> = canvas.draft.iter().map(|p| to_screen(p.pos)).collect();
