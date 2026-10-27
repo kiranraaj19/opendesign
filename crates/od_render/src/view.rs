@@ -68,20 +68,32 @@ pub struct FrameInput<'a, K> {
     pub patterns: &'a [PlacedPattern<K>],
     pub selected: Option<K>,
     pub theme: &'a Theme,
+    /// Per-vertex colors for `patterns`, in the same order (e.g. a strain
+    /// heatmap), overriding the theme fill for that pattern. An entry
+    /// that doesn't match its pattern's vertex count falls back to the
+    /// theme fill, as if absent.
+    pub pattern_colors: Option<&'a [Vec<Color>]>,
 }
 
 pub fn compose_frame<K: PartialEq>(input: FrameInput<'_, K>) -> Frame {
     let theme = input.theme;
     let mut frame = Frame::new(Globals::new(input.camera, input.aspect, input.encode_srgb));
     frame.avatar = input.avatar;
-    for p in input.patterns {
+    for (i, p) in input.patterns.iter().enumerate() {
         let selected = input.selected.as_ref() == Some(&p.key);
         let (fill, line) = if selected {
             (theme.selected, theme.selected)
         } else {
             (theme.pattern, theme.outline)
         };
-        frame.add_surface(&p.mesh, fill);
+        let varying = input
+            .pattern_colors
+            .and_then(|c| c.get(i))
+            .filter(|c| c.len() == p.mesh.positions.len());
+        match varying {
+            Some(colors) => frame.add_surface_varying(&p.mesh, colors),
+            None => frame.add_surface(&p.mesh, fill),
+        }
         frame.add_outline(&p.outline, p.normal, line);
     }
     frame.lines.extend(floor_grid(2.0, 0.1, 5, &theme.grid));
@@ -220,6 +232,7 @@ mod tests {
             patterns: &placed,
             selected: Some(2),
             theme: &theme,
+            pattern_colors: None,
         });
         let per_pattern = placed[0].mesh.positions.len();
         let selected = frame
@@ -231,5 +244,48 @@ mod tests {
         assert_eq!(frame.surfaces.len(), per_pattern * 4);
         assert!(!frame.shadow.is_empty());
         assert!(frame.lines.iter().any(|v| v.color == theme.grid.axis));
+    }
+
+    #[test]
+    fn pattern_colors_override_the_theme_fill_per_vertex() {
+        let (avatar, placed) = scene();
+        let theme = Theme {
+            avatar: [0.5; 4],
+            pattern: [0.2, 0.3, 0.6, 1.0],
+            selected: [1.0, 0.6, 0.1, 1.0],
+            outline: [0.6, 0.7, 0.9, 1.0],
+            grid: GridColors {
+                minor: [0.1; 4],
+                major: [0.2; 4],
+                axis: [0.3; 4],
+            },
+            shadow: [0.0, 0.0, 0.0, 0.3],
+        };
+        let per_pattern = placed[0].mesh.positions.len();
+        let heat: Color = [0.9, 0.1, 0.1, 1.0];
+        // One pattern gets per-vertex colors, matching the mesh's vertex
+        // count exactly; a mismatched entry (the empty second one) falls
+        // back to the theme fill, same as no entry at all.
+        let colors = vec![vec![heat; per_pattern], Vec::new()];
+        let frame = compose_frame(FrameInput {
+            camera: &OrbitCamera::default(),
+            aspect: 1.0,
+            encode_srgb: true,
+            avatar: None,
+            avatar_bounds: avatar.bounds().unwrap(),
+            patterns: &placed[..2],
+            selected: None,
+            theme: &theme,
+            pattern_colors: Some(&colors),
+        });
+        assert!(frame.surfaces[..per_pattern]
+            .iter()
+            .all(|v| v.color == heat));
+        assert!(
+            frame.surfaces[per_pattern..per_pattern * 2]
+                .iter()
+                .all(|v| v.color == theme.pattern),
+            "mismatched color count falls back to the theme fill"
+        );
     }
 }

@@ -4,6 +4,7 @@
 //! input into camera moves and selection, hosts the wgpu paint callback,
 //! and holds the avatar choice (session state, not saved in the document).
 
+use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -148,6 +149,9 @@ pub struct Viewport3D {
     /// While draping, clicking the garment pins or unpins the nearest
     /// point instead of selecting a pattern.
     pub pinning: bool,
+    /// Color the draped cloth by how stretched it is, instead of the
+    /// theme fill.
+    pub show_strain: bool,
 }
 
 impl Viewport3D {
@@ -175,6 +179,7 @@ impl Viewport3D {
             drape: None,
             draping: false,
             pinning: false,
+            show_strain: false,
         }
     }
 
@@ -403,10 +408,27 @@ fn view_buttons(ui: &mut egui::Ui, s: &mut Session) -> Option<ViewAction> {
         }
         ui.toggle_value(&mut s.viewport.pinning, "Pin")
             .on_hover_text("Click the draped cloth to pin or unpin a point in place");
+        ui.toggle_value(&mut s.viewport.show_strain, "Strain")
+            .on_hover_text(
+                "Color the cloth by how stretched it is: green relaxed, red overstretched",
+            );
     } else {
         s.viewport.pinning = false;
+        s.viewport.show_strain = false;
     }
     action
+}
+
+/// Green-to-red stretch heatmap: relaxed fabric at `0.0`, fully red by
+/// 15% over its rest length.
+fn strain_color(strain: f32) -> [f32; 4] {
+    let t = (strain / 0.15).clamp(0.0, 1.0);
+    let lerp = |a: u8, b: u8| (f32::from(a) + t * (f32::from(b) - f32::from(a))) as u8;
+    color(Color32::from_rgb(
+        lerp(40, 210),
+        lerp(160, 40),
+        lerp(40, 40),
+    ))
 }
 
 fn handle_input(
@@ -474,6 +496,18 @@ fn paint(ui: &mut egui::Ui, rect: Rect, s: &Session, placed: &[PlacedPattern<Pat
             },
             shadow: [0.0, 0.0, 0.0, if dark { 0.35 } else { 0.18 }],
         };
+        let strain_colors = if v.show_strain {
+            v.drape.as_ref()
+        } else {
+            None
+        }
+        .map(|drape| {
+            let by_pattern: HashMap<_, _> = drape.strain_colors(strain_color).into_iter().collect();
+            placed
+                .iter()
+                .map(|p| by_pattern.get(&p.key).cloned().unwrap_or_default())
+                .collect::<Vec<_>>()
+        });
         let frame = view::compose_frame(FrameInput {
             camera: &v.camera,
             aspect: aspect(rect),
@@ -487,6 +521,7 @@ fn paint(ui: &mut egui::Ui, rect: Rect, s: &Session, placed: &[PlacedPattern<Pat
             patterns: placed,
             selected: s.selection,
             theme: &theme,
+            pattern_colors: strain_colors.as_deref(),
         });
         painter.add(egui_wgpu::Callback::new_paint_callback(
             rect,
@@ -863,6 +898,28 @@ mod tests {
                 .is_empty(),
             "clicking the same spot again unpins it"
         );
+    }
+
+    #[test]
+    fn strain_toggle_only_appears_while_draping() {
+        let mut h = harness();
+        add_block(&mut h);
+        h.run();
+
+        // No drape yet: nothing to color by strain.
+        assert!(h.query_by_label("Strain").is_none());
+
+        h.get_by_label("Drape").click();
+        h.step();
+        h.step();
+        h.get_by_label("Strain").click();
+        h.step();
+        assert!(h.state().viewport.show_strain);
+
+        h.get_by_label("Reset drape").click();
+        h.run();
+        assert!(!h.state().viewport.show_strain, "resetting turns it off");
+        assert!(h.query_by_label("Strain").is_none());
     }
 
     #[test]

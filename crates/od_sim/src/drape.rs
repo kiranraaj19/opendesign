@@ -22,6 +22,10 @@ pub struct Drape {
     pub colliders: Vec<Collider>,
     pattern_ranges: Vec<(PatternId, Range<usize>)>,
     pattern_faces: Vec<(PatternId, Vec<[u32; 3]>)>,
+    /// `world.distance_constraints[..structural_count]` are the
+    /// structural (stretch) ones, in that fixed prefix — see
+    /// [`Self::strain`].
+    structural_count: usize,
 }
 
 impl Drape {
@@ -35,6 +39,7 @@ impl Drape {
         config: &ClothConfig,
     ) -> Self {
         let scene = cloth::build(doc, placements, config);
+        let structural_count = scene.structural.len();
         let mut world = World::new(scene.particles);
         world.distance_constraints = scene.structural;
         world.distance_constraints.extend(scene.bending);
@@ -44,6 +49,7 @@ impl Drape {
             colliders: Vec::new(),
             pattern_ranges: scene.pattern_ranges,
             pattern_faces: scene.pattern_faces,
+            structural_count,
         }
     }
 
@@ -90,6 +96,56 @@ impl Drape {
     /// Where each pin currently holds its particle, for drawing markers.
     pub fn pin_positions(&self) -> Vec<Vec3> {
         self.world.pins.iter().map(|p| p.target).collect()
+    }
+
+    /// How stretched the fabric is at each particle: the largest fraction
+    /// by which any structural constraint touching it currently exceeds
+    /// its rest length (`0.0` = relaxed or compressed, `0.5` = stretched
+    /// to 150% of rest length). Bending and stitch constraints aren't
+    /// stretch in this sense, so they're left out.
+    pub fn strain(&self) -> Vec<f32> {
+        let mut strain = vec![0.0_f32; self.world.particles.len()];
+        for c in &self.world.distance_constraints[..self.structural_count] {
+            if c.rest_length <= 1e-6 {
+                continue;
+            }
+            let dist = self.world.particles[c.a]
+                .position
+                .distance(self.world.particles[c.b].position);
+            let s = (dist / c.rest_length - 1.0).max(0.0);
+            strain[c.a] = strain[c.a].max(s);
+            strain[c.b] = strain[c.b].max(s);
+        }
+        strain
+    }
+
+    /// Per-pattern vertex colors from [`Self::strain`], via `color_for`,
+    /// matching [`Self::placed_patterns`]'s double-sided mesh layout
+    /// (every pattern's vertices, front half then an identical back
+    /// half). Patterns with no faces are left out, as in
+    /// `placed_patterns`.
+    pub fn strain_colors(
+        &self,
+        color_for: impl Fn(f32) -> [f32; 4],
+    ) -> Vec<(PatternId, Vec<[f32; 4]>)> {
+        let strain = self.strain();
+        self.pattern_ranges
+            .iter()
+            .filter(|(id, _)| {
+                self.pattern_faces
+                    .iter()
+                    .any(|(pid, f)| pid == id && !f.is_empty())
+            })
+            .map(|(id, range)| {
+                let front: Vec<[f32; 4]> = strain[range.clone()]
+                    .iter()
+                    .map(|&s| color_for(s))
+                    .collect();
+                let mut colors = front.clone();
+                colors.extend(front);
+                (*id, colors)
+            })
+            .collect()
     }
 
     /// The current draped shape, one [`PlacedPattern`] per pattern that
@@ -213,6 +269,51 @@ mod tests {
         let mut drape = Drape::new(&doc, &placements, &ClothConfig::default());
         assert!(!drape.toggle_pin_near(PatternId(99), Vec3::ZERO));
         assert!(drape.pin_positions().is_empty());
+    }
+
+    #[test]
+    fn strain_is_zero_at_rest() {
+        let mut doc = Document::new("test");
+        doc.patterns.push(rectangle(1, 200.0, 300.0));
+        let placements = placements_for(&doc, 1.5);
+        let drape = Drape::new(&doc, &placements, &ClothConfig::default());
+        assert!(drape.strain().iter().all(|&s| s < 1e-4), "starts relaxed");
+    }
+
+    #[test]
+    fn strain_rises_when_a_structural_edge_is_stretched() {
+        let mut doc = Document::new("test");
+        doc.patterns.push(rectangle(1, 200.0, 300.0));
+        let placements = placements_for(&doc, 1.5);
+        let mut drape = Drape::new(&doc, &placements, &ClothConfig::default());
+        // Pull corner 1 far from its neighbours without giving the solver
+        // a chance to correct it, as if caught mid-overstretch.
+        drape.world.particles[1].position += Vec3::new(5.0, 0.0, 0.0);
+        let strain = drape.strain();
+        assert!(
+            strain[1] > 0.5,
+            "corner 1 should read as heavily stretched: {strain:?}"
+        );
+        assert!(
+            strain[3] < 1e-4,
+            "the untouched opposite corner stays relaxed: {strain:?}"
+        );
+    }
+
+    #[test]
+    fn strain_colors_cover_every_particle_on_both_mesh_sides() {
+        let mut doc = Document::new("test");
+        doc.patterns.push(rectangle(1, 200.0, 300.0));
+        let placements = placements_for(&doc, 1.5);
+        let drape = Drape::new(&doc, &placements, &ClothConfig::default());
+        let colors = drape.strain_colors(|s| [s, s, s, 1.0]);
+        assert_eq!(colors.len(), 1);
+        assert_eq!(colors[0].0, PatternId(1));
+        assert_eq!(
+            colors[0].1.len(),
+            8,
+            "4 particles, doubled for both mesh sides"
+        );
     }
 
     #[test]

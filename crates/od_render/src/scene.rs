@@ -139,6 +139,23 @@ impl Frame {
             .extend(mesh.indices.iter().map(|i| i + base));
     }
 
+    /// Like [`Self::add_surface`], but with one color per vertex (e.g. a
+    /// strain heatmap) instead of a single fill. `colors` must be the
+    /// same length as `mesh.positions`.
+    pub fn add_surface_varying(&mut self, mesh: &Mesh, colors: &[Color]) {
+        let base = self.surfaces.len() as u32;
+        self.surfaces
+            .extend(mesh.positions.iter().zip(&mesh.normals).zip(colors).map(
+                |((p, n), &color)| LitVertex {
+                    position: p.to_array(),
+                    normal: n.to_array(),
+                    color,
+                },
+            ));
+        self.surface_indices
+            .extend(mesh.indices.iter().map(|i| i + base));
+    }
+
     /// A closed outline, drawn just off both faces of a flat piece so the
     /// surface never hides it.
     pub fn add_outline(&mut self, outline: &[Vec3], normal: Vec3, color: Color) {
@@ -296,5 +313,18 @@ mod tests {
         assert_eq!(*frame.surface_indices.iter().max().unwrap(), 15);
         frame.add_outline(&[Vec3::ZERO, Vec3::X, Vec3::Y], Vec3::Z, [1.0; 4]);
         assert_eq!(frame.lines.len(), 12, "3 edges, both sides");
+    }
+
+    #[test]
+    fn surface_varying_colors_each_vertex_separately() {
+        let mesh = crate::mesh::tests::cube();
+        let colors: Vec<Color> = (0..mesh.positions.len()).map(|i| [i as f32; 4]).collect();
+        let mut frame = Frame::new(Globals::new(&OrbitCamera::default(), 1.0, false));
+        frame.add_surface_varying(&mesh, &colors);
+        assert_eq!(frame.surfaces.len(), mesh.positions.len());
+        for (v, &c) in frame.surfaces.iter().zip(&colors) {
+            assert_eq!(v.color, c);
+        }
+        assert_eq!(frame.surface_indices, mesh.indices);
     }
 }
