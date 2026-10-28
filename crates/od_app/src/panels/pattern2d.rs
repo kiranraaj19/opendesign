@@ -5,12 +5,12 @@
 use egui::{
     Align2, Color32, FontId, Key, PointerButton, Pos2, Rect, Sense, Shape, Stroke, Vec2 as Px,
 };
-use od_core::document::TOLERANCE;
+use od_core::document::{normalize_degrees, rotate_point, TOLERANCE};
 use od_core::{
     geometry, AddInternalLine, AddNotch, AddSewingLine, AddTack, AddTopstitch, AddTrim, Document,
     InsertPoint, MovePattern, MovePoint, OutlinePoint, Pattern, PatternId, PatternValue, PointKind,
-    RemoveNotch, RemoveSewingLine, RemoveTack, RemoveTrim, SeamEdge, SetPointKind, SetSeamEdge,
-    SewingLine, SewingLineId, Side, TackId, TackPoint, TackTarget, TrimKind, Vec2,
+    RemoveNotch, RemoveSewingLine, RemoveTack, RemoveTrim, RotatePattern, SeamEdge, SetPointKind,
+    SetSeamEdge, SewingLine, SewingLineId, Side, TackId, TackPoint, TackTarget, TrimKind, Vec2,
 };
 
 use crate::app::{Session, Tool};
@@ -92,6 +92,15 @@ enum Drag {
     Move {
         ids: Vec<PatternId>,
         delta: Vec2,
+    },
+    /// Turning every selected pattern about its own centre by the angle
+    /// the pointer has swept around `pivot` (the main pattern's centre)
+    /// since `from`.
+    Rotate {
+        ids: Vec<PatternId>,
+        pivot: Vec2,
+        from: Vec2,
+        degrees: f32,
     },
     /// Selecting the patterns a box touches, adding to the selection if
     /// `add`.
@@ -592,6 +601,32 @@ pub fn ui(ui: &mut egui::Ui, s: &mut Session) {
     );
 }
 
+/// Radius of the rotation handle, in screen pixels.
+const HANDLE_PX: f32 = 6.0;
+/// How far the rotation handle sits above the main selected pattern.
+const HANDLE_GAP_PX: f32 = 28.0;
+
+/// With the Select tool and something unlocked selected: the main
+/// pattern's centre and, above its top edge, the handle that turns the
+/// selection. In document space.
+fn rotate_handle(s: &Session) -> Option<(Vec2, Vec2)> {
+    if s.tool != Tool::Select || s.unlocked_selection().is_empty() {
+        return None;
+    }
+    let id = s.selection.primary()?;
+    let (min, max) = s.doc.pattern(id)?.bounds()?;
+    let centre = (min + max) * 0.5;
+    Some((
+        centre,
+        Vec2::new(centre.x, min.y - s.canvas.px(HANDLE_GAP_PX)),
+    ))
+}
+
+#[cfg(test)]
+pub fn rotate_handle_for_tests(s: &Session) -> Option<(Vec2, Vec2)> {
+    rotate_handle(s)
+}
+
 /// Whether Shift or Ctrl (Cmd on macOS) is held, to add to the selection.
 fn adding(response: &egui::Response) -> bool {
     response
@@ -638,6 +673,19 @@ fn handle_drag_tools(response: &egui::Response, rect: Rect, s: &mut Session) {
     if response.drag_started_by(PointerButton::Primary) {
         if let (Some(origin), Some(p)) = (press_origin(response, rect, &s.canvas), pointer) {
             s.canvas.drag = match s.tool {
+                Tool::Select
+                    if rotate_handle(s).is_some_and(|(_, h)| {
+                        h.distance(origin) <= s.canvas.px(HANDLE_PX + 4.0)
+                    }) =>
+                {
+                    let (pivot, _) = rotate_handle(s).unwrap_or_default();
+                    Some(Drag::Rotate {
+                        ids: s.unlocked_selection(),
+                        pivot,
+                        from: origin,
+                        degrees: 0.0,
+                    })
+                }
                 Tool::Select => {
                     // The selected seam's ends come first: they sit on
                     // outlines, over the pattern.
@@ -700,8 +748,23 @@ fn handle_drag_tools(response: &egui::Response, rect: Rect, s: &mut Session) {
                 s.canvas.drag = Some(Drag::SeamEnd { end, edge: moved });
             }
         }
+        let coarse = response.ctx.input(|i| i.modifiers.shift);
         match &mut s.canvas.drag {
             Some(Drag::Move { delta, .. }) => *delta += Vec2::new(step.x, step.y),
+            Some(Drag::Rotate {
+                pivot,
+                from,
+                degrees,
+                ..
+            }) => {
+                if let Some(p) = pointer {
+                    let (a, b) = (*from - *pivot, p - *pivot);
+                    let swept = b.y.atan2(b.x) - a.y.atan2(a.x);
+                    // Whole degrees, or 15° steps with Shift held.
+                    let step = if coarse { 15.0 } else { 1.0 };
+                    *degrees = normalize_degrees((swept.to_degrees() / step).round() * step);
+                }
+            }
             Some(Drag::Select { end, .. }) => {
                 if let Some(p) = pointer {
                     *end = p;
@@ -722,6 +785,11 @@ fn handle_drag_tools(response: &egui::Response, rect: Rect, s: &mut Session) {
             Some(Drag::Move { ids, delta }) if delta != Vec2::ZERO => {
                 s.for_each(ids, "Move", "patterns", |id| {
                     Box::new(MovePattern::new(id, delta))
+                });
+            }
+            Some(Drag::Rotate { ids, degrees, .. }) if degrees != 0.0 => {
+                s.for_each(ids, "Rotate", "patterns", |id| {
+                    Box::new(RotatePattern::new(id, degrees))
                 });
             }
             Some(Drag::Select { start, end, add }) => {
@@ -1227,6 +1295,11 @@ pub fn seam_color(s: &Session, index: usize, pal: &theme::Palette) -> Color32 {
 /// The pattern as it should look this frame, with any drag in progress.
 fn previewed<'a>(s: &Session, pattern: &'a Pattern) -> std::borrow::Cow<'a, Pattern> {
     match &s.canvas.drag {
+        Some(Drag::Rotate { ids, degrees, .. }) if ids.contains(&pattern.id) => {
+            let mut p = pattern.clone();
+            p.rotate(*degrees, p.center());
+            std::borrow::Cow::Owned(p)
+        }
         Some(Drag::Move { ids, delta }) if ids.contains(&pattern.id) => {
             let mut p = pattern.clone();
             p.translate(*delta);
@@ -1463,6 +1536,10 @@ fn draw_sewing_lines(painter: &egui::Painter, rect: Rect, s: &Session, pal: &the
     // Tacked points move with a pattern being dragged.
     let at = |point: &TackPoint| match &s.canvas.drag {
         Some(Drag::Move { ids, delta }) if ids.contains(&point.pattern) => point.at + *delta,
+        Some(Drag::Rotate { ids, degrees, .. }) if ids.contains(&point.pattern) => s
+            .doc
+            .pattern(point.pattern)
+            .map_or(point.at, |p| rotate_point(point.at, *degrees, p.center())),
         _ => point.at,
     };
     let mark = |at: Pos2, color: Color32| {
@@ -1640,6 +1717,30 @@ fn draw_overlays(painter: &egui::Painter, rect: Rect, s: &Session, pal: &theme::
             pal.preview,
         );
     };
+
+    if let Some((centre, handle)) = rotate_handle(s) {
+        let (min_y, color) = (
+            s.selection
+                .primary()
+                .and_then(|id| s.doc.pattern(id)?.bounds())
+                .map_or(centre.y, |(min, _)| min.y),
+            pal.selected,
+        );
+        let top = to_screen(Vec2::new(centre.x, min_y));
+        let at = to_screen(handle);
+        painter.line_segment([top, at], Stroke::new(1.0, color));
+        painter.circle_filled(at, HANDLE_PX, pal.canvas_bg);
+        painter.circle_stroke(at, HANDLE_PX, Stroke::new(2.0, color));
+    }
+    if let Some(Drag::Rotate { degrees, pivot, .. }) = &canvas.drag {
+        painter.text(
+            to_screen(*pivot) + Px::new(12.0, -12.0),
+            Align2::LEFT_BOTTOM,
+            format!("{degrees:+.0}°"),
+            FontId::monospace(12.0),
+            pal.preview,
+        );
+    }
 
     if let Some(Drag::Select { start, end, .. }) = &canvas.drag {
         let box_rect = Rect::from_two_pos(to_screen(*start), to_screen(*end));

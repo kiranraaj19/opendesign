@@ -2,9 +2,9 @@
 //! apply itself and how to reverse that change.
 
 use crate::document::{
-    normalize_degrees, Axis, Document, Fabric, Grading, InternalLine, Notch, OutlinePoint, Pattern,
-    PatternId, PointKind, SeamEdge, SewingLine, SewingLineId, Tack, TackId, TackPoint, TackTarget,
-    Topstitch, Trim, TrimKind,
+    normalize_degrees, rotate_point, Axis, Document, Fabric, Grading, InternalLine, Notch,
+    OutlinePoint, Pattern, PatternId, PointKind, SeamEdge, SewingLine, SewingLineId, Tack, TackId,
+    TackPoint, TackTarget, Topstitch, Trim, TrimKind,
 };
 use crate::geometry::Vec2;
 use crate::seam::{self, Side};
@@ -953,6 +953,52 @@ impl Command for MirrorPattern {
     }
 }
 
+/// Turn a pattern in place about the centre of its bounds.
+pub struct RotatePattern {
+    id: PatternId,
+    degrees: f32,
+    /// The pattern and tacks before turning, restored exactly on undo.
+    before: Option<Pattern>,
+    tacks: Vec<Tack>,
+}
+
+impl RotatePattern {
+    /// Turn `degrees` clockwise on screen.
+    pub fn new(id: PatternId, degrees: f32) -> Self {
+        Self {
+            id,
+            degrees,
+            before: None,
+            tacks: Vec::new(),
+        }
+    }
+}
+
+impl Command for RotatePattern {
+    fn label(&self) -> String {
+        "Rotate pattern".into()
+    }
+
+    fn apply(&mut self, doc: &mut Document) {
+        let degrees = self.degrees;
+        if let Some(p) = doc.pattern_mut(self.id) {
+            self.before = Some(p.clone());
+            let c = p.center();
+            p.rotate(degrees, c);
+            self.tacks = move_tack_points(doc, self.id, |p| rotate_point(p, degrees, c));
+        }
+    }
+
+    fn undo(&mut self, doc: &mut Document) {
+        if let Some(before) = self.before.take() {
+            if let Some(p) = doc.pattern_mut(self.id) {
+                *p = before;
+                doc.tacks = std::mem::take(&mut self.tacks);
+            }
+        }
+    }
+}
+
 /// Copy a pattern. A mirrored copy is reflected about the source's right
 /// (or bottom) edge, so it sits beside it like the other half of a fold.
 pub struct DuplicatePattern {
@@ -1359,6 +1405,45 @@ mod tests {
         round_trip(SetPatternFlag::new(ID, PatternFlag::Locked, true), |d| {
             assert!(pat(d).locked);
         });
+    }
+
+    #[test]
+    fn rotating_turns_markings_and_tacks_and_four_quarters_go_round() {
+        let (mut doc, id) = doc_with_rect();
+        let p = doc.pattern_mut(id).unwrap();
+        p.notches.push(Notch { at: 0.5 });
+        p.trims.push(Trim {
+            kind: TrimKind::Button,
+            pos: Vec2::new(10.0, 25.0),
+        });
+        let tack_at = TackPoint {
+            pattern: id,
+            at: Vec2::new(90.0, 25.0),
+        };
+        AddTack::new(tack_at, TackTarget::Avatar([0.0; 3])).apply(&mut doc);
+        let before = doc.clone();
+
+        let mut turn = RotatePattern::new(id, 90.0);
+        turn.apply(&mut doc);
+        let p = doc.pattern(id).unwrap();
+        // A 100 × 50 rectangle centred on (50, 25) becomes 50 × 100.
+        let (min, max) = p.bounds().unwrap();
+        assert_eq!((min, max), (Vec2::new(25.0, -25.0), Vec2::new(75.0, 75.0)));
+        assert_eq!(p.grain_angle, 90.0);
+        assert_eq!(p.trims[0].pos, Vec2::new(50.0, -15.0));
+        assert_eq!(
+            p.notches, before.patterns[0].notches,
+            "notches ride the outline"
+        );
+        assert_eq!(doc.tacks[0].a.at, Vec2::new(50.0, 65.0));
+        turn.undo(&mut doc);
+        assert_eq!(doc, before);
+
+        for _ in 0..4 {
+            RotatePattern::new(id, 90.0).apply(&mut doc);
+        }
+        assert_eq!(doc.patterns, before.patterns);
+        assert_eq!(doc.tacks, before.tacks);
     }
 
     #[test]

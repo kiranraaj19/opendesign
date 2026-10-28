@@ -5,8 +5,8 @@ use egui_dock::{DockArea, DockState, NodeIndex, Style, TabViewer};
 use od_core::{
     AddPattern, AddTack, Axis, Batch, Clip, Command, DeletePattern, DeletePoint, Document,
     DuplicatePattern, History, MirrorPattern, OutlinePoint, Paste, PatternFlag, PatternId,
-    RemoveSewingLine, RemoveTack, SetPatternFlag, SetPointKind, SewingLine, SewingLineId, TackId,
-    TackPoint, TackTarget, Vec2,
+    RemoveSewingLine, RemoveTack, RotatePattern, SetPatternFlag, SetPointKind, SewingLine,
+    SewingLineId, TackId, TackPoint, TackTarget, Vec2,
 };
 
 use crate::files::{Discard, FileState, RECENT_KEY};
@@ -339,6 +339,15 @@ impl Session {
         let ids = self.unlocked_selection();
         self.for_each(ids, "Flip", "patterns", |id| {
             Box::new(MirrorPattern::new(id, axis))
+        });
+    }
+
+    /// Turn each selected, unlocked pattern `degrees` clockwise about its
+    /// own centre, as one undo step.
+    pub fn rotate_selected(&mut self, degrees: f32) {
+        let ids = self.unlocked_selection();
+        self.for_each(ids, "Rotate", "patterns", |id| {
+            Box::new(RotatePattern::new(id, degrees))
         });
     }
 
@@ -2588,5 +2597,40 @@ mod tests {
         assert_eq!(s.doc.patterns.len(), 1);
         assert_eq!(s.doc.patterns[0].id, right);
         assert_eq!(s.selection.ids(), [right]);
+    }
+
+    #[test]
+    fn pieces_turn_with_the_handle_or_properties_buttons() {
+        let mut h = harness();
+        let [left, _] = two_pieces(&mut h);
+        let at = screen(&h, 50.0, 40.0);
+        click_at(&mut h, at, Modifiers::NONE);
+        // The handle sits above the piece's top edge, at its centre: drag
+        // it round to the right of the centre for a quarter turn.
+        let (centre, handle) = {
+            let s = &h.state().session;
+            let (c, handle) = crate::panels::pattern2d::rotate_handle_for_tests(s).unwrap();
+            (c, handle)
+        };
+        let reach = centre.y - handle.y;
+        let (from, to) = (
+            screen(&h, handle.x, handle.y),
+            screen(&h, centre.x + reach, centre.y),
+        );
+        h.event(egui::Event::ModifiersChanged(Modifiers::SHIFT));
+        drag(&mut h, from, to);
+        h.event(egui::Event::ModifiersChanged(Modifiers::NONE));
+        assert_eq!(last_step(&h), "Rotate pattern");
+        let p = h.state().session.doc.pattern(left).unwrap();
+        assert_eq!(p.grain_angle, 90.0);
+        let (min, max) = p.bounds().unwrap();
+        assert_near(max - min, Vec2::new(80.0, 100.0));
+
+        // Properties turns it back.
+        h.get_by_label("-90°").click();
+        h.run();
+        let p = h.state().session.doc.pattern(left).unwrap();
+        assert_eq!(p.grain_angle, 0.0);
+        assert_near(p.outline[0].pos, Vec2::ZERO);
     }
 }

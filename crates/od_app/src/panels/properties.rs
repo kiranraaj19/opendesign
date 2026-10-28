@@ -153,6 +153,20 @@ fn several_section(ui: &mut egui::Ui, s: &mut Session) {
 /// Flip, copy and delete, acting on every selected pattern.
 fn selection_actions(ui: &mut egui::Ui, s: &mut Session, delete: &str) {
     ui.add_space(8.0);
+    ui.label("Rotate");
+    ui.horizontal_wrapped(|ui| {
+        for (label, degrees, tip) in [
+            ("-90°", -90.0, "Turn a quarter turn anticlockwise"),
+            ("-45°", -45.0, "Turn an eighth of a turn anticlockwise"),
+            ("+45°", 45.0, "Turn an eighth of a turn clockwise"),
+            ("+90°", 90.0, "Turn a quarter turn clockwise"),
+        ] {
+            if ui.button(label).on_hover_text(tip).clicked() {
+                s.rotate_selected(degrees);
+            }
+        }
+    });
+    ui.add_space(8.0);
     ui.label("Symmetry");
     ui.horizontal_wrapped(|ui| {
         if ui.button("Flip left-right").clicked() {

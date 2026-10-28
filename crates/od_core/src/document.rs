@@ -562,6 +562,23 @@ impl Pattern {
         self.grain_angle = normalize_degrees(-self.grain_angle);
     }
 
+    /// Turn everything `degrees` clockwise on screen about `about`. The
+    /// grainline turns with it.
+    pub fn rotate(&mut self, degrees: f32, about: Vec2) {
+        let turn = |p: Vec2| rotate_point(p, degrees, about);
+        self.outline.iter_mut().for_each(|p| p.pos = turn(p.pos));
+        for line in &mut self.internal_lines {
+            line.points.iter_mut().for_each(|p| *p = turn(*p));
+        }
+        for line in &mut self.topstitches {
+            line.points.iter_mut().for_each(|p| *p = turn(*p));
+        }
+        for trim in &mut self.trims {
+            trim.pos = turn(trim.pos);
+        }
+        self.grain_angle = normalize_degrees(self.grain_angle + degrees);
+    }
+
     /// Move everything by `delta`.
     pub fn translate(&mut self, delta: Vec2) {
         self.outline.iter_mut().for_each(|p| p.pos += delta);
@@ -722,6 +739,24 @@ impl Pattern {
             ..self.clone()
         }
     }
+}
+
+/// `p` turned `degrees` clockwise on screen (y points down) about `about`.
+/// Quarter turns are exact, so four of them land back where they started.
+pub fn rotate_point(p: Vec2, degrees: f32, about: Vec2) -> Vec2 {
+    let quarter = degrees / 90.0;
+    let (sin, cos) = if quarter == quarter.round() {
+        match (quarter as i32).rem_euclid(4) {
+            0 => (0.0, 1.0),
+            1 => (1.0, 0.0),
+            2 => (0.0, -1.0),
+            _ => (-1.0, 0.0),
+        }
+    } else {
+        degrees.to_radians().sin_cos()
+    };
+    let d = p - about;
+    about + Vec2::new(d.x * cos - d.y * sin, d.x * sin + d.y * cos)
 }
 
 /// An angle in degrees brought into -180..180.

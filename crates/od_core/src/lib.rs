@@ -22,8 +22,8 @@ pub use command::{
     Command, DeletePattern, DeletePoint, DuplicatePattern, FlipSeamSide, InsertPoint,
     MirrorPattern, MovePattern, MovePoint, PatternFlag, PatternValue, RemoveInternalLine,
     RemoveNotch, RemoveSewingLine, RemoveTack, RemoveTopstitch, RemoveTrim, RenamePattern,
-    SetFabric, SetGrading, SetParticleDistance, SetPatternFlag, SetPatternValue, SetPointKind,
-    SetSeamEdge, PARTICLE_DISTANCE_RANGE,
+    RotatePattern, SetFabric, SetGrading, SetParticleDistance, SetPatternFlag, SetPatternValue,
+    SetPointKind, SetSeamEdge, PARTICLE_DISTANCE_RANGE,
 };
 pub use document::{
     Arrangement, Axis, Document, Fabric, FabricTexture, Grading, InternalLine, Notch, OutlinePoint,
