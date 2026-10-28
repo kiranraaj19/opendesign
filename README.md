@@ -48,10 +48,10 @@ without this step.
 | Internal lines | Internal line tool (`L`): click inside a pattern, `Enter` or double-click to finish |
 | Round a corner, set an edge's length | Edit points tool: pick a corner, then Properties → Round corner (distance along each edge) or Edge to next corner (type a length; the far end moves along the edge) |
 | Points where a line crosses the outline | Properties → Internal lines → Add outline points |
-| Darts | Dart tool (`D`): click an outline to cut a V into it, its legs sewn together; drag inside a pattern, tip to tip, for a diamond dart whose legs are stitched when draping. Width and depth in Properties while the tool is in use |
-| Fold lines, pleats | Properties → Internal lines: make a line a Valley or Mountain fold and set its angle. Pleat tool (`Q`): drag where the first fold goes; knife or box pleats are laid right across the piece, stepping to the right of the drag |
+| Darts | Dart tool (`D`): click an outline to cut a V into it, its legs sewn together; drag inside a pattern, tip to tip, for a diamond dart whose legs are stitched when draping. Width and depth in Properties while the tool is in use; a placed diamond dart's length and width are edited in the pattern's Properties |
+| Fold lines, pleats | Properties → Internal lines: make a line a Valley or Mountain fold and set its angle and how firmly it holds it. Pleat tool (`Q`): drag where the first fold goes; knife or box pleats are laid right across the piece, stepping to the right of the drag, and (with Tack the top) tacked shut where the drag started |
 | Cut and merge pieces | Properties → Internal lines → Cut (or Cut and sew) cuts a piece along a line that crosses its outline. Select a seam between two pieces and Properties → Merge pieces joins them along it |
-| Linked (symmetric) copies | Properties → Linked mirrored copy: a mirror image that changes whenever either one is edited; Unlink stops it |
+| Linked (symmetric) copies | Properties → Linked mirrored copy: a mirror image that changes whenever either one is edited, fabric, grainline, seam allowance and grading included; Unlink stops it |
 | Flip, mirror, duplicate | Properties → Symmetry; `Ctrl+D` duplicates |
 | Rotate a piece | Select tool: drag the round handle above it (`Shift` for 15° steps), or Properties → Rotate (±45°, ±90°) |
 | Cut, copy, paste | `Ctrl+X` / `Ctrl+C` / `Ctrl+V` (or Edit menu): copies keep the seams and tacks between them; `Ctrl+Shift+V` pastes a mirror image beside them |
@@ -125,7 +125,13 @@ cargo test --workspace
 ```
 
 `od_app` tests use `egui_kittest` to click and type through the real UI
-without opening a window.
+without opening a window. One ignored test renders screenshots of the
+dart, pleat and linked-copy tools with wgpu (a software adapter will do)
+into `$OD_SHOTS`:
+
+```bash
+OD_SHOTS=shots cargo test -p od_app screenshots_of -- --ignored
+```
 
 ## Roadmap
 
