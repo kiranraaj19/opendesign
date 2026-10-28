@@ -9,8 +9,9 @@ use crate::document::{
 use crate::geometry::Vec2;
 
 /// Bring every linked copy back in line with its source: outline, internal
-/// lines, darts, topstitches, trims and notches, moved by the link's
-/// transform. A copy whose source is gone (or is itself a copy) stops
+/// lines, darts, topstitches, trims, notches, grainline and grading moved
+/// by the link's transform, and the same fabric and seam allowance. A
+/// copy whose source is gone (or is itself a copy) stops
 /// being linked. Seams on a copy whose point count changed are placed
 /// again by position.
 pub fn sync(doc: &mut Document) {
@@ -43,6 +44,16 @@ pub fn sync(doc: &mut Document) {
         copy.topstitches = source.topstitches.clone();
         copy.trims = source.trims.clone();
         copy.notches = source.notches.clone();
+        copy.fabric = source.fabric.clone();
+        copy.seam_allowance = source.seam_allowance;
+        copy.grain_angle = link.grain_from_source(source.grain_angle);
+        copy.grading.point_deltas = source
+            .grading
+            .point_deltas
+            .iter()
+            .zip(&source.outline)
+            .map(|(d, p)| f(p.pos + *d) - f(p.pos))
+            .collect();
         for line in &mut copy.internal_lines {
             line.points.iter_mut().for_each(|p| *p = f(*p));
         }
@@ -312,6 +323,48 @@ mod tests {
         assert_eq!(doc.sewing_lines[0].a[0].start, 2.0);
         history.redo(&mut doc);
         assert_eq!(doc, snapshot);
+    }
+
+    #[test]
+    fn a_linked_copy_follows_fabric_grain_allowance_and_grading() {
+        use crate::command::{PatternValue, SetFabric, SetGrading, SetPatternValue};
+        use crate::document::{Fabric, Grading};
+        let (mut doc, mut history, source, copy) = setup();
+        history.execute(
+            &mut doc,
+            Box::new(SetPatternValue::new(source, PatternValue::GrainAngle, 20.0)),
+        );
+        history.execute(
+            &mut doc,
+            Box::new(SetPatternValue::new(
+                source,
+                PatternValue::SeamAllowance,
+                15.0,
+            )),
+        );
+        history.execute(&mut doc, Box::new(SetFabric::new(source, Fabric::denim())));
+        let outline = doc.pattern(source).unwrap().outline.clone();
+        history.execute(
+            &mut doc,
+            Box::new(SetGrading::new(
+                source,
+                Grading::uniform_scale(&outline, 10.0),
+            )),
+        );
+        let c = doc.pattern(copy).unwrap();
+        // Mirrored left to right, so the grainline leans the other way.
+        assert!((c.grain_angle + 20.0).abs() < 1e-3, "{}", c.grain_angle);
+        assert_eq!(c.seam_allowance, 15.0);
+        assert_eq!(c.fabric, Fabric::denim());
+        // The copy grades as the mirror image of its source.
+        let mut mirrored = doc.pattern(source).unwrap().graded(1);
+        mirrored.mirror(Axis::Vertical, 100.0);
+        for (x, y) in c.graded_outline(1).iter().zip(&mirrored.outline) {
+            assert!(x.pos.distance(y.pos) < 1e-3, "{x:?} {y:?}");
+        }
+        // And the grain maps back.
+        let link = c.link.unwrap();
+        assert!((link.grain_to_source(c.grain_angle) - 20.0).abs() < 1e-3);
     }
 
     #[test]

@@ -534,7 +534,14 @@ fn value_edit(
         if let Some(value) = s.props.preview(id, field) {
             s.props.pending = None;
             if value != current {
-                s.execute(SetPatternValue::new(id, field, value));
+                // A linked copy's are its source's, the grainline mapped
+                // back through the link.
+                let (target, link) = s.edit_target(id);
+                let value = match (link, field) {
+                    (Some(link), PatternValue::GrainAngle) => link.grain_to_source(value),
+                    _ => value,
+                };
+                s.execute(SetPatternValue::new(target, field, value));
             }
         }
     }
@@ -554,7 +561,8 @@ fn fabric_section(ui: &mut egui::Ui, s: &mut Session, id: PatternId) {
         for preset in Fabric::presets() {
             let selected = preset.name == fabric.name;
             if ui.selectable_label(selected, &preset.name).clicked() && !selected {
-                s.execute(SetFabric::new(id, preset));
+                let (target, _) = s.edit_target(id);
+                s.execute(SetFabric::new(target, preset));
             }
         }
     });
@@ -857,13 +865,17 @@ fn grading_section(ui: &mut egui::Ui, s: &mut Session, id: PatternId) {
     if !busy {
         if let Some((_, value)) = s.props.grading_pending.take_if(|(pid, _)| *pid == id) {
             if (value - current_percent).abs() > 1e-4 {
-                let outline = pattern.outline.clone();
+                let (target, _) = s.edit_target(id);
+                let outline = s
+                    .doc
+                    .pattern(target)
+                    .map_or_else(|| pattern.outline.clone(), |p| p.outline.clone());
                 let grading = if value == 0.0 {
                     Grading::default()
                 } else {
                     Grading::uniform_scale(&outline, value)
                 };
-                s.execute(SetGrading::new(id, grading));
+                s.execute(SetGrading::new(target, grading));
             }
         }
     }

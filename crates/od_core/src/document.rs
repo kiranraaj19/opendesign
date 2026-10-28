@@ -637,11 +637,30 @@ impl Link {
         (self.x - self.origin).cross(self.y - self.origin) < 0.0
     }
 
+    /// A grainline angle (see [`Pattern::grain_angle`]) on the source, as
+    /// it lies on the copy.
+    pub fn grain_from_source(&self, degrees: f32) -> f32 {
+        grain_through(degrees, |p| self.apply(p))
+    }
+
+    /// A grainline angle on the copy, as it lies on the source.
+    pub fn grain_to_source(&self, degrees: f32) -> f32 {
+        grain_through(degrees, |p| self.to_source(p))
+    }
+
     fn map(&mut self, f: impl Fn(Vec2) -> Vec2) {
         self.origin = f(self.origin);
         self.x = f(self.x);
         self.y = f(self.y);
     }
+}
+
+/// A grainline angle's direction moved through the affine map `f`, as an
+/// angle again.
+fn grain_through(degrees: f32, f: impl Fn(Vec2) -> Vec2) -> f32 {
+    let (sin, cos) = degrees.to_radians().sin_cos();
+    let d = f(Vec2::new(-sin, cos)) - f(Vec2::ZERO);
+    normalize_degrees((-d.x).atan2(d.y).to_degrees())
 }
 
 /// A pattern's plane in the 3D scene, in metres: where its centre is and

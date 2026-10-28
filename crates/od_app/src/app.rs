@@ -3012,6 +3012,28 @@ mod tests {
         press(&mut h, Modifiers::COMMAND, Key::Z);
         let s = &h.state().session;
         assert_eq!(s.doc.pattern(copy).unwrap().outline.len(), 4);
+
+        // Fabric and seam allowance picked on the copy are the source's too.
+        h.state_mut().session.tool = Tool::Select;
+        h.run();
+        click(&mut h, "Denim");
+        let s = &h.state().session;
+        for id in [left, copy] {
+            assert_eq!(s.doc.pattern(id).unwrap().fabric.name, "Denim");
+        }
+        let allowance = h
+            .get_all_by_role(Role::SpinButton)
+            .next()
+            .unwrap()
+            .rect()
+            .center();
+        drag(&mut h, allowance, allowance + egui::vec2(30.0, 0.0));
+        let s = &h.state().session;
+        let (a, b) = (
+            s.doc.pattern(left).unwrap().seam_allowance,
+            s.doc.pattern(copy).unwrap().seam_allowance,
+        );
+        assert!(a > 10.0 && a == b, "{a} {b}");
     }
 
     #[test]
