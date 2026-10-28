@@ -1,10 +1,11 @@
 //! Properties of the current selection, plus document-wide sizing (size
 //! chart preview) and the bill of materials.
 
+use od_core::document::TOLERANCE;
 use od_core::{
-    document_bom, total_area_m2, Axis, Fabric, Grading, Pattern, PatternId, PatternValue,
-    PointKind, RemoveInternalLine, RenamePattern, SetFabric, SetGrading, SetParticleDistance,
-    SetPatternValue, PARTICLE_DISTANCE_RANGE,
+    document_bom, edit, total_area_m2, Axis, Fabric, Grading, Pattern, PatternId, PatternValue,
+    PointKind, RemoveInternalLine, RenamePattern, SetFabric, SetGrading, SetOutline,
+    SetParticleDistance, SetPatternValue, PARTICLE_DISTANCE_RANGE,
 };
 use od_sim::cloth::DEFAULT_PARTICLE_DISTANCE;
 
@@ -12,7 +13,6 @@ use crate::app::Session;
 
 /// Edits in progress, so typing or dragging a value makes one undo step
 /// when it is let go rather than one per keystroke or pixel.
-#[derive(Default)]
 pub struct PropertiesState {
     editing: Option<(PatternId, String)>,
     pending: Option<(PatternId, PatternValue, f32)>,
@@ -21,6 +21,24 @@ pub struct PropertiesState {
     grading_pending: Option<(PatternId, f32)>,
     /// A particle distance being dragged or typed but not yet committed.
     distance_pending: Option<(PatternId, f32)>,
+    /// How far from a corner "Round corner" starts the curve, in mm.
+    round_distance: f32,
+    /// An edge length being dragged or typed: pattern, the corner the edge
+    /// starts at, and the length.
+    length_pending: Option<(PatternId, usize, f32)>,
+}
+
+impl Default for PropertiesState {
+    fn default() -> Self {
+        Self {
+            editing: None,
+            pending: None,
+            grading_pending: None,
+            distance_pending: None,
+            round_distance: 20.0,
+            length_pending: None,
+        }
+    }
 }
 
 impl PropertiesState {
@@ -350,10 +368,73 @@ fn point_section(ui: &mut egui::Ui, s: &mut Session, pattern: Pattern) {
             s.delete_selected();
         }
     });
+    if point.kind != PointKind::Corner || pattern.locked {
+        return;
+    }
+    ui.horizontal(|ui| {
+        ui.add(
+            egui::DragValue::new(&mut s.props.round_distance)
+                .range(1.0..=500.0)
+                .suffix(" mm")
+                .speed(0.5)
+                .max_decimals(1),
+        );
+        if ui
+            .button("Round corner")
+            .on_hover_text("Replace the corner with a curve starting this far along each edge")
+            .clicked()
+        {
+            if let Some(outline) =
+                edit::round_corner(&pattern.outline, index, s.props.round_distance)
+            {
+                s.execute(SetOutline::new(pattern.id, "Round corner", outline));
+                s.canvas.selected_point = None;
+            }
+        }
+    });
+    edge_length(ui, s, &pattern, index);
+}
+
+/// The length of the edge from the selected corner to the next one, which
+/// can be typed in: the far end moves along the edge to match.
+fn edge_length(ui: &mut egui::Ui, s: &mut Session, pattern: &Pattern, index: usize) {
+    let (start, end) = pattern.segment_at(index as f32);
+    if start as usize != index {
+        return;
+    }
+    let current = pattern.segment_length(start, end, TOLERANCE);
+    ui.horizontal(|ui| {
+        ui.label("Edge to next corner");
+        let mut value = match s.props.length_pending {
+            Some((pid, i, v)) if pid == pattern.id && i == index => v,
+            _ => current,
+        };
+        let response = ui.add(
+            egui::DragValue::new(&mut value)
+                .range(1.0..=10_000.0)
+                .suffix(" mm")
+                .speed(0.5)
+                .max_decimals(1),
+        );
+        if response.changed() {
+            s.props.length_pending = Some((pattern.id, index, value));
+        }
+        let busy = response.dragged() || response.has_focus();
+        if !busy {
+            if let Some((pid, i, value)) = s.props.length_pending.take() {
+                let changed = (value - current).abs() > 1e-3;
+                if pid == pattern.id && i == index && changed {
+                    if let Some(outline) = edit::with_edge_length(pattern, index, value) {
+                        s.execute(SetOutline::new(pattern.id, "Set edge length", outline));
+                    }
+                }
+            }
+        }
+    });
 }
 
 fn lines_section(ui: &mut egui::Ui, s: &mut Session, id: PatternId) {
-    let Some(pattern) = s.doc.pattern(id) else {
+    let Some(pattern) = s.doc.pattern(id).cloned() else {
         return;
     };
     if pattern.internal_lines.is_empty() {
@@ -362,17 +443,34 @@ fn lines_section(ui: &mut egui::Ui, s: &mut Session, id: PatternId) {
     ui.add_space(8.0);
     ui.label("Internal lines");
     let mut remove = None;
+    let mut split = None;
     for (i, line) in pattern.internal_lines.iter().enumerate() {
         let length: f32 = line.points.windows(2).map(|w| w[0].distance(w[1])).sum();
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             ui.label(format!("Line {}: {length:.0} mm", i + 1));
             if ui.button(format!("Remove line {}", i + 1)).clicked() {
                 remove = Some(i);
+            }
+            let crossings = (!pattern.locked)
+                .then(|| edit::points_at_crossings(&pattern, &line.points))
+                .flatten();
+            if let Some(outline) = crossings {
+                if ui
+                    .button("Add outline points")
+                    .on_hover_text("Add a corner point wherever this line crosses the outline")
+                    .clicked()
+                {
+                    split = Some(outline);
+                }
             }
         });
     }
     if let Some(i) = remove {
         s.execute(RemoveInternalLine::new(id, i));
+    }
+    if let Some(outline) = split {
+        s.execute(SetOutline::new(id, "Add points at intersection", outline));
+        s.canvas.selected_point = None;
     }
 }
 

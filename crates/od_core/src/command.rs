@@ -4,9 +4,9 @@
 use crate::document::{
     normalize_degrees, rotate_point, Arrangement, Axis, Document, Fabric, Grading, InternalLine,
     Notch, OutlinePoint, Pattern, PatternId, PointKind, SeamEdge, SewingLine, SewingLineId, Tack,
-    TackId, TackPoint, TackTarget, Topstitch, Trim, TrimKind,
+    TackId, TackPoint, TackTarget, Topstitch, Trim, TrimKind, TOLERANCE,
 };
-use crate::geometry::Vec2;
+use crate::geometry::{self, Vec2};
 use crate::seam::{self, Side};
 
 pub trait Command {
@@ -460,6 +460,74 @@ impl Command for DeletePoint {
             doc.sewing_lines = std::mem::take(&mut self.sewing_lines);
         }
     }
+}
+
+/// Replace a pattern's whole outline, e.g. after rounding a corner or
+/// adding a dart. Seam ends and notches are placed again at the nearest
+/// point of the new outline to where they were.
+pub struct SetOutline {
+    id: PatternId,
+    label: String,
+    outline: Vec<OutlinePoint>,
+    /// The pattern and seams before the change, restored exactly on undo.
+    before: Option<(Pattern, Vec<SewingLine>)>,
+}
+
+impl SetOutline {
+    pub fn new(id: PatternId, label: impl Into<String>, outline: Vec<OutlinePoint>) -> Self {
+        Self {
+            id,
+            label: label.into(),
+            outline,
+            before: None,
+        }
+    }
+}
+
+impl Command for SetOutline {
+    fn label(&self) -> String {
+        self.label.clone()
+    }
+
+    fn apply(&mut self, doc: &mut Document) {
+        let Some(p) = doc.pattern_mut(self.id) else {
+            return;
+        };
+        if self.outline.len() < 3 {
+            return;
+        }
+        let before = p.clone();
+        p.outline = self.outline.clone();
+        p.notches = remap_notches(&before, p);
+        let seams = remap_sewing(doc, &before, &|b, a, t| {
+            a.nearest_param(b.pos_at_param(t, TOLERANCE)).0
+        });
+        self.before = Some((before, seams));
+    }
+
+    fn undo(&mut self, doc: &mut Document) {
+        if let Some((before, seams)) = self.before.take() {
+            if let Some(p) = doc.pattern_mut(self.id) {
+                *p = before;
+                doc.sewing_lines = seams;
+            }
+        }
+    }
+}
+
+/// `after`'s notches: `before`'s, each moved to the nearest point of
+/// `after`'s outline.
+pub(crate) fn remap_notches(before: &Pattern, after: &Pattern) -> Vec<Notch> {
+    let (old, new) = (before.polyline(TOLERANCE), after.polyline(TOLERANCE));
+    before
+        .notches
+        .iter()
+        .filter_map(|n| {
+            let (pos, _) = geometry::point_at_distance(&old, n.at)?;
+            let (at, _) = geometry::distance_along(&new, pos)?;
+            Some(Notch { at })
+        })
+        .collect()
 }
 
 /// Make an outline point a corner or a curve point.
@@ -1435,6 +1503,46 @@ mod tests {
         assert_eq!(doc.pattern(id).unwrap().outline[0].pos, Vec2::new(5.0, 0.0));
         batch.undo(&mut doc);
         assert_eq!(doc.patterns, before);
+    }
+
+    #[test]
+    fn set_outline_keeps_seams_and_notches_in_place() {
+        let (mut doc, id) = doc_with_rect();
+        doc.pattern_mut(id)
+            .unwrap()
+            .notches
+            .push(Notch { at: 125.0 });
+        // The right side, sewn to itself backwards just to have a seam.
+        let mut sew = AddSewingLine::new(
+            vec![SeamEdge {
+                pattern: id,
+                start: 1.0,
+                end: 2.0,
+                forward: true,
+            }],
+            vec![SeamEdge {
+                pattern: id,
+                start: 3.0,
+                end: 4.0,
+                forward: false,
+            }],
+        );
+        sew.apply(&mut doc);
+        let before = doc.clone();
+        let rounded = crate::edit::round_corner(&pat(&doc).outline, 0, 10.0).unwrap();
+        let mut cmd = SetOutline::new(id, "Round corner", rounded);
+        cmd.apply(&mut doc);
+        let p = pat(&doc);
+        assert_eq!(p.outline.len(), 6);
+        // Point 0 became three points, so the right side is now 3 to 4.
+        let edge = doc.sewing_lines[0].a[0];
+        assert!((edge.start - 3.0).abs() < 1e-3 && (edge.end - 4.0).abs() < 1e-3);
+        // The notch half way down the right side stays there.
+        let poly = p.polyline(TOLERANCE);
+        let (pos, _) = geometry::point_at_distance(&poly, p.notches[0].at).unwrap();
+        assert!(pos.distance(Vec2::new(100.0, 25.0)) < 1e-3, "{pos:?}");
+        cmd.undo(&mut doc);
+        assert_eq!(doc, before);
     }
 
     #[test]

@@ -8,6 +8,7 @@ pub mod clipboard;
 pub mod command;
 pub mod document;
 pub mod dxf;
+pub mod edit;
 pub mod geometry;
 pub mod history;
 #[cfg(feature = "python-plugins")]
@@ -22,8 +23,8 @@ pub use command::{
     Command, DeletePattern, DeletePoint, DuplicatePattern, FlipSeamSide, InsertPoint,
     MirrorPattern, MovePattern, MovePoint, PatternFlag, PatternValue, RemoveInternalLine,
     RemoveNotch, RemoveSewingLine, RemoveTack, RemoveTopstitch, RemoveTrim, RenamePattern,
-    RotatePattern, SetArrangement, SetFabric, SetGrading, SetParticleDistance, SetPatternFlag,
-    SetPatternValue, SetPointKind, SetSeamEdge, PARTICLE_DISTANCE_RANGE,
+    RotatePattern, SetArrangement, SetFabric, SetGrading, SetOutline, SetParticleDistance,
+    SetPatternFlag, SetPatternValue, SetPointKind, SetSeamEdge, PARTICLE_DISTANCE_RANGE,
 };
 pub use document::{
     Arrangement, Axis, Document, Fabric, FabricTexture, Grading, InternalLine, Notch, OutlinePoint,

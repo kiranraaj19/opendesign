@@ -2708,4 +2708,26 @@ mod tests {
         let middle = piece.mesh.bounds().unwrap().center();
         assert!(target.distance(middle) < 0.01, "{target} vs {middle}");
     }
+
+    #[test]
+    fn round_corner_from_properties_is_one_undo_step() {
+        let mut h = harness();
+        let [left, _] = two_pieces(&mut h);
+        {
+            let s = &mut h.state_mut().session;
+            s.selection.set(Some(left));
+            s.tool = Tool::EditPoints;
+            s.canvas.selected_point = Some((left, 1));
+        }
+        show_tab(&mut h, Tab::Properties);
+        click(&mut h, "Round corner");
+        let s = &h.state().session;
+        let p = s.doc.pattern(left).unwrap();
+        assert_eq!(p.outline.len(), 6);
+        assert_eq!(p.outline[2].kind, od_core::PointKind::Curve);
+        assert_eq!(s.history.undo_label().as_deref(), Some("Round corner"));
+        press(&mut h, Modifiers::COMMAND, Key::Z);
+        let p = h.state().session.doc.pattern(left).unwrap();
+        assert_eq!(p.outline.len(), 4);
+    }
 }
