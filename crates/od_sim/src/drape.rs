@@ -45,6 +45,9 @@ pub struct Drape {
     /// Particles joined by seams, which cloth-to-cloth collision leaves
     /// out so it doesn't push apart the panels a seam joins.
     seam_particles: Vec<usize>,
+    /// The particle being pulled by the mouse, held by a pin in
+    /// `world.pins` that [`Self::move_grab`] moves.
+    grabbed: Option<usize>,
 }
 
 impl Drape {
@@ -98,6 +101,7 @@ impl Drape {
             anchor_start,
             stitch_compliance: config.stitch_compliance,
             seam_particles,
+            grabbed: None,
         };
         drape.update_collision_skip();
         drape
@@ -230,19 +234,7 @@ impl Drape {
     /// whether a pin now exists there (`false` if `pattern` isn't in this
     /// scene, or was just unpinned).
     pub fn toggle_pin_near(&mut self, pattern: PatternId, point: Vec3) -> bool {
-        let Some(range) = self.range_of(pattern) else {
-            return false;
-        };
-        let Some(particle) = self.world.particles[range.clone()]
-            .iter()
-            .enumerate()
-            .min_by(|(_, a), (_, b)| {
-                a.position
-                    .distance(point)
-                    .total_cmp(&b.position.distance(point))
-            })
-            .map(|(i, _)| range.start + i)
-        else {
+        let Some(particle) = self.nearest_particle(pattern, point) else {
             return false;
         };
         if let Some(i) = self.world.pins.iter().position(|p| p.particle == particle) {
@@ -255,9 +247,72 @@ impl Drape {
         }
     }
 
+    /// The particle of `pattern` closest to `point`.
+    fn nearest_particle(&self, pattern: PatternId, point: Vec3) -> Option<usize> {
+        let range = self.range_of(pattern)?;
+        self.world.particles[range.clone()]
+            .iter()
+            .enumerate()
+            .min_by(|(_, a), (_, b)| {
+                a.position
+                    .distance(point)
+                    .total_cmp(&b.position.distance(point))
+            })
+            .map(|(i, _)| range.start + i)
+    }
+
+    /// Start pulling the particle of `pattern` nearest `point` (where a
+    /// drag started on the cloth). Returns whether one was grabbed; a
+    /// pinned particle stays pinned instead.
+    pub fn grab(&mut self, pattern: PatternId, point: Vec3) -> bool {
+        self.release();
+        let Some(particle) = self.nearest_particle(pattern, point) else {
+            return false;
+        };
+        if self.world.pins.iter().any(|p| p.particle == particle) {
+            return false;
+        }
+        let target = self.world.particles[particle].position;
+        self.world.pins.push(Pin { particle, target });
+        self.grabbed = Some(particle);
+        true
+    }
+
+    /// Pull the grabbed particle towards `target`.
+    pub fn move_grab(&mut self, target: Vec3) {
+        if let Some(particle) = self.grabbed {
+            if let Some(pin) = self.world.pins.iter_mut().find(|p| p.particle == particle) {
+                pin.target = target;
+            }
+        }
+    }
+
+    /// Let go of the grabbed particle.
+    pub fn release(&mut self) {
+        if let Some(particle) = self.grabbed.take() {
+            self.world.pins.retain(|p| p.particle != particle);
+        }
+    }
+
+    /// Where the grabbed particle is being pulled to, if anything is.
+    pub fn grab_target(&self) -> Option<Vec3> {
+        let particle = self.grabbed?;
+        self.world
+            .pins
+            .iter()
+            .find(|p| p.particle == particle)
+            .map(|p| p.target)
+    }
+
     /// Where each pin currently holds its particle, for drawing markers.
+    /// The grab isn't a pin.
     pub fn pin_positions(&self) -> Vec<Vec3> {
-        self.world.pins.iter().map(|p| p.target).collect()
+        self.world
+            .pins
+            .iter()
+            .filter(|p| Some(p.particle) != self.grabbed)
+            .map(|p| p.target)
+            .collect()
     }
 
     /// Where each placed trim (button, snap) currently sits, for drawing
@@ -754,5 +809,39 @@ mod tests {
             per_frame < std::time::Duration::from_millis(50),
             "{particles} particles took {per_frame:?} per frame"
         );
+    }
+
+    #[test]
+    fn a_grabbed_point_follows_its_target_until_let_go() {
+        let mut doc = Document::new("test");
+        doc.patterns.push(rectangle(1, 200.0, 200.0));
+        let placements = placements_for(&doc, 1.0);
+        let mut drape = Drape::new(&doc, &placements, None, &ClothConfig::default());
+        let range = drape.range_of(PatternId(1)).unwrap();
+        let corner = drape.world.particles[range.start].position;
+        assert!(drape.grab(PatternId(1), corner));
+        assert!(drape.pin_positions().is_empty(), "a grab isn't a pin");
+        let target = corner + Vec3::new(0.0, 0.3, 0.1);
+        drape.move_grab(target);
+        assert_eq!(drape.grab_target(), Some(target));
+        for _ in 0..30 {
+            drape.step(1.0 / 60.0, 8);
+        }
+        let grabbed = drape.world.particles[range.start].position;
+        assert!(grabbed.distance(target) < 1e-4, "{grabbed} vs {target}");
+
+        drape.release();
+        assert!(drape.world.pins.is_empty());
+        assert_eq!(drape.grab_target(), None);
+        for _ in 0..30 {
+            drape.step(1.0 / 60.0, 8);
+        }
+        let fallen = drape.world.particles[range.start].position;
+        assert!(fallen.y < grabbed.y - 0.01, "let go, it falls: {fallen}");
+
+        // A pinned point stays pinned rather than being grabbed.
+        assert!(drape.toggle_pin_near(PatternId(1), fallen));
+        assert!(!drape.grab(PatternId(1), fallen));
+        assert_eq!(drape.pin_positions().len(), 1);
     }
 }

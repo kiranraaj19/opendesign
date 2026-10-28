@@ -194,6 +194,9 @@ pub struct Viewport3D {
     /// While draping, clicking the garment pins or unpins the nearest
     /// point instead of selecting a pattern.
     pub pinning: bool,
+    /// While pulling the draped cloth: how far in front of the camera the
+    /// grabbed point is, which it stays at as the mouse moves.
+    grab_depth: Option<f32>,
     /// Color the draped cloth by how stretched it is, instead of the
     /// theme fill.
     pub show_strain: bool,
@@ -254,6 +257,7 @@ impl Viewport3D {
             cloth_collision: true,
             pinning: false,
             show_strain: false,
+            grab_depth: None,
             show: Shown::default(),
         }
     }
@@ -990,7 +994,37 @@ fn handle_input(
 ) {
     let v = &mut s.viewport;
     let delta = response.drag_delta();
-    if response.dragged_by(PointerButton::Primary) {
+    // While draping, a left-drag that starts on the cloth pulls it.
+    if response.drag_started_by(PointerButton::Primary) && !v.pinning && s.tool != Tool::Tack {
+        let origin = ui.input(|i| i.pointer.press_origin());
+        let hit = origin.and_then(|o| v.pick_point(rect, o, placed));
+        if let (Some(drape), Some((pattern, point))) = (v.drape.as_mut(), hit) {
+            if drape.grab(pattern, point) {
+                let forward = -v.camera.back();
+                v.grab_depth = Some((point - v.camera.eye()).dot(forward));
+            }
+        }
+    }
+    if response.drag_stopped() {
+        if let Some(drape) = v.drape.as_mut() {
+            drape.release();
+        }
+        v.grab_depth = None;
+    }
+    if let Some(depth) = v.grab_depth {
+        if let (Some(pos), Some(drape)) = (response.interact_pointer_pos(), v.drape.as_mut()) {
+            let ndc = ndc_from_pixel(
+                to_glam(pos),
+                to_glam(rect.min),
+                to_glam(rect.size().to_pos2()),
+            );
+            let ray = v.camera.ray(ndc, aspect(rect));
+            let along = ray.dir.dot(-v.camera.back());
+            if along > 1e-4 {
+                drape.move_grab(ray.at(depth / along));
+            }
+        }
+    } else if response.dragged_by(PointerButton::Primary) {
         v.camera.orbit(-delta.x * 0.01, delta.y * 0.01);
     } else if response.dragged_by(PointerButton::Secondary)
         || response.dragged_by(PointerButton::Middle)
@@ -1138,6 +1172,11 @@ fn paint(ui: &mut egui::Ui, rect: Rect, s: &Session, placed: &[PlacedPattern<Pat
     }
 
     if let Some(drape) = &v.drape {
+        if let Some(target) = drape.grab_target() {
+            if let Some(screen) = v.screen_pos(rect, target) {
+                painter.circle_stroke(screen, 7.0, (2.0, pal.selected));
+            }
+        }
         let pins = if v.show.pins {
             drape.pin_positions()
         } else {
@@ -1181,6 +1220,8 @@ fn paint(ui: &mut egui::Ui, rect: Rect, s: &Session, placed: &[PlacedPattern<Pat
             "Tack: click a pattern, then a pattern or the avatar · Esc cancels"
         } else if v.pinning {
             "Click the cloth to pin or unpin a point"
+        } else if v.drape.is_some() {
+            "Drag the cloth: pull it · Drag elsewhere: orbit · Right-drag: pan · Scroll: zoom · Click: select"
         } else {
             "Drag: orbit · Right-drag: pan · Scroll: zoom · Double-click: frame · Click: select"
         },
@@ -2234,5 +2275,58 @@ mod tests {
             .unwrap()
             .tack_positions()
             .is_empty());
+    }
+
+    #[test]
+    fn dragging_the_draped_cloth_pulls_it_and_dragging_elsewhere_orbits() {
+        let mut h = harness();
+        add_block(&mut h);
+        h.get_by_label("Drape").click();
+        h.step();
+        h.step();
+        // Pause, so the cloth stays where the drag starts.
+        h.get_by_label("Stop draping").click();
+        h.step();
+        let rect = view_rect(&h);
+        let on_cloth = {
+            let s = h.state();
+            let placed = s.viewport.drape.as_ref().unwrap().placed_patterns();
+            let centre = placed[0].mesh.bounds().unwrap().center();
+            s.viewport.screen_pos(rect, centre).unwrap()
+        };
+        let yaw = h.state().viewport.camera.yaw;
+        h.hover_at(on_cloth);
+        h.step();
+        h.drag_at(on_cloth);
+        h.step();
+        for dy in [10.0, 20.0, 40.0] {
+            h.hover_at(on_cloth - vec2(0.0, dy));
+            h.step();
+        }
+        let target = h.state().viewport.drape.as_ref().unwrap().grab_target();
+        let target = target.expect("pulling the cloth");
+        let screen = h.state().viewport.screen_pos(rect, target).unwrap();
+        assert!(
+            screen.distance(on_cloth - vec2(0.0, 40.0)) < 2.0,
+            "{screen:?}"
+        );
+        assert_eq!(h.state().viewport.camera.yaw, yaw, "pulling doesn't orbit");
+        h.drop_at(on_cloth - vec2(0.0, 40.0));
+        h.step();
+        let s = h.state();
+        assert_eq!(s.viewport.drape.as_ref().unwrap().grab_target(), None);
+        assert!(s.viewport.drape.as_ref().unwrap().world.pins.is_empty());
+
+        // From empty space, the same drag turns the camera.
+        let empty = rect.left_top() + vec2(30.0, rect.height() - 30.0);
+        h.hover_at(empty);
+        h.step();
+        h.drag_at(empty);
+        h.step();
+        h.hover_at(empty + vec2(60.0, 0.0));
+        h.step();
+        h.drop_at(empty + vec2(60.0, 0.0));
+        h.step();
+        assert_ne!(h.state().viewport.camera.yaw, yaw);
     }
 }
