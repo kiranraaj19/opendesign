@@ -936,6 +936,32 @@ mod tests {
     }
 
     #[test]
+    fn a_tack_can_hold_two_points_of_one_piece() {
+        // As a pleat's top is tacked: two points on the same edge.
+        let mut doc = Document::new("test");
+        doc.patterns.push(rectangle(1, "skirt", 300.0, 200.0));
+        let point = |x| TackPoint {
+            pattern: Pid(1),
+            at: Vec2::new(x, 0.0),
+        };
+        doc.tacks.push(Tack {
+            id: TackId(1),
+            a: point(50.0),
+            b: TackTarget::Pattern(point(90.0)),
+        });
+        let placements = placements_for(&doc);
+        let scene = build(&doc, &placements, None, &ClothConfig::default());
+        assert_eq!(scene.tacks.len(), 1);
+        let stitch = scene.tacks[0].1;
+        let (a, b) = (
+            stitch.a.position(&scene.particles),
+            stitch.b.position(&scene.particles),
+        );
+        // 40 mm apart flat, before draping pulls them together.
+        assert!((a.distance(b) - 0.04).abs() < 1e-4, "{a} {b}");
+    }
+
+    #[test]
     fn avatar_tack_stitches_the_cloth_to_a_fixed_anchor() {
         let mut doc = Document::new("test");
         doc.patterns.push(rectangle(1, "front", 200.0, 300.0));

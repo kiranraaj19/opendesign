@@ -2815,10 +2815,66 @@ mod tests {
             let ys: Vec<f32> = line.points.iter().map(|p| p.y).collect();
             assert!(ys.iter().any(|y| y.abs() < 0.5) && ys.iter().any(|y| (y - 80.0).abs() < 0.5));
         }
+        // The top, where the drag started, is tacked: both folds onto the
+        // line they land on.
+        assert_eq!(s.doc.tacks.len(), 2, "{:?}", s.doc.tacks);
+        let place = lines[2].points[0];
+        for tack in &s.doc.tacks {
+            let od_core::TackTarget::Pattern(b) = tack.b else {
+                panic!("{tack:?}");
+            };
+            assert_eq!((tack.a.pattern, b.pattern), (left, left));
+            assert_eq!(b.at, place);
+            assert!((tack.a.at.y - 80.0).abs() < 0.5, "{tack:?}");
+        }
         assert_eq!(s.history.undo_label().as_deref(), Some("Add pleats"));
         press(&mut h, Modifiers::COMMAND, Key::Z);
-        let p = h.state().session.doc.pattern(left).unwrap();
-        assert!(p.internal_lines.is_empty());
+        let s = &h.state().session;
+        assert!(s.doc.pattern(left).unwrap().internal_lines.is_empty());
+        assert!(s.doc.tacks.is_empty());
+
+        // Without tacking, only the lines.
+        h.state_mut().session.canvas.pleat.tack = false;
+        drag_mm(&mut h, (20.0, 70.0), (20.0, 10.0));
+        let s = &h.state().session;
+        assert_eq!(s.doc.pattern(left).unwrap().internal_lines.len(), 3);
+        assert!(s.doc.tacks.is_empty());
+    }
+
+    #[test]
+    fn fold_strength_is_set_in_properties() {
+        use od_core::{AddInternalLine, Fold, SetFold};
+        let mut h = harness();
+        let [left, _] = two_pieces(&mut h);
+        {
+            let s = &mut h.state_mut().session;
+            s.execute(AddInternalLine::new(
+                left,
+                vec![Vec2::new(10.0, 40.0), Vec2::new(90.0, 40.0)],
+            ));
+            s.execute(SetFold::new(left, 0, Some(Fold::valley())));
+            s.selection.set(Some(left));
+        }
+        show_tab(&mut h, Tab::Properties);
+        let field = h
+            .get_all_by_role(Role::SpinButton)
+            .find(|n| {
+                n.accesskit_node()
+                    .value()
+                    .is_some_and(|v| v.contains("% firm"))
+            })
+            .expect("a fold strength field")
+            .rect()
+            .center();
+        drag(&mut h, field, field + egui::vec2(30.0, 0.0));
+        let s = &h.state().session;
+        let fold = s.doc.pattern(left).unwrap().internal_lines[0].fold.unwrap();
+        assert!(fold.strength > 0.6, "{fold:?}");
+        assert_eq!(fold.angle, Fold::DEFAULT_ANGLE);
+        // One undo step for the whole drag.
+        press(&mut h, Modifiers::COMMAND, Key::Z);
+        let fold = h.state().session.doc.pattern(left).unwrap().internal_lines[0].fold;
+        assert_eq!(fold, Some(Fold::valley()));
     }
 
     #[test]

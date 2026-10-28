@@ -29,6 +29,8 @@ pub struct PropertiesState {
     length_pending: Option<(PatternId, usize, f32)>,
     /// A fold angle being dragged or typed: pattern, line and angle.
     fold_pending: Option<(PatternId, usize, f32)>,
+    /// A fold strength being dragged or typed, as a percentage.
+    strength_pending: Option<(PatternId, usize, f32)>,
 }
 
 impl Default for PropertiesState {
@@ -41,6 +43,7 @@ impl Default for PropertiesState {
             round_distance: 20.0,
             length_pending: None,
             fold_pending: None,
+            strength_pending: None,
         }
     }
 }
@@ -232,6 +235,8 @@ fn tool_section(ui: &mut egui::Ui, s: &mut Session) {
                 );
                 ui.end_row();
             });
+            ui.checkbox(&mut p.tack, "Tack the top")
+                .on_hover_text("Tack each pleat's folds together where the drag starts");
         }
         _ => {}
     }
@@ -277,6 +282,32 @@ fn fold_edit(ui: &mut egui::Ui, s: &mut Session, id: PatternId, index: usize, fo
                         angle: value * fold.angle.signum(),
                         ..fold
                     }));
+                }
+            }
+        }
+
+        // How firmly the fold holds its angle, as a percentage.
+        let mut value = match s.props.strength_pending {
+            Some((pid, i, v)) if pid == id && i == index => v,
+            _ => fold.strength * 100.0,
+        };
+        let response = ui
+            .add(
+                egui::DragValue::new(&mut value)
+                    .range(0.0..=100.0)
+                    .suffix("% firm")
+                    .max_decimals(0),
+            )
+            .on_hover_text("How firmly the fold holds its angle while draping");
+        if response.changed() {
+            s.props.strength_pending = Some((id, index, value));
+        }
+        let busy = response.dragged() || response.has_focus();
+        if !busy {
+            if let Some((pid, i, value)) = s.props.strength_pending.take() {
+                let strength = value / 100.0;
+                if pid == id && i == index && strength != fold.strength {
+                    set = Some(Some(Fold { strength, ..fold }));
                 }
             }
         }

@@ -96,6 +96,8 @@ pub struct PleatSettings {
     pub depth: f32,
     /// How far each fold turns, in degrees.
     pub angle: f32,
+    /// Tack each pleat's folds together at the end the drag started from.
+    pub tack: bool,
 }
 
 impl Default for PleatSettings {
@@ -105,6 +107,7 @@ impl Default for PleatSettings {
             count: 1,
             depth: 30.0,
             angle: od_core::Fold::DEFAULT_ANGLE,
+            tack: true,
         }
     }
 }
@@ -1234,7 +1237,13 @@ fn handle_pleat(response: &egui::Response, rect: Rect, s: &mut Session) {
     };
     let p = s.canvas.pleat;
     let lines = edit::pleat_lines(pattern, start, end, p.kind, p.count, p.depth, p.angle);
-    let commands: Vec<Box<dyn od_core::Command>> = lines
+    let tacks = if p.tack {
+        edit::pleat_tacks(pattern, start, end, p.kind, p.count, p.depth)
+    } else {
+        Vec::new()
+    };
+    let point = |at| TackPoint { pattern: owner, at };
+    let mut commands: Vec<Box<dyn od_core::Command>> = lines
         .into_iter()
         .map(|line| -> Box<dyn od_core::Command> {
             match line.fold {
@@ -1243,6 +1252,12 @@ fn handle_pleat(response: &egui::Response, rect: Rect, s: &mut Session) {
             }
         })
         .collect();
+    for [a, b] in tacks {
+        commands.push(Box::new(AddTack::new(
+            point(a),
+            TackTarget::Pattern(point(b)),
+        )));
+    }
     if !commands.is_empty() {
         s.execute(od_core::Batch::new("Add pleats", commands));
     }

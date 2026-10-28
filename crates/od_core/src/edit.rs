@@ -378,6 +378,56 @@ pub fn pleat_lines(
     depth: f32,
     angle: f32,
 ) -> Vec<InternalLine> {
+    pleat_layout(pattern, a, b, kind, count, depth)
+        .into_iter()
+        .flatten()
+        .map(|(fold, ends)| InternalLine {
+            points: ends.to_vec(),
+            fold: fold.map(|mountain| Fold {
+                angle: if mountain { -angle.abs() } else { angle.abs() },
+                strength: Fold::DEFAULT_STRENGTH,
+            }),
+        })
+        .collect()
+}
+
+/// Where the pleats [`pleat_lines`] lays out are tacked shut at their top
+/// (the end of the lines the drag started from): each fold line's top to
+/// its pleat's placement line's, so the folded layers stay together.
+pub fn pleat_tacks(
+    pattern: &Pattern,
+    a: Vec2,
+    b: Vec2,
+    kind: PleatKind,
+    count: usize,
+    depth: f32,
+) -> Vec<[Vec2; 2]> {
+    let mut out = Vec::new();
+    for pleat in pleat_layout(pattern, a, b, kind, count, depth) {
+        let Some((_, [place, _])) = pleat.iter().find(|(fold, _)| fold.is_none()) else {
+            continue;
+        };
+        out.extend(
+            pleat
+                .iter()
+                .filter(|(fold, _)| fold.is_some())
+                .map(|(_, [top, _])| [*top, *place]),
+        );
+    }
+    out
+}
+
+/// Each pleat's lines that fall inside the piece: whether each is a
+/// mountain fold (`None` for the placement line), and its ends, the one on
+/// `a`'s side first.
+fn pleat_layout(
+    pattern: &Pattern,
+    a: Vec2,
+    b: Vec2,
+    kind: PleatKind,
+    count: usize,
+    depth: f32,
+) -> Vec<Vec<(Option<bool>, [Vec2; 2])>> {
     let d = b - a;
     let len = d.length();
     if len < 1e-3 || depth <= 0.0 {
@@ -386,24 +436,17 @@ pub fn pleat_lines(
     // The 2D window's y points down, so (-y, x) is to the right.
     let step = Vec2::new(-d.y, d.x) * (depth / len);
     let per = kind.lines();
-    let mut out = Vec::new();
-    for pleat in 0..count {
-        for (k, fold) in per.iter().enumerate() {
-            let offset = step * (pleat * per.len() + k) as f32;
-            let Some(ends) = across(pattern, a + offset, b + offset) else {
-                continue;
-            };
-            let fold = fold.map(|mountain| Fold {
-                angle: if mountain { -angle.abs() } else { angle.abs() },
-                strength: Fold::DEFAULT_STRENGTH,
-            });
-            out.push(InternalLine {
-                points: ends.to_vec(),
-                fold,
-            });
-        }
-    }
-    out
+    (0..count)
+        .map(|pleat| {
+            per.iter()
+                .enumerate()
+                .filter_map(|(k, fold)| {
+                    let offset = step * (pleat * per.len() + k) as f32;
+                    across(pattern, a + offset, b + offset).map(|ends| (*fold, ends))
+                })
+                .collect()
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -624,8 +667,20 @@ mod tests {
         let angles: Vec<Option<f32>> = knife.iter().map(|l| l.fold.map(|f| f.angle)).collect();
         assert_eq!(&angles[..3], [Some(-170.0), Some(170.0), None]);
 
+        // Tacked at the end the drag started from (the y = 200 edge), each
+        // fold onto its pleat's placement line.
+        let tacks = pleat_tacks(&p, a, b, PleatKind::Knife, 2, 20.0);
+        assert_eq!(tacks.len(), 4);
+        assert_eq!(tacks[0], [Vec2::new(50.0, 200.0), Vec2::new(90.0, 200.0)]);
+        assert_eq!(tacks[1], [Vec2::new(70.0, 200.0), Vec2::new(90.0, 200.0)]);
+        assert_eq!(tacks[2][1], Vec2::new(150.0, 200.0));
+
         let boxed = pleat_lines(&p, a, b, PleatKind::Box, 1, 20.0, 170.0);
         assert_eq!(boxed.len(), 5);
+        // A box pleat's four folds all meet its middle line.
+        let tacks = pleat_tacks(&p, a, b, PleatKind::Box, 1, 20.0);
+        assert_eq!(tacks.len(), 4);
+        assert!(tacks.iter().all(|t| t[1] == Vec2::new(90.0, 200.0)));
         // Lines past the edge of the piece are left out.
         let many = pleat_lines(&p, a, b, PleatKind::Knife, 10, 20.0, 170.0);
         assert!(many.len() < 30 && many.iter().all(|l| l.points[0].x <= 300.0));
