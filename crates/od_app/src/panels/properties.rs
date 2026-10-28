@@ -167,6 +167,31 @@ fn selection_actions(ui: &mut egui::Ui, s: &mut Session, delete: &str) {
         }
     });
     ui.add_space(8.0);
+    ui.label("3D position");
+    ui.horizontal_wrapped(|ui| {
+        if ui
+            .button("Turn 3D -45°")
+            .on_hover_text("Turn about the vertical, in the 3D view")
+            .clicked()
+        {
+            crate::panels::gizmo::turn_selected(s, -45.0);
+        }
+        if ui
+            .button("Turn 3D +45°")
+            .on_hover_text("Turn about the vertical, in the 3D view")
+            .clicked()
+        {
+            crate::panels::gizmo::turn_selected(s, 45.0);
+        }
+        if ui
+            .button("Reset 3D position")
+            .on_hover_text("Go back to the automatic layout around the avatar")
+            .clicked()
+        {
+            crate::panels::gizmo::reset_selected(s);
+        }
+    });
+    ui.add_space(8.0);
     ui.label("Symmetry");
     ui.horizontal_wrapped(|ui| {
         if ui.button("Flip left-right").clicked() {

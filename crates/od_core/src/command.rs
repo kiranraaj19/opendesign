@@ -2,9 +2,9 @@
 //! apply itself and how to reverse that change.
 
 use crate::document::{
-    normalize_degrees, rotate_point, Axis, Document, Fabric, Grading, InternalLine, Notch,
-    OutlinePoint, Pattern, PatternId, PointKind, SeamEdge, SewingLine, SewingLineId, Tack, TackId,
-    TackPoint, TackTarget, Topstitch, Trim, TrimKind,
+    normalize_degrees, rotate_point, Arrangement, Axis, Document, Fabric, Grading, InternalLine,
+    Notch, OutlinePoint, Pattern, PatternId, PointKind, SeamEdge, SewingLine, SewingLineId, Tack,
+    TackId, TackPoint, TackTarget, Topstitch, Trim, TrimKind,
 };
 use crate::geometry::Vec2;
 use crate::seam::{self, Side};
@@ -256,6 +256,46 @@ impl Command for SetPatternFlag {
     fn undo(&mut self, doc: &mut Document) {
         if let (Some(p), Some(before)) = (doc.pattern_mut(self.id), self.before) {
             *self.flag.get_mut(p) = before;
+        }
+    }
+}
+
+/// Place a pattern in 3D, or (`None`) give it back to the automatic
+/// layout around the avatar.
+pub struct SetArrangement {
+    id: PatternId,
+    arrangement: Option<Arrangement>,
+    before: Option<Option<Arrangement>>,
+}
+
+impl SetArrangement {
+    pub fn new(id: PatternId, arrangement: Option<Arrangement>) -> Self {
+        Self {
+            id,
+            arrangement,
+            before: None,
+        }
+    }
+}
+
+impl Command for SetArrangement {
+    fn label(&self) -> String {
+        match self.arrangement {
+            Some(_) => "Arrange pattern in 3D",
+            None => "Reset 3D position",
+        }
+        .into()
+    }
+
+    fn apply(&mut self, doc: &mut Document) {
+        if let Some(p) = doc.pattern_mut(self.id) {
+            self.before = Some(std::mem::replace(&mut p.arrangement, self.arrangement));
+        }
+    }
+
+    fn undo(&mut self, doc: &mut Document) {
+        if let (Some(p), Some(before)) = (doc.pattern_mut(self.id), self.before.take()) {
+            p.arrangement = before;
         }
     }
 }
@@ -1444,6 +1484,18 @@ mod tests {
         }
         assert_eq!(doc.patterns, before.patterns);
         assert_eq!(doc.tacks, before.tacks);
+    }
+
+    #[test]
+    fn arranging_in_3d_round_trips() {
+        let at = Arrangement {
+            center: [0.0, 1.2, 0.3],
+            right: [1.0, 0.0, 0.0],
+            up: [0.0, 1.0, 0.0],
+        };
+        round_trip(SetArrangement::new(ID, Some(at)), |d| {
+            assert_eq!(pat(d).arrangement, Some(at));
+        });
     }
 
     #[test]

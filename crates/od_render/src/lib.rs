@@ -4,6 +4,7 @@
 //!
 //! Everything except [`gpu`] is plain CPU code and is tested without a GPU.
 
+pub mod arrange;
 pub mod avatar;
 pub mod camera;
 pub mod export;

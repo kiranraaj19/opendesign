@@ -11,6 +11,7 @@ use std::sync::Arc;
 use eframe::egui_wgpu;
 use egui::{Color32, PointerButton, Pos2, Rect, Sense, UiBuilder};
 use od_core::{Pattern, PatternId, Side, TackPoint, TackTarget, TrimKind, Vec2};
+use od_render::arrange::ArrangementPoint;
 use od_render::avatar::{avatar_mesh, AvatarKind, Measurements};
 use od_render::camera::{ndc_from_pixel, OrbitCamera, ViewPreset};
 use od_render::glam;
@@ -23,6 +24,7 @@ use od_render::view::{self, Display, FrameInput, PlacedPattern, Style, Theme};
 use od_sim::collision::Collider;
 
 use crate::app::{Session, Tool};
+use crate::panels::gizmo::{self, GizmoDrag};
 use crate::panels::pattern2d;
 use crate::theme;
 
@@ -204,6 +206,11 @@ pub struct Viewport3D {
     pub show: Shown,
     /// How the avatar and cloth are drawn: solid, wireframe or see-through.
     pub display: Display,
+    /// A 3D move or turn of the selected patterns in progress.
+    pub gizmo: Option<GizmoDrag>,
+    /// Showing the avatar's arrangement points, to click one and place the
+    /// selected patterns there.
+    pub arranging: bool,
 }
 
 /// Things the 3D view can hide, to see the garment more clearly.
@@ -262,6 +269,8 @@ impl Viewport3D {
             grab_depth: None,
             show: Shown::default(),
             display: Display::default(),
+            gizmo: None,
+            arranging: false,
         }
     }
 
@@ -298,6 +307,11 @@ impl Viewport3D {
             to_glam(rect.size().to_pos2()),
         );
         Some(Pos2::new(p.x, p.y))
+    }
+
+    /// Spots on the avatar where patterns can be arranged.
+    pub fn arrangement_points(&self) -> Vec<ArrangementPoint> {
+        od_render::arrange::arrangement_points(&self.avatar.mesh)
     }
 
     /// The pattern under `pos` in the view `rect`; the avatar blocks clicks.
@@ -426,6 +440,11 @@ pub fn placements(s: &Session) -> Vec<(PatternId, Placement)> {
                     up: a.up.into(),
                 },
                 None => ring.placement(i, count),
+            };
+            // A 3D move in progress shows where it will land.
+            let placement = match &s.viewport.gizmo {
+                Some(drag) if drag.ids.contains(&p.id) => drag.apply(placement),
+                _ => placement,
             };
             (p.id, placement)
         })
@@ -993,6 +1012,14 @@ fn view_buttons(ui: &mut egui::Ui, s: &mut Session) -> Option<ViewAction> {
     {
         toggle_drape(s);
     }
+    if s.viewport.drape.is_none() {
+        ui.toggle_value(&mut s.viewport.arranging, "Arrange")
+            .on_hover_text(
+                "Show spots on the avatar; click one to place the selected pieces there",
+            );
+    } else {
+        s.viewport.arranging = false;
+    }
     ui.toggle_value(&mut s.viewport.cloth_collision, "Cloth collision")
         .on_hover_text("Keep draped pieces from passing through each other");
     if s.viewport.drape.is_some() {
@@ -1036,6 +1063,30 @@ fn handle_input(
     s: &mut Session,
     placed: &[PlacedPattern<PatternId>],
 ) {
+    // The 3D move handle takes drags that start on it.
+    let all = placements(s);
+    if let Some(centre) = gizmo::centre(s, &all) {
+        if response.drag_started_by(PointerButton::Primary) {
+            let origin = ui.input(|i| i.pointer.press_origin());
+            if let Some(handle) = origin.and_then(|o| gizmo::hit(s, rect, centre, o)) {
+                s.viewport.gizmo = Some(gizmo::begin(s, handle, centre));
+            }
+        }
+    }
+    if s.viewport.gizmo.is_some() {
+        if response.dragged_by(PointerButton::Primary) {
+            let total = ui
+                .input(|i| Some(i.pointer.interact_pos()? - i.pointer.press_origin()?))
+                .unwrap_or_default();
+            let coarse = ui.input(|i| i.modifiers.shift);
+            gizmo::update(s, rect, response.drag_delta(), total, coarse);
+        }
+        if response.drag_stopped() || !response.dragged() {
+            gizmo::end(s, &placements(s));
+        }
+        return;
+    }
+
     let v = &mut s.viewport;
     let delta = response.drag_delta();
     // While draping, a left-drag that starts on the cloth pulls it.
@@ -1099,7 +1150,11 @@ fn handle_input(
                         drape.toggle_pin_near(pattern, point);
                     }
                 }
+            } else if let Some(point) = v.arranging.then(|| gizmo::point_at(s, rect, pos)).flatten()
+            {
+                gizmo::arrange_at(s, &point);
             } else {
+                let v = &mut s.viewport;
                 let hit = v.pick(rect, pos, placed);
                 let adding = response
                     .ctx
@@ -1214,6 +1269,13 @@ fn paint(ui: &mut egui::Ui, rect: Rect, s: &Session, placed: &[PlacedPattern<Pat
         if let Some(screen) = at.and_then(|p| v.screen_pos(rect, p)) {
             painter.circle_stroke(screen, 6.0, (2.0, pal.preview));
         }
+    }
+
+    if v.arranging && v.drape.is_none() {
+        gizmo::draw_points(&painter, s, rect, pal);
+    }
+    if let Some(centre) = gizmo::centre(s, &placements(s)) {
+        gizmo::draw(&painter, s, rect, centre, pal);
     }
 
     if let Some(drape) = &v.drape {
@@ -2400,5 +2462,100 @@ mod tests {
             (turned - std::f32::consts::FRAC_PI_4).abs() < 1e-5,
             "{turned}"
         );
+    }
+
+    #[test]
+    fn the_handle_moves_a_piece_in_3d_and_drapes_start_there() {
+        let mut h = harness();
+        let id = add_block(&mut h);
+        h.state_mut().selection.set(Some(id));
+        h.run();
+        let rect = view_rect(&h);
+        let before = placements(h.state())[0].1;
+        // Drag the X arrow from its middle, a little further along it.
+        let (from, to) = {
+            let v = &h.state().viewport;
+            let a = v.screen_pos(rect, before.center).unwrap();
+            let tip = v
+                .screen_pos(rect, before.center + glam::Vec3::X * 0.15)
+                .unwrap();
+            let mid = a + (tip - a) * 0.6;
+            (mid, mid + (tip - a))
+        };
+        let yaw = h.state().viewport.camera.yaw;
+        h.hover_at(from);
+        h.run();
+        h.drag_at(from);
+        h.run();
+        for t in [0.25, 0.5, 0.75, 1.0] {
+            h.hover_at(from + (to - from) * t);
+            h.run();
+        }
+        h.drop_at(to);
+        h.run();
+        assert_eq!(
+            h.state().viewport.camera.yaw,
+            yaw,
+            "the handle doesn't orbit"
+        );
+        let s = h.state();
+        assert_eq!(
+            s.history.undo_label().as_deref(),
+            Some("Arrange pattern in 3D")
+        );
+        let after = placements(s)[0].1;
+        let moved = after.center - before.center;
+        assert!((moved.x - 0.15).abs() < 0.02, "{moved}");
+        assert!(moved.y.abs() < 1e-4 && moved.z.abs() < 1e-4, "{moved}");
+
+        // A drape starts from the new place.
+        h.get_by_label("Drape").click();
+        h.step();
+        let drape_x = {
+            let placed = h.state().viewport.drape.as_ref().unwrap().placed_patterns();
+            placed[0].mesh.bounds().unwrap().center().x
+        };
+        assert!((drape_x - after.center.x).abs() < 0.05, "{drape_x}");
+        h.state_mut().viewport.drape = None;
+        h.state_mut().viewport.draping = false;
+        h.run();
+
+        // Undo puts it back.
+        h.state_mut().undo();
+        h.run();
+        assert_eq!(placements(h.state())[0].1, before);
+    }
+
+    #[test]
+    fn arrangement_points_place_the_selection_and_reset_undoes_it() {
+        let mut h = harness();
+        let id = add_block(&mut h);
+        h.state_mut().selection.set(Some(id));
+        h.run();
+        h.get_by_label("Arrange").click();
+        h.run();
+        let rect = view_rect(&h);
+        let front = h.state().viewport.arrangement_points()[0];
+        assert_eq!(front.name, "Front torso");
+        let at = h.state().viewport.screen_pos(rect, front.position).unwrap();
+        click_at(&mut h, at);
+        let s = h.state();
+        let placed = placements(s)[0].1;
+        assert!(placed.center.distance(front.position) < 1e-5);
+        assert!(placed.normal().dot(glam::Vec3::Z) > 0.99, "faces forward");
+        assert_eq!(s.selection.primary(), Some(id), "the piece stays selected");
+
+        // Turning in 3D keeps it in place, facing a new way.
+        crate::panels::gizmo::turn_selected(h.state_mut(), 90.0);
+        let turned = placements(h.state())[0].1;
+        assert!(turned.center.distance(front.position) < 1e-5);
+        assert!(
+            turned.normal().dot(glam::Vec3::X) > 0.99,
+            "{}",
+            turned.normal()
+        );
+
+        crate::panels::gizmo::reset_selected(h.state_mut());
+        assert!(h.state().doc.pattern(id).unwrap().arrangement.is_none());
     }
 }

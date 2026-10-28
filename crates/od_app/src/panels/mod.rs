@@ -1,5 +1,6 @@
 //! One module per dockable tab.
 
+pub mod gizmo;
 pub mod history;
 pub mod library;
 pub mod objects;
