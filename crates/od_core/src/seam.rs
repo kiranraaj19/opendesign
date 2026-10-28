@@ -264,6 +264,52 @@ pub(crate) fn remap_edge(
     })
 }
 
+/// `edge` with the stretch of outline from parameter `from` forwards to
+/// `to` (both in `0..n`) taken out, in sewing order: unchanged if it doesn't
+/// reach into that stretch, shortened if one end does, in two if it runs
+/// right across. Empty if nothing is left.
+pub(crate) fn without_range(edge: &SeamEdge, from: f32, to: f32, n: f32) -> Vec<SeamEdge> {
+    let gap = ahead(from, to, n);
+    let piece = |start: f32, end: f32| {
+        (end - start > 1e-4).then_some(SeamEdge {
+            start: start.rem_euclid(n),
+            end: start.rem_euclid(n) + (end - start),
+            ..*edge
+        })
+    };
+    if (edge.end - edge.start - n).abs() < 1e-4 {
+        // The whole outline: all of it but the stretch.
+        return piece(to, to + n - gap).into_iter().collect();
+    }
+    let inside = |p: f32| {
+        let d = ahead(from, p, n);
+        d > 1e-4 && d < gap - 1e-4
+    };
+    let (mut start, mut end) = (edge.start, edge.end);
+    if inside(start.rem_euclid(n)) {
+        start += ahead(start, to, n);
+    }
+    if inside(end.rem_euclid(n)) {
+        end -= ahead(from, end, n);
+    }
+    let before = ahead(start, from, n);
+    let mut pieces: Vec<SeamEdge> = if before + gap < end - start + 1e-4 {
+        [
+            piece(start, start + before),
+            piece(start + before + gap, end),
+        ]
+        .into_iter()
+        .flatten()
+        .collect()
+    } else {
+        piece(start, end).into_iter().collect()
+    };
+    if !edge.forward {
+        pieces.reverse();
+    }
+    pieces
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -366,5 +412,38 @@ mod tests {
         // The whole outline stays the whole outline.
         let e = remap_edge(&edge(0.0, 4.0, true), &before, &after, &shift).unwrap();
         assert_eq!(e.end - e.start, 5.0);
+    }
+
+    #[test]
+    fn a_range_is_taken_out_of_edges() {
+        let ends = |es: Vec<SeamEdge>| es.iter().map(|e| (e.start, e.end)).collect::<Vec<_>>();
+        // Right across: two pieces, in sewing order either way.
+        assert_eq!(
+            ends(without_range(&edge(0.0, 4.0, true), 1.0, 3.0, 6.0)),
+            [(0.0, 1.0), (3.0, 4.0)]
+        );
+        assert_eq!(
+            ends(without_range(&edge(0.0, 4.0, false), 1.0, 3.0, 6.0)),
+            [(3.0, 4.0), (0.0, 1.0)]
+        );
+        // One end inside: shortened. Not reaching it: unchanged.
+        assert_eq!(
+            ends(without_range(&edge(2.0, 5.0, true), 1.0, 3.0, 6.0)),
+            [(3.0, 5.0)]
+        );
+        assert_eq!(
+            ends(without_range(&edge(3.0, 5.0, true), 1.0, 3.0, 6.0)),
+            [(3.0, 5.0)]
+        );
+        // Wrapping past point 0, and the whole outline.
+        assert_eq!(
+            ends(without_range(&edge(4.0, 8.0, true), 5.0, 0.0, 6.0)),
+            [(4.0, 5.0), (0.0, 2.0)]
+        );
+        assert_eq!(
+            ends(without_range(&edge(0.0, 6.0, true), 1.0, 3.0, 6.0)),
+            [(3.0, 7.0)]
+        );
+        assert!(without_range(&edge(1.5, 2.5, true), 1.0, 3.0, 6.0).is_empty());
     }
 }

@@ -292,7 +292,8 @@ pub fn outline_dart(
 
 /// The commands that add an outline dart (see [`outline_dart`]) to
 /// `pattern`: the new outline, and a seam sewing each leg from the edge
-/// to the apex.
+/// to the apex. A seam already on the edge where the V is cut is split
+/// either side of it, so the legs are only sewn to each other.
 pub fn add_outline_dart(
     pattern: &Pattern,
     at: Vec2,
@@ -302,6 +303,7 @@ pub fn add_outline_dart(
     use crate::command::{AddSewingLine, Batch, Command, SetOutline};
     use crate::document::SeamEdge;
     let (outline, k) = outline_dart(pattern, at, width, depth)?;
+    let far = ((k + 2) % outline.len()) as f32;
     let k = k as f32;
     let leg = |start: f32, forward: bool| SeamEdge {
         pattern: pattern.id,
@@ -310,7 +312,7 @@ pub fn add_outline_dart(
         forward,
     };
     let commands: Vec<Box<dyn Command>> = vec![
-        Box::new(SetOutline::new(pattern.id, "Add dart", outline)),
+        Box::new(SetOutline::new(pattern.id, "Add dart", outline).keeping_clear(k, far)),
         Box::new(AddSewingLine::new(
             vec![leg(k, true)],
             vec![leg(k + 1.0, false)],
@@ -559,6 +561,43 @@ mod tests {
         assert_eq!(k + 2, n, "the far point is point 0");
         // A V too deep for the piece doesn't fit.
         assert!(outline_dart(&p, Vec2::new(100.0, 0.0), 40.0, 150.0).is_none());
+    }
+
+    #[test]
+    fn a_dart_cut_into_a_sewn_edge_splits_the_seam_around_it() {
+        use crate::command::{AddSewingLine, Command};
+        use crate::document::{Document, SeamEdge};
+        let mut doc = Document::default();
+        let mut p = pattern(
+            geometry::rectangle(Vec2::ZERO, Vec2::new(200.0, 100.0))
+                .into_iter()
+                .map(OutlinePoint::corner)
+                .collect(),
+        );
+        p.id = doc.allocate_id();
+        let id = p.id;
+        doc.patterns.push(p.clone());
+        // The top edge sewn, backwards, to the bottom edge.
+        let edge = |start: f32, forward| SeamEdge {
+            pattern: id,
+            start,
+            end: start + 1.0,
+            forward,
+        };
+        AddSewingLine::new(vec![edge(0.0, false)], vec![edge(2.0, true)]).apply(&mut doc);
+        let mut add = add_outline_dart(&p, Vec2::new(100.0, -1.0), 40.0, 60.0).unwrap();
+        add.apply(&mut doc);
+        let after = doc.pattern(id).unwrap();
+        let top = &doc.sewing_lines[0].a;
+        assert_eq!(top.len(), 2, "{top:?}");
+        let pts: Vec<Vec<Vec2>> = top.iter().map(|e| after.edge_points(e)).collect();
+        // Sewn as before, right to left, skipping the V.
+        assert_eq!(pts[0], [Vec2::new(200.0, 0.0), Vec2::new(120.0, 0.0)]);
+        assert_eq!(pts[1], [Vec2::new(80.0, 0.0), Vec2::ZERO]);
+        let (a, _) = doc.sewing_lines[0].side_lengths(&doc).unwrap();
+        assert!((a - 160.0).abs() < 1e-3, "{a}");
+        add.undo(&mut doc);
+        assert_eq!(doc.sewing_lines[0].a, [edge(0.0, false)]);
     }
 
     #[test]

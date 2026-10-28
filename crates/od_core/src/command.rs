@@ -469,6 +469,9 @@ pub struct SetOutline {
     id: PatternId,
     label: String,
     outline: Vec<OutlinePoint>,
+    /// A stretch of the new outline, as parameters from and to, that seams
+    /// are kept off.
+    clear: Option<(f32, f32)>,
     /// The pattern and seams before the change, restored exactly on undo.
     before: Option<(Pattern, Vec<SewingLine>)>,
 }
@@ -479,8 +482,17 @@ impl SetOutline {
             id,
             label: label.into(),
             outline,
+            clear: None,
             before: None,
         }
+    }
+
+    /// Keep seams off the new outline from parameter `from` forwards to
+    /// `to` (a dart's V, say): a seam edge that ends up running into it is
+    /// shortened, or split into the parts either side.
+    pub fn keeping_clear(mut self, from: f32, to: f32) -> Self {
+        self.clear = Some((from, to));
+        self
     }
 }
 
@@ -502,6 +514,25 @@ impl Command for SetOutline {
         let seams = remap_sewing(doc, &before, &|b, a, t| {
             a.nearest_param(b.pos_at_param(t, TOLERANCE)).0
         });
+        if let Some((from, to)) = self.clear {
+            let (id, n) = (self.id, self.outline.len() as f32);
+            for line in &mut doc.sewing_lines {
+                for side in [&mut line.a, &mut line.b] {
+                    *side = side
+                        .iter()
+                        .flat_map(|e| {
+                            if e.pattern == id {
+                                seam::without_range(e, from, to, n)
+                            } else {
+                                vec![*e]
+                            }
+                        })
+                        .collect();
+                }
+            }
+            doc.sewing_lines
+                .retain(|l| !l.a.is_empty() && !l.b.is_empty());
+        }
         self.before = Some((before, seams));
     }
 
