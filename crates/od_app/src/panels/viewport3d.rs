@@ -745,7 +745,7 @@ pub fn export_turntable_frames(
                 }),
                 avatar_bounds: s.viewport.avatar.bounds,
                 patterns: &placed,
-                selected: None,
+                selected: &[],
                 theme: &theme,
                 pattern_colors: None,
                 pattern_materials: Some(&materials),
@@ -810,7 +810,7 @@ pub fn export_drape_frames(
                 }),
                 avatar_bounds: s.viewport.avatar.bounds,
                 patterns: &placed,
-                selected: None,
+                selected: &[],
                 theme: &theme,
                 pattern_colors: None,
                 pattern_materials: Some(&materials),
@@ -969,7 +969,15 @@ fn handle_input(
                     }
                 }
             } else {
-                s.selection = v.pick(rect, pos, placed);
+                let hit = v.pick(rect, pos, placed);
+                let adding = response
+                    .ctx
+                    .input(|i| i.modifiers.shift || i.modifiers.command);
+                match (hit, adding) {
+                    (Some(id), true) => s.selection.toggle(id),
+                    (None, true) => {}
+                    (hit, false) => s.selection.set(hit),
+                }
             }
         }
     }
@@ -1026,7 +1034,7 @@ fn paint(ui: &mut egui::Ui, rect: Rect, s: &Session, placed: &[PlacedPattern<Pat
             }),
             avatar_bounds: v.avatar.bounds,
             patterns: placed,
-            selected: s.selection,
+            selected: s.selection.ids(),
             theme: &theme,
             pattern_colors: strain_colors.as_deref(),
             pattern_materials: Some(&materials),
@@ -1226,7 +1234,7 @@ mod tests {
         Session {
             doc: Document::default(),
             history: History::new(),
-            selection: None,
+            selection: Default::default(),
             selected_seam: None,
             selected_tack: None,
             tack_start: None,
@@ -1293,7 +1301,7 @@ mod tests {
         let s = h.state_mut();
         let outline = geometry::rectangle(Vec2::ZERO, Vec2::new(400.0, 500.0));
         s.add_pattern("Panel", outline);
-        s.selection = None;
+        s.selection.set(None);
         let id = s.doc.patterns[0].id;
         h.run();
         id
@@ -1459,7 +1467,7 @@ mod tests {
             "clicking the cloth while pinning adds a pin"
         );
         // Pinning takes over clicks instead of selecting the pattern.
-        assert_eq!(h.state().selection, None);
+        assert_eq!(h.state().selection.primary(), None);
 
         // Click just inside the mesh from the pin itself: close enough
         // that it's still the nearest particle, but off the exact vertex,
@@ -1626,11 +1634,11 @@ mod tests {
         assert!(rect.contains(on_pattern));
 
         click_at(&mut h, on_pattern);
-        assert_eq!(h.state().selection, Some(id));
+        assert_eq!(h.state().selection.primary(), Some(id));
 
         // Empty space clears it, as in the 2D window.
         click_at(&mut h, rect.left_bottom() + vec2(30.0, -30.0));
-        assert_eq!(h.state().selection, None);
+        assert_eq!(h.state().selection.primary(), None);
     }
 
     #[test]

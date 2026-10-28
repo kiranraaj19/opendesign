@@ -198,7 +198,7 @@ fn fabrics(ui: &mut egui::Ui, s: &mut Session) {
     egui::CollapsingHeader::new("Fabrics")
         .default_open(true)
         .show(ui, |ui| {
-            if s.selection.is_none() {
+            if s.selection.primary().is_none() {
                 ui.weak("Select a pattern to assign a fabric.");
             } else {
                 ui.weak("Assign a fabric in the Properties panel.");

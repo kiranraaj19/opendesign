@@ -88,9 +88,17 @@ enum SewBuild {
 }
 
 enum Drag {
+    /// Moving every selected pattern.
     Move {
-        id: PatternId,
+        ids: Vec<PatternId>,
         delta: Vec2,
+    },
+    /// Selecting the patterns a box touches, adding to the selection if
+    /// `add`.
+    Select {
+        start: Vec2,
+        end: Vec2,
+        add: bool,
     },
     Rect {
         start: Vec2,
@@ -579,6 +587,13 @@ pub fn ui(ui: &mut egui::Ui, s: &mut Session) {
     );
 }
 
+/// Whether Shift or Ctrl (Cmd on macOS) is held, to add to the selection.
+fn adding(response: &egui::Response) -> bool {
+    response
+        .ctx
+        .input(|i| i.modifiers.shift || i.modifiers.command)
+}
+
 /// The press position of the current primary drag, in document space.
 fn press_origin(response: &egui::Response, rect: Rect, canvas: &Canvas2D) -> Option<Vec2> {
     response
@@ -600,10 +615,17 @@ fn handle_drag_tools(response: &egui::Response, rect: Rect, s: &mut Session) {
             Some(_) => None,
             None => pointer.and_then(|p| s.canvas.seam_at(&s.doc, p)),
         };
-        s.selection = match (s.selected_tack, s.selected_seam) {
+        let hit = match (s.selected_tack, s.selected_seam) {
             (None, None) => pointer.and_then(|p| s.doc.pattern_at(p)),
             _ => None,
         };
+        // Shift or Ctrl adds or removes a pattern; a click on nothing with
+        // either held keeps the selection.
+        match (hit, adding(response)) {
+            (Some(id), true) => s.selection.toggle(id),
+            (None, true) => {}
+            (hit, false) => s.selection.set(hit),
+        }
     }
 
     // egui reports a drag only after the pointer has moved a few pixels, so
@@ -621,17 +643,28 @@ fn handle_drag_tools(response: &egui::Response, rect: Rect, s: &mut Session) {
                     });
                     match (end, edge) {
                         (Some(end), Some(edge)) => Some(Drag::SeamEnd { end, edge }),
-                        _ => {
-                            s.selection = s.doc.pattern_at(origin);
-                            if s.selection.is_some() {
+                        _ => match s.doc.pattern_at(origin) {
+                            // Dragging a selected pattern moves the whole
+                            // selection; dragging another selects it first.
+                            Some(id) => {
+                                if adding(response) {
+                                    s.selection.add(id);
+                                } else if !s.selection.contains(id) {
+                                    s.selection.set(Some(id));
+                                }
                                 s.selected_seam = None;
                                 s.selected_tack = None;
+                                Some(Drag::Move {
+                                    ids: s.selection.ids().to_vec(),
+                                    delta: p - origin,
+                                })
                             }
-                            s.selection.map(|id| Drag::Move {
-                                id,
-                                delta: p - origin,
-                            })
-                        }
+                            None => Some(Drag::Select {
+                                start: origin,
+                                end: p,
+                                add: adding(response),
+                            }),
+                        },
                     }
                 }
                 _ => Some(Drag::Rect {
@@ -657,6 +690,11 @@ fn handle_drag_tools(response: &egui::Response, rect: Rect, s: &mut Session) {
         }
         match &mut s.canvas.drag {
             Some(Drag::Move { delta, .. }) => *delta += Vec2::new(step.x, step.y),
+            Some(Drag::Select { end, .. }) => {
+                if let Some(p) = pointer {
+                    *end = p;
+                }
+            }
             Some(Drag::Rect { end, .. }) => {
                 if let Some(p) = snapped {
                     *end = p;
@@ -669,8 +707,28 @@ fn handle_drag_tools(response: &egui::Response, rect: Rect, s: &mut Session) {
     // Only a finished drag becomes a command, so one drag is one undo step.
     if response.drag_stopped() {
         match s.canvas.drag.take() {
-            Some(Drag::Move { id, delta }) if delta != Vec2::ZERO => {
-                s.execute(MovePattern::new(id, delta));
+            Some(Drag::Move { ids, delta }) if delta != Vec2::ZERO => {
+                s.for_each(ids, "Move", "patterns", |id| {
+                    Box::new(MovePattern::new(id, delta))
+                });
+            }
+            Some(Drag::Select { start, end, add }) => {
+                let lo = Vec2::new(start.x.min(end.x), start.y.min(end.y));
+                let hi = Vec2::new(start.x.max(end.x), start.y.max(end.y));
+                let inside = s.doc.patterns.iter().filter_map(|p| {
+                    let (min, max) = p.bounds()?;
+                    let touches = min.x <= hi.x && max.x >= lo.x && min.y <= hi.y && max.y >= lo.y;
+                    touches.then_some(p.id)
+                });
+                let ids: Vec<_> = inside.collect();
+                if !add {
+                    s.selection.clear();
+                }
+                for id in ids {
+                    s.selection.add(id);
+                }
+                s.selected_seam = None;
+                s.selected_tack = None;
             }
             Some(Drag::SeamEnd { end, edge }) => {
                 let current = s
@@ -724,14 +782,15 @@ fn handle_draft(
             }
             if open_line && s.canvas.draft.is_empty() {
                 // A line belongs to the pattern it starts in (or on).
-                s.canvas.draft_owner = s
-                    .doc
-                    .pattern_at(raw)
-                    .or_else(|| s.canvas.edge_at(&s.doc, s.selection, raw).map(|h| h.id));
+                s.canvas.draft_owner = s.doc.pattern_at(raw).or_else(|| {
+                    s.canvas
+                        .edge_at(&s.doc, s.selection.primary(), raw)
+                        .map(|h| h.id)
+                });
                 if s.canvas.draft_owner.is_none() {
                     return;
                 }
-                s.selection = s.canvas.draft_owner;
+                s.selection.set(s.canvas.draft_owner);
             }
             let curve = pen && ui.input(|i| i.modifiers.shift);
             let point = if curve {
@@ -793,13 +852,13 @@ fn handle_edit_points(response: &egui::Response, rect: Rect, s: &mut Session) {
 
     if response.clicked() {
         if let Some(p) = pointer {
-            match s.canvas.point_at(&s.doc, s.selection, p) {
+            match s.canvas.point_at(&s.doc, s.selection.primary(), p) {
                 Some((id, index)) => {
-                    s.selection = Some(id);
+                    s.selection.set(Some(id));
                     s.canvas.selected_point = Some((id, index));
                 }
                 None => {
-                    s.selection = s.doc.pattern_at(p);
+                    s.selection.set(s.doc.pattern_at(p));
                     s.canvas.selected_point = None;
                 }
             }
@@ -807,7 +866,7 @@ fn handle_edit_points(response: &egui::Response, rect: Rect, s: &mut Session) {
     }
     if response.double_clicked() {
         if let Some(p) = pointer {
-            if let Some((id, index)) = s.canvas.point_at(&s.doc, s.selection, p) {
+            if let Some((id, index)) = s.canvas.point_at(&s.doc, s.selection.primary(), p) {
                 let kind = s
                     .doc
                     .pattern(id)
@@ -816,7 +875,7 @@ fn handle_edit_points(response: &egui::Response, rect: Rect, s: &mut Session) {
                 if let Some(kind) = kind {
                     s.execute(SetPointKind::new(id, index, kind.toggled()));
                 }
-            } else if let Some(hit) = s.canvas.edge_at(&s.doc, s.selection, p) {
+            } else if let Some(hit) = s.canvas.edge_at(&s.doc, s.selection.primary(), p) {
                 let count = s.doc.pattern(hit.id).map_or(0, |pat| pat.outline.len());
                 let index = (hit.param.floor() as usize % count.max(1)) + 1;
                 s.execute(InsertPoint::new(
@@ -824,7 +883,7 @@ fn handle_edit_points(response: &egui::Response, rect: Rect, s: &mut Session) {
                     index,
                     OutlinePoint::corner(hit.pos),
                 ));
-                s.selection = Some(hit.id);
+                s.selection.set(Some(hit.id));
                 s.canvas.selected_point = Some((hit.id, index));
             }
         }
@@ -832,12 +891,12 @@ fn handle_edit_points(response: &egui::Response, rect: Rect, s: &mut Session) {
 
     if response.drag_started_by(PointerButton::Primary) {
         if let Some(origin) = press_origin(response, rect, &s.canvas) {
-            if let Some((id, index)) = s.canvas.point_at(&s.doc, s.selection, origin) {
+            if let Some((id, index)) = s.canvas.point_at(&s.doc, s.selection.primary(), origin) {
                 let pos = s
                     .doc
                     .pattern(id)
                     .map_or(origin, |pat| pat.outline[index].pos);
-                s.selection = Some(id);
+                s.selection.set(Some(id));
                 s.canvas.selected_point = Some((id, index));
                 s.canvas.drag = Some(Drag::Point {
                     id,
@@ -886,13 +945,13 @@ fn handle_notch(response: &egui::Response, rect: Rect, s: &mut Session) {
     else {
         return;
     };
-    let Some(hit) = s.canvas.edge_at(&s.doc, s.selection, p) else {
+    let Some(hit) = s.canvas.edge_at(&s.doc, s.selection.primary(), p) else {
         return;
     };
     let Some(pattern) = s.doc.pattern(hit.id) else {
         return;
     };
-    s.selection = Some(hit.id);
+    s.selection.set(Some(hit.id));
     let poly = pattern.polyline(TOLERANCE);
     let reach = s.canvas.px(PICK_PX);
     let existing = pattern.notches.iter().position(|n| {
@@ -919,14 +978,14 @@ fn handle_trim(ui: &egui::Ui, response: &egui::Response, rect: Rect, s: &mut Ses
         return;
     };
     let p = s.canvas.to_doc(rect, screen);
-    let Some(id) = s
-        .doc
-        .pattern_at(p)
-        .or_else(|| s.canvas.edge_at(&s.doc, s.selection, p).map(|h| h.id))
-    else {
+    let Some(id) = s.doc.pattern_at(p).or_else(|| {
+        s.canvas
+            .edge_at(&s.doc, s.selection.primary(), p)
+            .map(|h| h.id)
+    }) else {
         return;
     };
-    s.selection = Some(id);
+    s.selection.set(Some(id));
     let Some(pattern) = s.doc.pattern(id) else {
         return;
     };
@@ -1003,7 +1062,7 @@ fn handle_sew(response: &egui::Response, rect: Rect, s: &mut Session) {
     // multi-edge seam is already being built (that takes over point
     // clicks near a corner, so edges there can still be picked).
     if !matches!(s.canvas.sew_pending, Some(SewBuild::Edges { .. })) {
-        if let Some((id, index)) = s.canvas.point_at(&s.doc, s.selection, release) {
+        if let Some((id, index)) = s.canvas.point_at(&s.doc, s.selection.primary(), release) {
             if let Some(at) = s.doc.pattern(id).map(|p| p.outline[index].pos) {
                 handle_sew_point(s, TackPoint { pattern: id, at });
             }
@@ -1015,8 +1074,9 @@ fn handle_sew(response: &egui::Response, rect: Rect, s: &mut Session) {
     let dragged = press.is_some_and(|p| p.distance(release) > s.canvas.px(PICK_PX));
     let edge = if dragged {
         let (a, b) = (
-            s.canvas.edge_at(&s.doc, s.selection, press.unwrap()),
-            s.canvas.edge_at(&s.doc, s.selection, release),
+            s.canvas
+                .edge_at(&s.doc, s.selection.primary(), press.unwrap()),
+            s.canvas.edge_at(&s.doc, s.selection.primary(), release),
         );
         match (a, b) {
             // From where the drag began to where it ended, the shorter way
@@ -1028,7 +1088,8 @@ fn handle_sew(response: &egui::Response, rect: Rect, s: &mut Session) {
             _ => None,
         }
     } else {
-        s.canvas.segment_edge(&s.doc, s.selection, release)
+        s.canvas
+            .segment_edge(&s.doc, s.selection.primary(), release)
     };
     if let Some(edge) = edge {
         handle_sew_edge(s, edge);
@@ -1039,7 +1100,7 @@ fn handle_sew(response: &egui::Response, rect: Rect, s: &mut Session) {
 /// from (or add it to) the side currently being built, or start a new
 /// build with it.
 fn handle_sew_edge(s: &mut Session, edge: SeamEdge) {
-    s.selection = Some(edge.pattern);
+    s.selection.set(Some(edge.pattern));
     if s.canvas.sew_pending.is_none() {
         let sewn = s
             .doc
@@ -1074,7 +1135,7 @@ fn handle_sew_edge(s: &mut Session, edge: SeamEdge) {
 /// Handle one point pick: untack an existing tack that uses it, complete a
 /// pending point into a tack, or start a new pending point.
 fn handle_sew_point(s: &mut Session, point: TackPoint) {
-    s.selection = Some(point.pattern);
+    s.selection.set(Some(point.pattern));
     if s.canvas.sew_pending.is_none() {
         let tacked = s.doc.tacks.iter().find(|t| t.points().any(|p| *p == point));
         if let Some(tacked) = tacked {
@@ -1139,7 +1200,7 @@ pub fn seam_color(s: &Session, index: usize, pal: &theme::Palette) -> Color32 {
 /// The pattern as it should look this frame, with any drag in progress.
 fn previewed<'a>(s: &Session, pattern: &'a Pattern) -> std::borrow::Cow<'a, Pattern> {
     match &s.canvas.drag {
-        Some(Drag::Move { id, delta }) if *id == pattern.id => {
+        Some(Drag::Move { ids, delta }) if ids.contains(&pattern.id) => {
             let mut p = pattern.clone();
             p.translate(*delta);
             std::borrow::Cow::Owned(p)
@@ -1170,7 +1231,7 @@ fn draw_pattern(
         return;
     }
     let points: Vec<Pos2> = poly.iter().map(|p| to_screen(*p)).collect();
-    let selected = s.selection == Some(pattern.id);
+    let selected = s.selection.contains(pattern.id);
 
     // Seam allowance, dashed outside the outline.
     let allowance = s
@@ -1370,7 +1431,7 @@ fn draw_sewing_lines(painter: &egui::Painter, rect: Rect, s: &Session, pal: &the
 
     // Tacked points move with a pattern being dragged.
     let at = |point: &TackPoint| match &s.canvas.drag {
-        Some(Drag::Move { id, delta }) if *id == point.pattern => point.at + *delta,
+        Some(Drag::Move { ids, delta }) if ids.contains(&point.pattern) => point.at + *delta,
         _ => point.at,
     };
     let mark = |at: Pos2, color: Color32| {
@@ -1542,6 +1603,17 @@ fn draw_overlays(painter: &egui::Painter, rect: Rect, s: &Session, pal: &theme::
             pal.preview,
         );
     };
+
+    if let Some(Drag::Select { start, end, .. }) = &canvas.drag {
+        let box_rect = Rect::from_two_pos(to_screen(*start), to_screen(*end));
+        painter.rect_filled(box_rect, 0.0, pal.preview.gamma_multiply(0.08));
+        painter.rect_stroke(
+            box_rect,
+            0.0,
+            Stroke::new(1.0, pal.preview),
+            egui::StrokeKind::Inside,
+        );
+    }
 
     if let Some(Drag::Rect { start, end }) = &canvas.drag {
         let points = geometry::rectangle(*start, *end)

@@ -128,7 +128,7 @@ fn main() {
         }),
         avatar_bounds: body,
         patterns: &placed,
-        selected: Some(1),
+        selected: &[1],
         theme: &theme,
         pattern_colors: None,
         pattern_materials: None,

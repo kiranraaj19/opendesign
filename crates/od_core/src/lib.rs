@@ -16,11 +16,12 @@ pub mod seam;
 
 pub use bom::{document_bom, piece_bom, total_area_m2, PieceBom};
 pub use command::{
-    AddInternalLine, AddNotch, AddPattern, AddSewingLine, AddTack, AddTopstitch, AddTrim, Command,
-    DeletePattern, DeletePoint, DuplicatePattern, FlipSeamSide, InsertPoint, MirrorPattern,
-    MovePattern, MovePoint, PatternValue, RemoveInternalLine, RemoveNotch, RemoveSewingLine,
-    RemoveTack, RemoveTopstitch, RemoveTrim, RenamePattern, SetFabric, SetGrading,
-    SetParticleDistance, SetPatternValue, SetPointKind, SetSeamEdge, PARTICLE_DISTANCE_RANGE,
+    AddInternalLine, AddNotch, AddPattern, AddSewingLine, AddTack, AddTopstitch, AddTrim, Batch,
+    Command, DeletePattern, DeletePoint, DuplicatePattern, FlipSeamSide, InsertPoint,
+    MirrorPattern, MovePattern, MovePoint, PatternValue, RemoveInternalLine, RemoveNotch,
+    RemoveSewingLine, RemoveTack, RemoveTopstitch, RemoveTrim, RenamePattern, SetFabric,
+    SetGrading, SetParticleDistance, SetPatternValue, SetPointKind, SetSeamEdge,
+    PARTICLE_DISTANCE_RANGE,
 };
 pub use document::{
     Axis, Document, Fabric, FabricTexture, Grading, InternalLine, Notch, OutlinePoint, Pattern,

@@ -3,9 +3,9 @@
 use egui::{Key, KeyboardShortcut, Modifiers};
 use egui_dock::{DockArea, DockState, NodeIndex, Style, TabViewer};
 use od_core::{
-    AddPattern, AddTack, Axis, Command, DeletePattern, DeletePoint, Document, DuplicatePattern,
-    History, MirrorPattern, OutlinePoint, PatternId, RemoveSewingLine, RemoveTack, SetPointKind,
-    SewingLine, SewingLineId, TackId, TackPoint, TackTarget, Vec2,
+    AddPattern, AddTack, Axis, Batch, Command, DeletePattern, DeletePoint, Document,
+    DuplicatePattern, History, MirrorPattern, OutlinePoint, PatternId, RemoveSewingLine,
+    RemoveTack, SetPointKind, SewingLine, SewingLineId, TackId, TackPoint, TackTarget, Vec2,
 };
 
 use crate::files::{Discard, FileState, RECENT_KEY};
@@ -13,6 +13,7 @@ use crate::i18n::{self, Key as TKey, Locale};
 use crate::panels::{
     self, pattern2d::Canvas2D, properties::PropertiesState, viewport3d::Viewport3D,
 };
+use crate::selection::Selection;
 use crate::theme;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
@@ -171,7 +172,7 @@ impl SeamCheck {
 pub struct Session {
     pub doc: Document,
     pub history: History,
-    pub selection: Option<PatternId>,
+    pub selection: Selection,
     /// A selected seam or tack. Selecting one clears the others.
     pub selected_seam: Option<SewingLineId>,
     pub selected_tack: Option<TackId>,
@@ -196,13 +197,13 @@ impl Session {
     /// Add a straight-edged pattern and select it.
     pub fn add_pattern(&mut self, name: impl Into<String>, outline: Vec<Vec2>) {
         self.execute(AddPattern::new(name, outline));
-        self.selection = self.doc.patterns.last().map(|p| p.id);
+        self.selection.set(self.doc.patterns.last().map(|p| p.id));
     }
 
     /// Add a pattern with corner and curve points and select it.
     pub fn add_outline(&mut self, name: impl Into<String>, outline: Vec<OutlinePoint>) {
         self.execute(AddPattern::with_outline(name, outline));
-        self.selection = self.doc.patterns.last().map(|p| p.id);
+        self.selection.set(self.doc.patterns.last().map(|p| p.id));
     }
 
     pub fn undo(&mut self) {
@@ -224,7 +225,7 @@ impl Session {
                 // A new tack goes last; select it so it shows in Properties.
                 self.selected_tack = self.doc.tacks.last().map(|t| t.id);
                 self.selected_seam = None;
-                self.selection = None;
+                self.selection.set(None);
             }
         }
     }
@@ -249,8 +250,27 @@ impl Session {
             self.execute(RemoveSewingLine::new(id));
             return;
         }
-        if let Some(id) = self.selection.take() {
-            self.execute(DeletePattern::new(id));
+        let ids = self.selection.ids().to_vec();
+        self.selection.clear();
+        self.for_each(ids, "Delete", "patterns", |id| {
+            Box::new(DeletePattern::new(id))
+        });
+    }
+
+    /// Run `command` on each of `ids` as one undo step: on its own for one
+    /// pattern, else in a [`Batch`] labelled like "Delete 3 patterns".
+    pub fn for_each(
+        &mut self,
+        ids: Vec<PatternId>,
+        verb: &str,
+        noun: &str,
+        mut command: impl FnMut(PatternId) -> Box<dyn Command>,
+    ) {
+        let mut commands: Vec<_> = ids.into_iter().map(&mut command).collect();
+        match commands.len() {
+            0 => {}
+            1 => self.history.execute(&mut self.doc, commands.remove(0)),
+            n => self.execute(Batch::new(format!("{verb} {n} {noun}"), commands)),
         }
     }
 
@@ -269,29 +289,40 @@ impl Session {
         }
     }
 
-    /// Flip the selected pattern in place.
+    /// Flip each selected pattern in place.
     pub fn mirror_selected(&mut self, axis: Axis) {
-        if let Some(id) = self.selection {
-            self.execute(MirrorPattern::new(id, axis));
+        let ids = self.selection.ids().to_vec();
+        self.for_each(ids, "Flip", "patterns", |id| {
+            Box::new(MirrorPattern::new(id, axis))
+        });
+    }
+
+    /// Copy the selected patterns, optionally mirrored, and select the
+    /// copies.
+    pub fn duplicate_selected(&mut self, mirror: Option<Axis>) {
+        let ids = self.selection.ids().to_vec();
+        let count = self.doc.patterns.len();
+        self.for_each(ids, "Duplicate", "patterns", |id| {
+            Box::new(DuplicatePattern::new(id, mirror))
+        });
+        // Copies go last, in the order their sources were selected.
+        let copies: Vec<_> = self.doc.patterns[count..].iter().map(|p| p.id).collect();
+        if !copies.is_empty() {
+            self.selection.set_all(copies);
         }
     }
 
-    /// Copy the selected pattern, optionally mirrored, and select the copy.
-    pub fn duplicate_selected(&mut self, mirror: Option<Axis>) {
-        if let Some(id) = self.selection {
-            self.execute(DuplicatePattern::new(id, mirror));
-            self.selection = self.doc.patterns.last().map(|p| p.id);
-        }
+    /// Select every pattern.
+    pub fn select_all(&mut self) {
+        self.selection
+            .set_all(self.doc.patterns.iter().map(|p| p.id));
+        self.selected_seam = None;
+        self.selected_tack = None;
     }
 
     /// Drop selections that undo or redo made stale.
     fn fix_selection(&mut self) {
-        if self
-            .selection
-            .is_some_and(|id| self.doc.pattern(id).is_none())
-        {
-            self.selection = None;
-        }
+        self.selection.retain_existing(&self.doc);
         if self
             .selected_seam
             .is_some_and(|id| self.doc.sewing_line(id).is_none())
@@ -311,7 +342,7 @@ impl Session {
             self.tack_start = None;
         }
         if let Some((id, index)) = self.canvas.selected_point {
-            let valid = self.selection == Some(id)
+            let valid = self.selection.primary() == Some(id)
                 && self
                     .doc
                     .pattern(id)
@@ -327,7 +358,7 @@ impl Session {
         self.preview_size = doc.size_chart.base;
         self.doc = doc;
         self.history.clear();
-        self.selection = None;
+        self.selection.set(None);
         self.selected_seam = None;
         self.selected_tack = None;
         self.tack_start = None;
@@ -358,7 +389,7 @@ impl OpenDesignApp {
             session: Session {
                 doc: Document::default(),
                 history: History::new(),
-                selection: None,
+                selection: Default::default(),
                 selected_seam: None,
                 selected_tack: None,
                 tack_start: None,
@@ -409,6 +440,10 @@ impl OpenDesignApp {
         if shortcut(Modifiers::COMMAND, Key::D) {
             s.duplicate_selected(None);
         }
+        let typing = ctx.memory(|m| m.focused().is_some());
+        if !typing && shortcut(Modifiers::COMMAND, Key::A) {
+            s.select_all();
+        }
 
         // Single-key shortcuts must not fire while typing in a text field.
         if ctx.memory(|m| m.focused().is_some()) {
@@ -426,6 +461,11 @@ impl OpenDesignApp {
         }
         if ctx.input(|i| i.key_pressed(Key::C)) {
             s.toggle_selected_point();
+        }
+        // Esc while selecting clears the selection; other tools use Esc to
+        // cancel what they're drawing.
+        if s.tool == Tool::Select && ctx.input(|i| i.key_pressed(Key::Escape)) {
+            s.selection.clear();
         }
     }
 
@@ -588,7 +628,7 @@ impl OpenDesignApp {
                 ui.separator();
                 if ui
                     .add_enabled(
-                        s.selection.is_some()
+                        s.selection.primary().is_some()
                             || s.selected_seam.is_some()
                             || s.selected_tack.is_some(),
                         egui::Button::new(tr(TKey::Delete)).shortcut_text("Del"),
@@ -680,7 +720,7 @@ impl OpenDesignApp {
         ui.horizontal(|ui| {
             ui.label(format!("Tool: {}", s.tool.name()));
             ui.separator();
-            let pattern = s.selection.and_then(|id| s.doc.pattern(id));
+            let pattern = s.selection.primary().and_then(|id| s.doc.pattern(id));
             let selected = match (pattern, s.selected_seam, s.selected_tack) {
                 (Some(p), _, _) => format!("Selected: {}", p.name),
                 (None, Some(_), _) => "Selected: seam".to_owned(),
@@ -709,7 +749,7 @@ impl OpenDesignApp {
                 {
                     s.selected_seam = Some(first);
                     s.selected_tack = None;
-                    s.selection = None;
+                    s.selection.set(None);
                 }
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -2055,7 +2095,7 @@ mod tests {
 
         // Re-selecting the first pattern (2D canvas) shows it still has
         // its fabric, unaffected by the second pattern's selection.
-        h.state_mut().session.selection = Some(front);
+        h.state_mut().session.selection.set(Some(front));
         h.run();
         assert_eq!(
             h.state().session.doc.pattern(front).unwrap().fabric,
@@ -2079,7 +2119,7 @@ mod tests {
                 "Right",
                 od_core::geometry::rectangle(Vec2::new(300.0, 0.0), Vec2::new(500.0, 150.0)),
             );
-            s.selection = None;
+            s.selection.set(None);
         }
         h.run();
         press(&mut h, Modifiers::NONE, Key::S);
@@ -2143,7 +2183,7 @@ mod tests {
         assert_eq!(h.state().session.selected_seam, None);
         click_mm(&mut h, 200.0, 75.0);
         assert_eq!(h.state().session.selected_seam, Some(id));
-        assert_eq!(h.state().session.selection, None);
+        assert_eq!(h.state().session.selection.primary(), None);
         h.get_by_label("Selected: seam");
         h.get_by_label("1:1");
 
@@ -2232,5 +2272,89 @@ mod tests {
         assert!(h.state().session.doc.tacks.is_empty());
         press(&mut h, Modifiers::COMMAND, Key::Z);
         assert_eq!(h.state().session.doc.tacks, [tack]);
+    }
+
+    /// Two 100 × 80 mm rectangles side by side, not selected.
+    fn two_pieces(h: &mut Harness<'_, OpenDesignApp>) -> [PatternId; 2] {
+        let s = &mut h.state_mut().session;
+        s.add_pattern(
+            "Left",
+            od_core::geometry::rectangle(Vec2::ZERO, Vec2::new(100.0, 80.0)),
+        );
+        s.add_pattern(
+            "Right",
+            od_core::geometry::rectangle(Vec2::new(150.0, 0.0), Vec2::new(250.0, 80.0)),
+        );
+        s.selection.clear();
+        let ids = [s.doc.patterns[0].id, s.doc.patterns[1].id];
+        h.run();
+        ids
+    }
+
+    #[test]
+    fn shift_click_selects_several_and_delete_removes_them_in_one_step() {
+        let mut h = harness();
+        let [left, right] = two_pieces(&mut h);
+        let at = screen(&h, 50.0, 40.0);
+        click_at(&mut h, at, Modifiers::NONE);
+        let at = screen(&h, 200.0, 40.0);
+        click_at(&mut h, at, Modifiers::SHIFT);
+        assert_eq!(h.state().session.selection.ids(), [left, right]);
+        assert!(h.query_by_label("2 patterns selected").is_some());
+        // Shift-clicking a selected piece takes it back out.
+        let at = screen(&h, 50.0, 40.0);
+        click_at(&mut h, at, Modifiers::SHIFT);
+        assert_eq!(h.state().session.selection.ids(), [right]);
+        let at = screen(&h, 50.0, 40.0);
+        click_at(&mut h, at, Modifiers::SHIFT);
+
+        press(&mut h, Modifiers::NONE, Key::Delete);
+        assert_eq!(pattern_count(&h), 0);
+        assert_eq!(last_step(&h), "Delete 2 patterns");
+        press(&mut h, Modifiers::COMMAND, Key::Z);
+        assert_eq!(pattern_count(&h), 2);
+    }
+
+    #[test]
+    fn a_box_selects_what_it_touches_and_dragging_moves_them_together() {
+        let mut h = harness();
+        let [left, right] = two_pieces(&mut h);
+        // From empty space below-left, across both pieces.
+        let (from, to) = (screen(&h, -30.0, 120.0), screen(&h, 160.0, 40.0));
+        drag(&mut h, from, to);
+        assert_eq!(pattern_count(&h), 2, "the Select tool doesn't draw");
+        let mut ids = h.state().session.selection.ids().to_vec();
+        ids.sort_by_key(|id| id.0);
+        assert_eq!(ids, [left, right]);
+
+        let (from, to) = (screen(&h, 50.0, 40.0), screen(&h, 50.0, 140.0));
+
+        drag(&mut h, from, to);
+        assert_eq!(last_step(&h), "Move 2 patterns");
+        let first = |h: &Harness<'_, OpenDesignApp>, id| {
+            h.state().session.doc.pattern(id).unwrap().outline[0].pos
+        };
+        assert_near(first(&h, left), Vec2::new(0.0, 100.0));
+        assert_near(first(&h, right), Vec2::new(150.0, 100.0));
+        press(&mut h, Modifiers::COMMAND, Key::Z);
+        assert_near(first(&h, left), Vec2::ZERO);
+        assert_near(first(&h, right), Vec2::new(150.0, 0.0));
+    }
+
+    #[test]
+    fn select_all_duplicates_together_and_escape_clears() {
+        let mut h = harness();
+        two_pieces(&mut h);
+        press(&mut h, Modifiers::COMMAND, Key::A);
+        assert_eq!(h.state().session.selection.len(), 2);
+        press(&mut h, Modifiers::COMMAND, Key::D);
+        assert_eq!(pattern_count(&h), 4);
+        assert_eq!(last_step(&h), "Duplicate 2 patterns");
+        // The copies are what's selected now.
+        let s = &h.state().session;
+        let copies: Vec<_> = s.doc.patterns[2..].iter().map(|p| p.id).collect();
+        assert_eq!(s.selection.ids(), copies);
+        press(&mut h, Modifiers::NONE, Key::Escape);
+        assert_eq!(h.state().session.selection.len(), 0);
     }
 }

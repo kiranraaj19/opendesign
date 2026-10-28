@@ -67,7 +67,8 @@ pub struct FrameInput<'a, K> {
     pub avatar: Option<AvatarDraw>,
     pub avatar_bounds: Aabb,
     pub patterns: &'a [PlacedPattern<K>],
-    pub selected: Option<K>,
+    /// Patterns drawn highlighted.
+    pub selected: &'a [K],
     pub theme: &'a Theme,
     /// Per-vertex colors for `patterns`, in the same order (e.g. a strain
     /// heatmap), overriding the theme fill for that pattern. An entry
@@ -87,7 +88,7 @@ pub fn compose_frame<K: PartialEq>(input: FrameInput<'_, K>) -> Frame {
     let mut frame = Frame::new(Globals::new(input.camera, input.aspect, input.encode_srgb));
     frame.avatar = input.avatar;
     for (i, p) in input.patterns.iter().enumerate() {
-        let selected = input.selected.as_ref() == Some(&p.key);
+        let selected = input.selected.contains(&p.key);
         let material = input.pattern_materials.and_then(|m| m.get(i)?.as_ref());
         let (fill, line) = if selected {
             (theme.selected, theme.selected)
@@ -247,7 +248,7 @@ mod tests {
             avatar: None,
             avatar_bounds: avatar.bounds().unwrap(),
             patterns: &placed,
-            selected: Some(2),
+            selected: &[2],
             theme: &theme,
             pattern_colors: None,
             pattern_materials: None,
@@ -292,7 +293,7 @@ mod tests {
             avatar: None,
             avatar_bounds: avatar.bounds().unwrap(),
             patterns: &placed[..2],
-            selected: None,
+            selected: &[],
             theme: &theme,
             pattern_colors: Some(&colors),
             pattern_materials: None,
@@ -345,7 +346,7 @@ mod tests {
             // Pattern 1 (index 1 in `placed`, since keys start at 1) is
             // selected: its texture should be skipped in favour of the
             // theme's selection tint.
-            selected: Some(2),
+            selected: &[2],
             theme: &theme,
             pattern_colors: None,
             pattern_materials: Some(&materials),
@@ -370,7 +371,7 @@ mod tests {
             avatar: None,
             avatar_bounds: avatar.bounds().unwrap(),
             patterns: &placed[..3],
-            selected: None,
+            selected: &[],
             theme: &theme,
             pattern_colors: None,
             pattern_materials: Some(&materials),

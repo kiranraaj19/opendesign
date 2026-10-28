@@ -137,7 +137,7 @@ mod tests {
                 }),
                 avatar_bounds: bounds,
                 patterns: &[],
-                selected: None,
+                selected: &[],
                 theme: &theme,
                 pattern_colors: None,
                 pattern_materials: None,

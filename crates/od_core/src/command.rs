@@ -16,6 +16,40 @@ pub trait Command {
     fn undo(&mut self, doc: &mut Document);
 }
 
+/// Several commands as one undo step, e.g. moving every selected pattern.
+/// They apply in order and undo in reverse.
+pub struct Batch {
+    label: String,
+    commands: Vec<Box<dyn Command>>,
+}
+
+impl Batch {
+    pub fn new(label: impl Into<String>, commands: Vec<Box<dyn Command>>) -> Self {
+        Self {
+            label: label.into(),
+            commands,
+        }
+    }
+}
+
+impl Command for Batch {
+    fn label(&self) -> String {
+        self.label.clone()
+    }
+
+    fn apply(&mut self, doc: &mut Document) {
+        for command in &mut self.commands {
+            command.apply(doc);
+        }
+    }
+
+    fn undo(&mut self, doc: &mut Document) {
+        for command in self.commands.iter_mut().rev() {
+            command.undo(doc);
+        }
+    }
+}
+
 pub struct AddPattern {
     /// The pattern to add; its id is replaced by a fresh one.
     pattern: Pattern,
@@ -1223,6 +1257,30 @@ mod tests {
         assert_ne!(add.id(), Some(id));
         assert_eq!(doc2.patterns[1].notches, [Notch { at: 5.0 }]);
         assert_eq!(doc2.patterns[1].seam_allowance, 10.0);
+    }
+
+    #[test]
+    fn a_batch_applies_in_order_and_undoes_in_reverse() {
+        let (mut doc, id) = doc_with_rect();
+        let mut add = AddPattern::new("Other", rectangle(Vec2::ZERO, Vec2::new(10.0, 10.0)));
+        add.apply(&mut doc);
+        let other = add.id().unwrap();
+        let before = doc.patterns.clone();
+        let mut batch = Batch::new(
+            "Move 2 patterns",
+            vec![
+                Box::new(MovePattern::new(id, Vec2::new(5.0, 0.0))),
+                Box::new(MovePattern::new(other, Vec2::new(0.0, 7.0))),
+                // Deleting after moving: undo must restore before un-moving.
+                Box::new(DeletePattern::new(other)),
+            ],
+        );
+        batch.apply(&mut doc);
+        assert_eq!(batch.label(), "Move 2 patterns");
+        assert_eq!(doc.patterns.len(), 1);
+        assert_eq!(doc.pattern(id).unwrap().outline[0].pos, Vec2::new(5.0, 0.0));
+        batch.undo(&mut doc);
+        assert_eq!(doc.patterns, before);
     }
 
     #[test]

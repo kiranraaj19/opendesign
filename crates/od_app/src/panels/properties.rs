@@ -51,7 +51,12 @@ pub fn ui(ui: &mut egui::Ui, s: &mut Session) {
         seam_section(ui, s, id);
         return;
     }
-    let Some(pattern) = s.selection.and_then(|id| s.doc.pattern(id)) else {
+    if s.selection.len() > 1 {
+        ui.add_space(8.0);
+        several_section(ui, s);
+        return;
+    }
+    let Some(pattern) = s.selection.primary().and_then(|id| s.doc.pattern(id)) else {
         ui.add_space(8.0);
         ui.weak("Nothing selected.");
         ui.add_space(8.0);
@@ -130,6 +135,23 @@ pub fn ui(ui: &mut egui::Ui, s: &mut Session) {
     }
     lines_section(ui, s, id);
 
+    selection_actions(ui, s, "Delete pattern");
+}
+
+/// Several patterns selected: their names, and what can be done to all of
+/// them at once.
+fn several_section(ui: &mut egui::Ui, s: &mut Session) {
+    ui.heading(format!("{} patterns selected", s.selection.len()));
+    for &id in s.selection.ids() {
+        if let Some(pattern) = s.doc.pattern(id) {
+            ui.label(&pattern.name);
+        }
+    }
+    selection_actions(ui, s, "Delete patterns");
+}
+
+/// Flip, copy and delete, acting on every selected pattern.
+fn selection_actions(ui: &mut egui::Ui, s: &mut Session, delete: &str) {
     ui.add_space(8.0);
     ui.label("Symmetry");
     ui.horizontal_wrapped(|ui| {
@@ -154,7 +176,7 @@ pub fn ui(ui: &mut egui::Ui, s: &mut Session) {
     });
 
     ui.add_space(8.0);
-    if ui.button("Delete pattern").clicked() {
+    if ui.button(delete).clicked() {
         s.canvas.selected_point = None;
         s.delete_selected();
     }
