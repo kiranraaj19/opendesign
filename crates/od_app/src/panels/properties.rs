@@ -4,9 +4,9 @@
 use od_core::document::TOLERANCE;
 use od_core::edit::PleatKind;
 use od_core::{
-    document_bom, edit, total_area_m2, Axis, Fabric, Fold, Grading, Pattern, PatternId,
-    PatternValue, PointKind, RemoveDart, RemoveInternalLine, RenamePattern, SetFabric, SetFold,
-    SetGrading, SetOutline, SetParticleDistance, SetPatternValue, PARTICLE_DISTANCE_RANGE,
+    document_bom, edit, total_area_m2, Axis, Dart, Fabric, Fold, Grading, Pattern, PatternId,
+    PatternValue, PointKind, RemoveDart, RemoveInternalLine, RenamePattern, SetDart, SetFabric,
+    SetFold, SetGrading, SetOutline, SetParticleDistance, SetPatternValue, PARTICLE_DISTANCE_RANGE,
 };
 use od_sim::cloth::DEFAULT_PARTICLE_DISTANCE;
 
@@ -31,6 +31,8 @@ pub struct PropertiesState {
     fold_pending: Option<(PatternId, usize, f32)>,
     /// A fold strength being dragged or typed, as a percentage.
     strength_pending: Option<(PatternId, usize, f32)>,
+    /// A diamond dart's length or width being dragged or typed.
+    dart_pending: Option<((PatternId, usize, DartValue), f32)>,
 }
 
 impl Default for PropertiesState {
@@ -44,6 +46,7 @@ impl Default for PropertiesState {
             length_pending: None,
             fold_pending: None,
             strength_pending: None,
+            dart_pending: None,
         }
     }
 }
@@ -327,23 +330,86 @@ fn darts_section(ui: &mut egui::Ui, s: &mut Session, id: PatternId) {
     }
     ui.add_space(8.0);
     ui.label("Darts");
+    let darts = pattern.darts.clone();
     let mut remove = None;
-    for (i, dart) in pattern.darts.iter().enumerate() {
+    let mut set = None;
+    for (i, dart) in darts.iter().enumerate() {
         ui.horizontal(|ui| {
-            ui.label(format!(
-                "Dart {}: {:.0} mm long, {:.0} mm wide",
-                i + 1,
-                dart.start.distance(dart.end),
-                dart.width
-            ));
+            ui.label(format!("Dart {}", i + 1));
+            let length = dart.start.distance(dart.end);
+            for (field, current, suffix) in [
+                (DartValue::Length, length, " mm long"),
+                (DartValue::Width, dart.width, " mm wide"),
+            ] {
+                let key = (id, i, field);
+                let mut value = match s.props.dart_pending {
+                    Some((k, v)) if k == key => v,
+                    _ => current,
+                };
+                let response = ui.add(
+                    egui::DragValue::new(&mut value)
+                        .range(1.0..=2000.0)
+                        .suffix(suffix)
+                        .speed(0.5)
+                        .max_decimals(1),
+                );
+                if response.changed() {
+                    s.props.dart_pending = Some((key, value));
+                }
+                let busy = response.dragged() || response.has_focus();
+                if !busy {
+                    if let Some((_, value)) = s.props.dart_pending.take_if(|(k, _)| *k == key) {
+                        if value != current {
+                            set = Some((i, field.set(*dart, value)));
+                        }
+                    }
+                }
+            }
             if ui.button(format!("Remove dart {}", i + 1)).clicked() {
                 remove = Some(i);
             }
         });
     }
+    let (target, _) = s.edit_target(id);
+    if let Some((i, dart)) = set {
+        s.execute(SetDart::new(target, i, dart));
+    }
     if let Some(i) = remove {
-        let (target, _) = s.edit_target(id);
         s.execute(RemoveDart::new(target, i));
+    }
+}
+
+/// Which of a diamond dart's sizes is being edited.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DartValue {
+    /// Tip to tip; the dart stays centred where it was.
+    Length,
+    /// Across the middle.
+    Width,
+}
+
+impl DartValue {
+    fn set(self, dart: Dart, value: f32) -> Dart {
+        match self {
+            DartValue::Width => Dart {
+                width: value,
+                ..dart
+            },
+            DartValue::Length => {
+                let mid = dart.start.lerp(dart.end, 0.5);
+                let d = dart.end - dart.start;
+                let len = d.length();
+                if len < 1e-6 {
+                    return dart;
+                }
+                let half = d * (value * 0.5 / len);
+                Dart {
+                    start: mid - half,
+                    end: mid + half,
+                    ..dart
+                }
+            }
+        }
     }
 }
 

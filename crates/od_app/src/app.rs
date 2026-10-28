@@ -2842,6 +2842,55 @@ mod tests {
     }
 
     #[test]
+    fn diamond_darts_are_resized_in_properties() {
+        use od_core::{AddDart, Dart};
+        let mut h = harness();
+        let [left, _] = two_pieces(&mut h);
+        let dart = Dart {
+            start: Vec2::new(50.0, 20.0),
+            end: Vec2::new(50.0, 60.0),
+            width: 10.0,
+        };
+        {
+            let s = &mut h.state_mut().session;
+            s.execute(AddDart::new(left, dart));
+            s.selection.set(Some(left));
+        }
+        show_tab(&mut h, Tab::Properties);
+        let field = |h: &Harness<'_, OpenDesignApp>, suffix: &str| {
+            h.get_all_by_role(Role::SpinButton)
+                .find(|n| {
+                    n.accesskit_node()
+                        .value()
+                        .is_some_and(|v| v.contains(suffix))
+                })
+                .unwrap_or_else(|| panic!("no {suffix} field"))
+                .rect()
+                .center()
+        };
+        let wide = field(&h, "mm wide");
+        drag(&mut h, wide, wide + egui::vec2(20.0, 0.0));
+        let got = h.state().session.doc.pattern(left).unwrap().darts[0];
+        assert!(got.width > 10.0, "{got:?}");
+        assert_eq!((got.start, got.end), (dart.start, dart.end));
+        assert_eq!(
+            h.state().session.history.undo_label().as_deref(),
+            Some("Edit dart")
+        );
+
+        // Longer, about the same middle.
+        let long = field(&h, "mm long");
+        drag(&mut h, long, long + egui::vec2(20.0, 0.0));
+        let got = h.state().session.doc.pattern(left).unwrap().darts[0];
+        let length = got.start.distance(got.end);
+        assert!(length > 40.0, "{got:?}");
+        assert!(got.start.lerp(got.end, 0.5).distance(Vec2::new(50.0, 40.0)) < 1e-3);
+        press(&mut h, Modifiers::COMMAND, Key::Z);
+        press(&mut h, Modifiers::COMMAND, Key::Z);
+        assert_eq!(h.state().session.doc.pattern(left).unwrap().darts[0], dart);
+    }
+
+    #[test]
     fn fold_strength_is_set_in_properties() {
         use od_core::{AddInternalLine, Fold, SetFold};
         let mut h = harness();
