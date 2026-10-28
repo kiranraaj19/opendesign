@@ -141,6 +141,7 @@ mod tests {
                 theme: &theme,
                 pattern_colors: None,
                 pattern_materials: None,
+                display: Default::default(),
             },
             settings,
             wgpu::Color::BLACK,

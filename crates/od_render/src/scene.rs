@@ -127,6 +127,10 @@ pub struct Frame {
     pub lines: Vec<FlatVertex>,
     /// Alpha-blended triangles on the floor.
     pub shadow: Vec<FlatVertex>,
+    /// See-through shaded triangles, drawn after the solid ones without
+    /// hiding what's behind them.
+    pub translucent: Vec<LitVertex>,
+    pub translucent_indices: Vec<u32>,
     /// Surfaces drawn with their own texture, each in its own draw call
     /// (see [`Self::add_textured_surface`]), separate from `surfaces`
     /// because each needs a different texture bound.
@@ -152,6 +156,31 @@ impl Frame {
             lines: Vec::new(),
             shadow: Vec::new(),
             textured: Vec::new(),
+            translucent: Vec::new(),
+            translucent_indices: Vec::new(),
+        }
+    }
+
+    /// `mesh` drawn see-through, `color`'s alpha saying how solid.
+    pub fn add_translucent(&mut self, mesh: &Mesh, color: Color) {
+        let base = self.translucent.len() as u32;
+        self.translucent.extend(lit_vertices(mesh, color));
+        self.translucent_indices
+            .extend(mesh.indices.iter().map(|i| i + base));
+    }
+
+    /// Every triangle edge of `mesh` as lines, each shared edge once.
+    pub fn add_edges(&mut self, mesh: &Mesh, color: Color) {
+        let mut edges = std::collections::HashSet::new();
+        for tri in mesh.indices.chunks_exact(3) {
+            for (a, b) in [(tri[0], tri[1]), (tri[1], tri[2]), (tri[2], tri[0])] {
+                if edges.insert((a.min(b), a.max(b))) {
+                    for i in [a, b] {
+                        self.lines
+                            .push(FlatVertex::new(mesh.positions[i as usize], color));
+                    }
+                }
+            }
         }
     }
 

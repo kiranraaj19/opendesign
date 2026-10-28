@@ -19,7 +19,7 @@ use od_render::material::Material;
 use od_render::mesh::{Aabb, Mesh};
 use od_render::pattern::{Placement, RingLayout};
 use od_render::scene::{linear, AvatarDraw, Frame, GridColors};
-use od_render::view::{self, FrameInput, PlacedPattern, Theme};
+use od_render::view::{self, Display, FrameInput, PlacedPattern, Style, Theme};
 use od_sim::collision::Collider;
 
 use crate::app::{Session, Tool};
@@ -202,6 +202,8 @@ pub struct Viewport3D {
     pub show_strain: bool,
     /// What the view draws besides the patterns.
     pub show: Shown,
+    /// How the avatar and cloth are drawn: solid, wireframe or see-through.
+    pub display: Display,
 }
 
 /// Things the 3D view can hide, to see the garment more clearly.
@@ -259,6 +261,7 @@ impl Viewport3D {
             show_strain: false,
             grab_depth: None,
             show: Shown::default(),
+            display: Display::default(),
         }
     }
 
@@ -797,6 +800,7 @@ pub fn export_turntable_frames(
                 theme: &theme,
                 pattern_colors: None,
                 pattern_materials: Some(&materials),
+                display: Default::default(),
             },
             settings,
             clear,
@@ -862,6 +866,7 @@ pub fn export_drape_frames(
                 theme: &theme,
                 pattern_colors: None,
                 pattern_materials: Some(&materials),
+                display: Default::default(),
             },
             settings,
             clear,
@@ -872,7 +877,7 @@ pub fn export_drape_frames(
 }
 
 pub fn ui(ui: &mut egui::Ui, s: &mut Session) {
-    let action = ui.horizontal(|ui| view_buttons(ui, s)).inner;
+    let action = ui.horizontal_wrapped(|ui| view_buttons(ui, s)).inner;
     step_drape(ui, s);
     let placed = current_placed_patterns(s);
     let (rect, response) = ui.allocate_exact_size(ui.available_size(), Sense::click_and_drag());
@@ -916,6 +921,22 @@ fn view_buttons(ui: &mut egui::Ui, s: &mut Session) -> Option<ViewAction> {
             action = Some(ViewAction::Preset(preset));
         }
     }
+    for (label, turn, tip) in [
+        (
+            "Turn -45°",
+            -std::f32::consts::FRAC_PI_4,
+            "Turn the view an eighth to the left",
+        ),
+        (
+            "Turn +45°",
+            std::f32::consts::FRAC_PI_4,
+            "Turn the view an eighth to the right",
+        ),
+    ] {
+        if ui.button(label).on_hover_text(tip).clicked() {
+            s.viewport.camera.orbit(turn, 0.0);
+        }
+    }
     ui.separator();
     if ui
         .button("Frame")
@@ -934,6 +955,29 @@ fn view_buttons(ui: &mut egui::Ui, s: &mut Session) -> Option<ViewAction> {
     })
     .response
     .on_hover_text("Choose what the 3D view draws");
+    ui.menu_button("Display", |ui| {
+        let display = &mut s.viewport.display;
+        ui.label("Avatar");
+        for style in Style::ALL {
+            ui.radio_value(
+                &mut display.avatar,
+                style,
+                format!("{} avatar", style.label()),
+            );
+        }
+        ui.separator();
+        ui.label("Cloth");
+        for style in Style::ALL {
+            ui.radio_value(
+                &mut display.cloth,
+                style,
+                format!("{} cloth", style.label()),
+            );
+        }
+        ui.checkbox(&mut display.mesh_edges, "Cloth mesh edges");
+    })
+    .response
+    .on_hover_text("Draw the avatar and cloth solid, as wireframe or see-through");
     ui.toggle_value(&mut s.viewport.show_sizing, "Avatar size")
         .on_hover_text("Height, chest, waist and hip of the avatar");
     ui.separator();
@@ -1125,6 +1169,7 @@ fn paint(ui: &mut egui::Ui, rect: Rect, s: &Session, placed: &[PlacedPattern<Pat
             theme: &theme,
             pattern_colors: strain_colors.as_deref(),
             pattern_materials: Some(&materials),
+            display: v.display,
         });
         painter.add(egui_wgpu::Callback::new_paint_callback(
             rect,
@@ -1492,6 +1537,8 @@ mod tests {
             "pausing keeps the last pose"
         );
 
+        // The toolbar wraps; let it settle before clicking a new button.
+        h.step();
         h.get_by_label("Reset drape").click();
         h.run();
         assert!(h.state().viewport.drape.is_none());
@@ -2328,5 +2375,30 @@ mod tests {
         h.drop_at(empty + vec2(60.0, 0.0));
         h.step();
         assert_ne!(h.state().viewport.camera.yaw, yaw);
+    }
+
+    #[test]
+    fn the_display_menu_sets_wireframe_and_see_through() {
+        let mut h = harness();
+        // Each pick closes the menu.
+        for item in ["Wireframe cloth", "See-through avatar", "Cloth mesh edges"] {
+            h.get_by_label("Display").click();
+            h.run();
+            h.get_by_label(item).click();
+            h.run();
+        }
+        let display = h.state().viewport.display;
+        assert_eq!(display.cloth, Style::Wireframe);
+        assert_eq!(display.avatar, Style::SeeThrough);
+        assert!(display.mesh_edges);
+
+        let yaw = h.state().viewport.camera.yaw;
+        h.get_by_label("Turn +45°").click();
+        h.run();
+        let turned = h.state().viewport.camera.yaw - yaw;
+        assert!(
+            (turned - std::f32::consts::FRAC_PI_4).abs() < 1e-5,
+            "{turned}"
+        );
     }
 }

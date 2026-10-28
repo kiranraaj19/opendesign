@@ -21,6 +21,7 @@ pub struct Targets {
 
 pub struct Renderer {
     lit: wgpu::RenderPipeline,
+    translucent: wgpu::RenderPipeline,
     lines: wgpu::RenderPipeline,
     shadow: wgpu::RenderPipeline,
     globals: wgpu::Buffer,
@@ -29,6 +30,8 @@ pub struct Renderer {
     avatar: Option<(u64, MeshBuffers)>,
     surfaces: Growable,
     surface_indices: Growable,
+    translucent_vertices: Growable,
+    translucent_indices: Growable,
     line_vertices: Growable,
     shadow_vertices: Growable,
     texture_layout: wgpu::BindGroupLayout,
@@ -188,7 +191,9 @@ impl Renderer {
 
         let pipeline = |label: &str, kind: Kind| {
             let (vs, fs, stride, attributes): (_, _, _, &[wgpu::VertexAttribute]) = match kind {
-                Kind::Lit => ("vs_lit", "fs_lit", size_of::<LitVertex>(), &LIT_ATTRIBUTES),
+                Kind::Lit | Kind::Translucent => {
+                    ("vs_lit", "fs_lit", size_of::<LitVertex>(), &LIT_ATTRIBUTES)
+                }
                 Kind::Lines | Kind::Shadow => (
                     "vs_flat",
                     "fs_flat",
@@ -255,6 +260,7 @@ impl Renderer {
         use wgpu::BufferUsages as U;
         Self {
             lit: pipeline("od_lit", Kind::Lit),
+            translucent: pipeline("od_translucent", Kind::Translucent),
             lines: pipeline("od_lines", Kind::Lines),
             shadow: pipeline("od_shadow", Kind::Shadow),
             globals,
@@ -263,6 +269,8 @@ impl Renderer {
             avatar: None,
             surfaces: Growable::new("od_surfaces", U::VERTEX),
             surface_indices: Growable::new("od_surface_indices", U::INDEX),
+            translucent_vertices: Growable::new("od_translucent", U::VERTEX),
+            translucent_indices: Growable::new("od_translucent_indices", U::INDEX),
             line_vertices: Growable::new("od_lines", U::VERTEX),
             shadow_vertices: Growable::new("od_shadow", U::VERTEX),
             texture_layout,
@@ -308,6 +316,10 @@ impl Renderer {
         self.surfaces.write(device, queue, &frame.surfaces);
         self.surface_indices
             .write(device, queue, &frame.surface_indices);
+        self.translucent_vertices
+            .write(device, queue, &frame.translucent);
+        self.translucent_indices
+            .write(device, queue, &frame.translucent_indices);
         self.line_vertices.write(device, queue, &frame.lines);
         self.shadow_vertices.write(device, queue, &frame.shadow);
 
@@ -382,6 +394,19 @@ impl Renderer {
             pass.set_vertex_buffer(0, batch.vertices.slice(..));
             pass.set_index_buffer(batch.indices.slice(..), wgpu::IndexFormat::Uint32);
             pass.draw_indexed(0..batch.count, 0, 0..1);
+        }
+
+        // See-through surfaces after the solids, so the solids show
+        // through them; they don't write depth, so they hide nothing.
+        if let (Some(vertices), Some(indices)) = (
+            self.translucent_vertices.slice(),
+            self.translucent_indices.slice(),
+        ) {
+            pass.set_pipeline(&self.translucent);
+            pass.set_bind_group(1, &self.default_texture, &[]);
+            pass.set_vertex_buffer(0, vertices);
+            pass.set_index_buffer(indices, wgpu::IndexFormat::Uint32);
+            pass.draw_indexed(0..self.translucent_indices.count, 0, 0..1);
         }
 
         // After the solids, so depth testing hides lines behind them.
@@ -510,6 +535,8 @@ pub fn render_to_rgba(
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Kind {
     Lit,
+    /// Shaded like `Lit`, but alpha-blended and hiding nothing.
+    Translucent,
     Lines,
     Shadow,
 }

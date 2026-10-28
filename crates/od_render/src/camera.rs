@@ -22,15 +22,17 @@ pub enum ViewPreset {
     /// From the avatar's right side (-X).
     Right,
     Top,
+    Bottom,
 }
 
 impl ViewPreset {
-    pub const ALL: [ViewPreset; 5] = [
+    pub const ALL: [ViewPreset; 6] = [
         ViewPreset::Front,
         ViewPreset::Back,
         ViewPreset::Left,
         ViewPreset::Right,
         ViewPreset::Top,
+        ViewPreset::Bottom,
     ];
 
     pub fn label(self) -> &'static str {
@@ -40,6 +42,7 @@ impl ViewPreset {
             ViewPreset::Left => "Left",
             ViewPreset::Right => "Right",
             ViewPreset::Top => "Top",
+            ViewPreset::Bottom => "Bottom",
         }
     }
 
@@ -52,6 +55,7 @@ impl ViewPreset {
             ViewPreset::Left => (FRAC_PI_2, 0.0),
             ViewPreset::Right => (-FRAC_PI_2, 0.0),
             ViewPreset::Top => (0.0, MAX_PITCH),
+            ViewPreset::Bottom => (0.0, -MAX_PITCH),
         }
     }
 }
@@ -235,6 +239,8 @@ mod tests {
         assert!(side(&cam).x < 0.0);
         cam.set_view(ViewPreset::Top);
         assert!(side(&cam).y > cam.distance * 0.99);
+        cam.set_view(ViewPreset::Bottom);
+        assert!(side(&cam).y < -cam.distance * 0.99);
         // Even straight down the view matrix stays well-formed.
         assert!(cam.view().is_finite());
     }

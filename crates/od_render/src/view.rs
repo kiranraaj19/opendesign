@@ -65,6 +65,46 @@ pub fn scene_bounds<K>(avatar: Aabb, patterns: &[PlacedPattern<K>]) -> Aabb {
         .fold(avatar, Aabb::union)
 }
 
+/// How a surface is drawn.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Style {
+    #[default]
+    Solid,
+    /// Only its triangle edges.
+    Wireframe,
+    /// Shaded but see-through.
+    SeeThrough,
+}
+
+impl Style {
+    pub const ALL: [Style; 3] = [Style::Solid, Style::Wireframe, Style::SeeThrough];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Style::Solid => "Solid",
+            Style::Wireframe => "Wireframe",
+            Style::SeeThrough => "See-through",
+        }
+    }
+}
+
+/// How the avatar and the cloth are drawn.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Display {
+    pub avatar: Style,
+    pub cloth: Style,
+    /// Draw the cloth's triangle edges over it.
+    pub mesh_edges: bool,
+}
+
+/// How solid see-through surfaces are.
+const AVATAR_SEE_THROUGH: f32 = 0.25;
+const CLOTH_SEE_THROUGH: f32 = 0.45;
+
+fn with_alpha([r, g, b, _]: Color, a: f32) -> Color {
+    [r, g, b, a]
+}
+
 pub struct FrameInput<'a, K> {
     pub camera: &'a OrbitCamera,
     pub aspect: f32,
@@ -86,12 +126,21 @@ pub struct FrameInput<'a, K> {
     /// same way the theme fill does. `None` for an entry (or a `None`
     /// `pattern_materials` altogether) falls back to the theme fill.
     pub pattern_materials: Option<&'a [Option<Material>]>,
+    pub display: Display,
 }
 
 pub fn compose_frame<K: PartialEq>(input: FrameInput<'_, K>) -> Frame {
     let theme = input.theme;
     let mut frame = Frame::new(Globals::new(input.camera, input.aspect, input.encode_srgb));
-    frame.avatar = input.avatar;
+    match (input.display.avatar, input.avatar) {
+        (Style::Solid, avatar) => frame.avatar = avatar,
+        (Style::Wireframe, Some(avatar)) => frame.add_edges(&avatar.mesh, avatar.color),
+        (Style::SeeThrough, Some(avatar)) => {
+            frame.add_translucent(&avatar.mesh, with_alpha(avatar.color, AVATAR_SEE_THROUGH));
+        }
+        (_, None) => {}
+    }
+    let cloth = input.display.cloth;
     for (i, p) in input.patterns.iter().enumerate() {
         let selected = input.selected.contains(&p.key);
         let material = input.pattern_materials.and_then(|m| m.get(i)?.as_ref());
@@ -107,15 +156,24 @@ pub fn compose_frame<K: PartialEq>(input: FrameInput<'_, K>) -> Frame {
             .pattern_colors
             .and_then(|c| c.get(i))
             .filter(|c| c.len() == p.mesh.positions.len());
-        match (
-            varying,
-            material.filter(|m| !selected && m.texture.is_some()),
-        ) {
-            (Some(colors), _) => frame.add_surface_varying(&p.mesh, colors),
-            (None, Some(textured)) => {
-                frame.add_textured_surface(&p.mesh, p.normal, textured.clone());
+        match cloth {
+            Style::Wireframe => frame.add_edges(&p.mesh, fill),
+            Style::SeeThrough => {
+                frame.add_translucent(&p.mesh, with_alpha(fill, CLOTH_SEE_THROUGH))
             }
-            (None, None) => frame.add_surface(&p.mesh, fill),
+            Style::Solid => match (
+                varying,
+                material.filter(|m| !selected && m.texture.is_some()),
+            ) {
+                (Some(colors), _) => frame.add_surface_varying(&p.mesh, colors),
+                (None, Some(textured)) => {
+                    frame.add_textured_surface(&p.mesh, p.normal, textured.clone());
+                }
+                (None, None) => frame.add_surface(&p.mesh, fill),
+            },
+        }
+        if input.display.mesh_edges && cloth != Style::Wireframe {
+            frame.add_edges(&p.mesh, with_alpha(line, 0.5));
         }
         frame.add_outline(&p.outline, p.normal, line);
     }
@@ -257,6 +315,7 @@ mod tests {
             theme: &theme,
             pattern_colors: None,
             pattern_materials: None,
+            display: Default::default(),
         });
         let per_pattern = placed[0].mesh.positions.len();
         let selected = frame
@@ -302,6 +361,7 @@ mod tests {
             theme: &theme,
             pattern_colors: Some(&colors),
             pattern_materials: None,
+            display: Default::default(),
         });
         assert!(frame.surfaces[..per_pattern]
             .iter()
@@ -355,6 +415,7 @@ mod tests {
             theme: &theme,
             pattern_colors: None,
             pattern_materials: Some(&materials),
+            display: Default::default(),
         });
         // Pattern 0: a flat fabric tint, drawn in the ordinary surfaces batch.
         assert!(frame.surfaces[..per_pattern]
@@ -380,6 +441,7 @@ mod tests {
             theme: &theme,
             pattern_colors: None,
             pattern_materials: Some(&materials),
+            display: Default::default(),
         });
         assert_eq!(frame.textured.len(), 1);
         assert_eq!(frame.textured[0].vertices.len(), per_pattern);
@@ -387,5 +449,73 @@ mod tests {
             .vertices
             .iter()
             .all(|v| v.color == textured.base_color));
+    }
+
+    #[test]
+    fn display_styles_change_how_avatar_and_cloth_are_drawn() {
+        let (avatar, placed) = scene();
+        let theme = Theme {
+            avatar: [0.5, 0.5, 0.5, 1.0],
+            pattern: [0.2, 0.3, 0.6, 1.0],
+            selected: [1.0, 0.6, 0.1, 1.0],
+            outline: [0.6, 0.7, 0.9, 1.0],
+            grid: GridColors {
+                minor: [0.1; 4],
+                major: [0.2; 4],
+                axis: [0.3; 4],
+            },
+            shadow: [0.0, 0.0, 0.0, 0.3],
+        };
+        let draw = |display: Display| {
+            compose_frame(FrameInput {
+                camera: &OrbitCamera::default(),
+                aspect: 1.0,
+                encode_srgb: false,
+                avatar: Some(AvatarDraw {
+                    key: 1,
+                    mesh: std::sync::Arc::new(avatar.clone()),
+                    color: theme.avatar,
+                }),
+                avatar_bounds: avatar.bounds().unwrap(),
+                patterns: &placed,
+                selected: &[],
+                theme: &theme,
+                pattern_colors: None,
+                pattern_materials: None,
+                display,
+            })
+        };
+        let solid = draw(Display::default());
+        assert!(solid.avatar.is_some());
+        assert!(!solid.surfaces.is_empty());
+        assert!(solid.translucent.is_empty());
+
+        let wire = draw(Display {
+            avatar: Style::Wireframe,
+            cloth: Style::Wireframe,
+            mesh_edges: false,
+        });
+        assert!(wire.avatar.is_none() && wire.surfaces.is_empty());
+        assert!(wire.lines.len() > solid.lines.len() + avatar.indices.len() / 2);
+
+        let clear = draw(Display {
+            avatar: Style::SeeThrough,
+            cloth: Style::SeeThrough,
+            mesh_edges: false,
+        });
+        assert!(clear.avatar.is_none() && clear.surfaces.is_empty());
+        assert!(clear.translucent.iter().all(|v| v.color[3] < 1.0));
+        assert_eq!(
+            clear.translucent_indices.len(),
+            avatar.indices.len() + placed.iter().map(|p| p.mesh.indices.len()).sum::<usize>()
+        );
+
+        // Mesh edges go over solid cloth.
+        let edged = draw(Display {
+            mesh_edges: true,
+            ..Display::default()
+        });
+        assert!(edged.lines.len() > solid.lines.len());
+        assert_eq!(edged.surfaces.len(), solid.surfaces.len());
     }
 }

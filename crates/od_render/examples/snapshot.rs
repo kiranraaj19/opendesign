@@ -132,6 +132,7 @@ fn main() {
         theme: &theme,
         pattern_colors: None,
         pattern_materials: None,
+        display: Default::default(),
     });
     // The app paints this background with egui before the 3D callback runs.
     let channel = |shift: u32| f64::from((bg >> shift) as u8) / 255.0;
