@@ -1235,6 +1235,7 @@ mod tests {
             doc: Document::default(),
             history: History::new(),
             selection: Default::default(),
+            clipboard: None,
             selected_seam: None,
             selected_tack: None,
             tack_start: None,

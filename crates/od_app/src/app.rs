@@ -3,8 +3,8 @@
 use egui::{Key, KeyboardShortcut, Modifiers};
 use egui_dock::{DockArea, DockState, NodeIndex, Style, TabViewer};
 use od_core::{
-    AddPattern, AddTack, Axis, Batch, Command, DeletePattern, DeletePoint, Document,
-    DuplicatePattern, History, MirrorPattern, OutlinePoint, PatternId, RemoveSewingLine,
+    AddPattern, AddTack, Axis, Batch, Clip, Command, DeletePattern, DeletePoint, Document,
+    DuplicatePattern, History, MirrorPattern, OutlinePoint, Paste, PatternId, RemoveSewingLine,
     RemoveTack, SetPointKind, SewingLine, SewingLineId, TackId, TackPoint, TackTarget, Vec2,
 };
 
@@ -173,6 +173,9 @@ pub struct Session {
     pub doc: Document,
     pub history: History,
     pub selection: Selection,
+    /// Patterns copied with Ctrl+C or Ctrl+X, and how many times they've
+    /// been pasted since, so each paste lands a step further along.
+    pub clipboard: Option<(Clip, u32)>,
     /// A selected seam or tack. Selecting one clears the others.
     pub selected_seam: Option<SewingLineId>,
     pub selected_tack: Option<TackId>,
@@ -188,6 +191,9 @@ pub struct Session {
     /// showing its base size.
     pub preview_size: usize,
 }
+
+/// How far each paste lands from the last, in mm on both axes.
+const PASTE_OFFSET: f32 = 40.0;
 
 impl Session {
     pub fn execute(&mut self, command: impl Command + 'static) {
@@ -312,6 +318,43 @@ impl Session {
         }
     }
 
+    /// Copy the selected patterns, with the seams and tacks between them.
+    pub fn copy_selected(&mut self) {
+        if let Some(clip) = Clip::copy(&self.doc, self.selection.ids()) {
+            self.clipboard = Some((clip, 0));
+        }
+    }
+
+    /// Copy the selected patterns, then delete them.
+    pub fn cut_selected(&mut self) {
+        if Clip::copy(&self.doc, self.selection.ids()).is_some() {
+            self.copy_selected();
+            let ids = self.selection.ids().to_vec();
+            self.selection.clear();
+            self.for_each(ids, "Cut", "patterns", |id| {
+                Box::new(DeletePattern::new(id))
+            });
+        }
+    }
+
+    /// Paste the copied patterns, offset a step further each time, or
+    /// mirrored beside the originals, and select them.
+    pub fn paste(&mut self, mirror: Option<Axis>) {
+        let Some((clip, pastes)) = &mut self.clipboard else {
+            return;
+        };
+        *pastes += 1;
+        let step = PASTE_OFFSET * *pastes as f32;
+        let paste = Paste::new(clip.clone(), Vec2::new(step, step), mirror);
+        // Pasted patterns go last.
+        let count = self.doc.patterns.len();
+        self.execute(paste);
+        let ids: Vec<_> = self.doc.patterns[count..].iter().map(|p| p.id).collect();
+        self.selection.set_all(ids);
+        self.selected_seam = None;
+        self.selected_tack = None;
+    }
+
     /// Select every pattern.
     pub fn select_all(&mut self) {
         self.selection
@@ -390,6 +433,7 @@ impl OpenDesignApp {
                 doc: Document::default(),
                 history: History::new(),
                 selection: Default::default(),
+                clipboard: None,
                 selected_seam: None,
                 selected_tack: None,
                 tack_start: None,
@@ -440,9 +484,20 @@ impl OpenDesignApp {
         if shortcut(Modifiers::COMMAND, Key::D) {
             s.duplicate_selected(None);
         }
+        // Text fields have their own select all, cut, copy and paste.
         let typing = ctx.memory(|m| m.focused().is_some());
-        if !typing && shortcut(Modifiers::COMMAND, Key::A) {
-            s.select_all();
+        if !typing {
+            if shortcut(Modifiers::COMMAND, Key::A) {
+                s.select_all();
+            } else if shortcut(Modifiers::COMMAND, Key::C) {
+                s.copy_selected();
+            } else if shortcut(Modifiers::COMMAND, Key::X) {
+                s.cut_selected();
+            } else if shortcut(Modifiers::COMMAND | Modifiers::SHIFT, Key::V) {
+                s.paste(Some(Axis::Vertical));
+            } else if shortcut(Modifiers::COMMAND, Key::V) {
+                s.paste(None);
+            }
         }
 
         // Single-key shortcuts must not fire while typing in a text field.
@@ -624,6 +679,32 @@ impl OpenDesignApp {
                     .clicked()
                 {
                     s.redo();
+                }
+                ui.separator();
+                let any = s.selection.primary().is_some();
+                let item = |label, keys| egui::Button::new(label).shortcut_text(keys);
+                if ui.add_enabled(any, item("Cut", "Ctrl+X")).clicked() {
+                    s.cut_selected();
+                }
+                if ui.add_enabled(any, item("Copy", "Ctrl+C")).clicked() {
+                    s.copy_selected();
+                }
+                let pasting = s.clipboard.is_some();
+                if ui.add_enabled(pasting, item("Paste", "Ctrl+V")).clicked() {
+                    s.paste(None);
+                }
+                if ui
+                    .add_enabled(pasting, item("Paste mirrored", "Ctrl+Shift+V"))
+                    .on_hover_text("Paste a mirror image beside the copied patterns")
+                    .clicked()
+                {
+                    s.paste(Some(Axis::Vertical));
+                }
+                if ui
+                    .add_enabled(!s.doc.patterns.is_empty(), item("Select all", "Ctrl+A"))
+                    .clicked()
+                {
+                    s.select_all();
                 }
                 ui.separator();
                 if ui
@@ -2356,5 +2437,54 @@ mod tests {
         assert_eq!(s.selection.ids(), copies);
         press(&mut h, Modifiers::NONE, Key::Escape);
         assert_eq!(h.state().session.selection.len(), 0);
+    }
+
+    #[test]
+    fn copied_pieces_paste_as_new_sewn_pieces_and_cut_removes_them() {
+        let mut h = harness();
+        let [left, right] = two_pieces(&mut h);
+        {
+            let s = &mut h.state_mut().session;
+            let edge = |pattern, start: f32| od_core::SeamEdge {
+                pattern,
+                start,
+                end: start + 1.0,
+                forward: true,
+            };
+            s.execute(od_core::AddSewingLine::new(
+                vec![edge(left, 1.0)],
+                vec![edge(right, 3.0)],
+            ));
+        }
+        press(&mut h, Modifiers::COMMAND, Key::A);
+        press(&mut h, Modifiers::COMMAND, Key::C);
+        assert_eq!(
+            h.state().session.tool,
+            Tool::Select,
+            "C alone isn't pressed"
+        );
+        press(&mut h, Modifiers::COMMAND, Key::V);
+        assert_eq!(last_step(&h), "Paste 2 patterns");
+        let s = &h.state().session;
+        assert_eq!(s.doc.patterns.len(), 4);
+        assert_eq!(s.doc.sewing_lines.len(), 2, "the seam is pasted too");
+        let pasted: Vec<_> = s.doc.patterns[2..].iter().map(|p| p.id).collect();
+        assert_eq!(s.selection.ids(), pasted);
+        assert_near(
+            s.doc.pattern(pasted[0]).unwrap().outline[0].pos,
+            Vec2::new(40.0, 40.0),
+        );
+        // A second paste lands a step further along.
+        press(&mut h, Modifiers::COMMAND, Key::V);
+        let s = &h.state().session;
+        assert_near(s.doc.patterns[4].outline[0].pos, Vec2::new(80.0, 80.0));
+
+        // Cutting the selection removes it in one step, and pastes back.
+        press(&mut h, Modifiers::COMMAND, Key::X);
+        assert_eq!(pattern_count(&h), 4);
+        assert_eq!(last_step(&h), "Cut 2 patterns");
+        press(&mut h, Modifiers::COMMAND | Modifiers::SHIFT, Key::V);
+        assert_eq!(pattern_count(&h), 6);
+        assert_eq!(last_step(&h), "Paste 2 patterns mirrored");
     }
 }
