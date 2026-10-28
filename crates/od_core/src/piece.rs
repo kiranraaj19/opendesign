@@ -173,6 +173,15 @@ pub fn can_cut(doc: &Document, id: PatternId, line: usize) -> bool {
     cut(&mut probe, id, line, false).is_some()
 }
 
+/// Linked copies of any of `ids` keep their shape but stop following.
+fn unlink_copies_of(patterns: &mut [Pattern], ids: &[PatternId]) {
+    for p in patterns {
+        if p.link.is_some_and(|l| ids.contains(&l.source)) {
+            p.link = None;
+        }
+    }
+}
+
 /// Is `p` on `pattern`'s outline?
 fn on_outline(pattern: &Pattern, p: Vec2) -> bool {
     pattern.nearest_param(p).1.distance(p) <= ON_OUTLINE
@@ -456,7 +465,12 @@ fn cut(doc: &mut Document, id: PatternId, line: usize, sew: bool) -> Option<Stat
         }
     }
 
+    // Neither half is a copy of anything, nor are copies of the old piece
+    // copies of either half.
+    a.link = None;
+    b.link = None;
     let mut patterns = doc.patterns.clone();
+    unlink_copies_of(&mut patterns, &[id]);
     let index = doc.index_of(id)?;
     patterns[index] = a;
     patterns.insert(index + 1, b);
@@ -589,7 +603,9 @@ fn merge(doc: &mut Document, seam: SewingLineId) -> Option<State> {
         }
     }
 
+    merged.link = None;
     let mut patterns = doc.patterns.clone();
+    unlink_copies_of(&mut patterns, &[pa.id, pb.id]);
     let index = doc.index_of(pa.id)?;
     patterns[index] = merged;
     patterns.retain(|p| p.id != pb.id);

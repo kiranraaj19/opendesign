@@ -549,6 +549,63 @@ pub struct Pattern {
     /// Where the piece starts in 3D before draping. `None` places it
     /// automatically, around the avatar.
     pub arrangement: Option<Arrangement>,
+    /// Set for a linked copy of another pattern (symmetric editing).
+    pub link: Option<Link>,
+}
+
+/// What makes a pattern a linked copy of another: its outline and
+/// markings are always the source's, moved by a fixed transform (turned,
+/// flipped and shifted the way the copy has been since). Editing the
+/// source edits the copy; edits made through the copy go to the source.
+///
+/// The transform is kept as where the source's origin and unit axes land,
+/// so moving, turning or flipping the copy updates it the same way it
+/// moves the copy's points.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct Link {
+    pub source: PatternId,
+    pub origin: Vec2,
+    pub x: Vec2,
+    pub y: Vec2,
+}
+
+impl Link {
+    /// A copy that sits exactly on its source.
+    pub fn identity(source: PatternId) -> Self {
+        Self {
+            source,
+            origin: Vec2::ZERO,
+            x: Vec2::new(1.0, 0.0),
+            y: Vec2::new(0.0, 1.0),
+        }
+    }
+
+    /// Where a point of the source lands on the copy.
+    pub fn apply(&self, p: Vec2) -> Vec2 {
+        self.origin + (self.x - self.origin) * p.x + (self.y - self.origin) * p.y
+    }
+
+    /// Where a point of the copy came from on the source.
+    pub fn to_source(&self, p: Vec2) -> Vec2 {
+        let (a, b) = (self.x - self.origin, self.y - self.origin);
+        let det = a.cross(b);
+        if det.abs() < 1e-12 {
+            return p;
+        }
+        let d = p - self.origin;
+        Vec2::new(d.cross(b) / det, a.cross(d) / det)
+    }
+
+    /// Does the transform flip the source over?
+    pub fn flips(&self) -> bool {
+        (self.x - self.origin).cross(self.y - self.origin) < 0.0
+    }
+
+    fn map(&mut self, f: impl Fn(Vec2) -> Vec2) {
+        self.origin = f(self.origin);
+        self.x = f(self.x);
+        self.y = f(self.y);
+    }
 }
 
 /// A pattern's plane in the 3D scene, in metres: where its centre is and
@@ -583,6 +640,7 @@ impl Pattern {
             hidden: false,
             locked: false,
             arrangement: None,
+            link: None,
         }
     }
 
@@ -647,6 +705,9 @@ impl Pattern {
         for dart in &mut self.darts {
             dart.map(|p| axis.reflect(p, about));
         }
+        if let Some(link) = &mut self.link {
+            link.map(|p| axis.reflect(p, about));
+        }
         self.grain_angle = normalize_degrees(-self.grain_angle);
     }
 
@@ -667,6 +728,9 @@ impl Pattern {
         for dart in &mut self.darts {
             dart.map(turn);
         }
+        if let Some(link) = &mut self.link {
+            link.map(turn);
+        }
         self.grain_angle = normalize_degrees(self.grain_angle + degrees);
     }
 
@@ -686,6 +750,9 @@ impl Pattern {
         for dart in &mut self.darts {
             dart.map(&f);
         }
+        if let Some(link) = &mut self.link {
+            link.map(&f);
+        }
     }
 
     /// Move everything by `delta`.
@@ -702,6 +769,9 @@ impl Pattern {
         }
         for dart in &mut self.darts {
             dart.map(|p| p + delta);
+        }
+        if let Some(link) = &mut self.link {
+            link.map(|p| p + delta);
         }
     }
 
@@ -1033,6 +1103,12 @@ impl Document {
         for tack in &self.tacks {
             if !tack.points().all(|p| known(&p.pattern)) {
                 return Err(Invalid::BadTack(tack.id));
+            }
+        }
+        // A linked copy of a pattern that isn't there is just a pattern.
+        for pattern in &mut self.patterns {
+            if pattern.link.is_some_and(|l| !known(&l.source)) {
+                pattern.link = None;
             }
         }
         let max = ids.last().map_or(0, |id| id.0);

@@ -2,6 +2,7 @@
 
 use crate::command::Command;
 use crate::document::Document;
+use crate::link::Linked;
 
 pub struct History {
     undo: Vec<Box<dyn Command>>,
@@ -27,13 +28,15 @@ impl History {
         Self::default()
     }
 
-    /// Apply `command` and record it. Clears the redo stack.
-    pub fn execute(&mut self, doc: &mut Document, mut command: Box<dyn Command>) {
+    /// Apply `command` and record it. Clears the redo stack. Linked copies
+    /// are brought up to date afterwards (see [`crate::link::sync`]).
+    pub fn execute(&mut self, doc: &mut Document, command: Box<dyn Command>) {
         // If the saved state was undone, it lived on the redo stack we're
         // about to discard.
         if self.saved_depth.is_some_and(|d| self.undo.len() < d) {
             self.saved_depth = None;
         }
+        let mut command: Box<dyn Command> = Box::new(Linked::new(command));
         command.apply(doc);
         self.undo.push(command);
         self.redo.clear();

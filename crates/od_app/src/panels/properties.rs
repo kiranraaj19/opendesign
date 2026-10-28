@@ -149,6 +149,7 @@ pub fn ui(ui: &mut egui::Ui, s: &mut Session) {
             ui.end_row();
         });
 
+    link_section(ui, s, id);
     fabric_section(ui, s, id);
     simulation_section(ui, s, id);
     grading_section(ui, s, id);
@@ -160,6 +161,30 @@ pub fn ui(ui: &mut egui::Ui, s: &mut Session) {
     darts_section(ui, s, id);
 
     selection_actions(ui, s, "Delete pattern");
+}
+
+/// For a linked copy: what it follows, and a way to stop.
+fn link_section(ui: &mut egui::Ui, s: &mut Session, id: PatternId) {
+    let Some(link) = s.doc.pattern(id).and_then(|p| p.link) else {
+        return;
+    };
+    let source = s
+        .doc
+        .pattern(link.source)
+        .map_or_else(|| "?".to_owned(), |p| p.name.clone());
+    ui.add_space(8.0);
+    ui.horizontal_wrapped(|ui| {
+        ui.label(format!(
+            "Linked copy of {source}: editing either changes both"
+        ));
+        if ui
+            .button("Unlink")
+            .on_hover_text("Keep this shape, and stop following the other")
+            .clicked()
+        {
+            s.execute(od_core::Unlink::new(id));
+        }
+    });
 }
 
 /// Settings for the tool in use, for tools that have any.
@@ -286,7 +311,8 @@ fn darts_section(ui: &mut egui::Ui, s: &mut Session, id: PatternId) {
         });
     }
     if let Some(i) = remove {
-        s.execute(RemoveDart::new(id, i));
+        let (target, _) = s.edit_target(id);
+        s.execute(RemoveDart::new(target, i));
     }
 }
 
@@ -363,6 +389,15 @@ fn selection_actions(ui: &mut egui::Ui, s: &mut Session, delete: &str) {
         }
         if ui.button("Duplicate").on_hover_text("Ctrl+D").clicked() {
             s.duplicate_selected(None);
+        }
+        if ui
+            .button("Linked mirrored copy")
+            .on_hover_text(
+                "A mirror image beside this pattern that changes whenever either one is edited",
+            )
+            .clicked()
+        {
+            s.linked_copy_selected();
         }
     });
 
@@ -505,6 +540,11 @@ fn point_section(ui: &mut egui::Ui, s: &mut Session, pattern: Pattern) {
     if point.kind != PointKind::Corner || pattern.locked {
         return;
     }
+    // A linked copy's outline is its source's: edit that.
+    let (target, _) = s.edit_target(pattern.id);
+    let Some(pattern) = s.doc.pattern(target).cloned() else {
+        return;
+    };
     ui.horizontal(|ui| {
         ui.add(
             egui::DragValue::new(&mut s.props.round_distance)
@@ -576,10 +616,15 @@ fn lines_section(ui: &mut egui::Ui, s: &mut Session, id: PatternId) {
     }
     ui.add_space(8.0);
     ui.label("Internal lines");
+    // A linked copy's lines are its source's, in the same order: edits go
+    // there (cutting cuts the copy itself, which unlinks it).
+    let (target, _) = s.edit_target(id);
+    let source = s.doc.pattern(target).cloned().unwrap_or(pattern.clone());
     let mut remove = None;
     let mut split = None;
     let mut cut = None;
     for (i, line) in pattern.internal_lines.iter().enumerate() {
+        let source_line = source.internal_lines.get(i).unwrap_or(line);
         let length: f32 = line.points.windows(2).map(|w| w[0].distance(w[1])).sum();
         ui.horizontal_wrapped(|ui| {
             ui.label(format!("Line {}: {length:.0} mm", i + 1));
@@ -587,10 +632,10 @@ fn lines_section(ui: &mut egui::Ui, s: &mut Session, id: PatternId) {
                 remove = Some(i);
             }
             if !pattern.locked {
-                fold_edit(ui, s, id, i, line.fold);
+                fold_edit(ui, s, target, i, line.fold);
             }
             let crossings = (!pattern.locked)
-                .then(|| edit::points_at_crossings(&pattern, &line.points))
+                .then(|| edit::points_at_crossings(&source, &source_line.points))
                 .flatten();
             if let Some(outline) = crossings {
                 if ui
@@ -622,10 +667,14 @@ fn lines_section(ui: &mut egui::Ui, s: &mut Session, id: PatternId) {
         });
     }
     if let Some(i) = remove {
-        s.execute(RemoveInternalLine::new(id, i));
+        s.execute(RemoveInternalLine::new(target, i));
     }
     if let Some(outline) = split {
-        s.execute(SetOutline::new(id, "Add points at intersection", outline));
+        s.execute(SetOutline::new(
+            target,
+            "Add points at intersection",
+            outline,
+        ));
         s.canvas.selected_point = None;
     }
     if let Some((line, sew)) = cut {

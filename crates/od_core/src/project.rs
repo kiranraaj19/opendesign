@@ -284,7 +284,8 @@ fn migrate_v10(doc: &mut serde_json::Value) {
 }
 
 /// Upgrade a version 11 document to version 12 in place: no pattern has
-/// darts inside it, and no internal line is a fold line.
+/// darts inside it or is a linked copy, and no internal line is a fold
+/// line.
 fn migrate_v11(doc: &mut serde_json::Value) {
     use serde_json::Value;
     let Some(patterns) = doc.get_mut("patterns").and_then(Value::as_array_mut) else {
@@ -292,6 +293,7 @@ fn migrate_v11(doc: &mut serde_json::Value) {
     };
     for pattern in patterns.iter_mut().filter_map(Value::as_object_mut) {
         pattern.insert("darts".into(), Value::Array(Vec::new()));
+        pattern.insert("link".into(), Value::Null);
         let lines = pattern
             .get_mut("internal_lines")
             .and_then(Value::as_array_mut);
@@ -959,10 +961,15 @@ mod tests {
         let mut file: serde_json::Value = serde_json::from_str(&to_json(&doc)).unwrap();
         file["version"] = 11.into();
         for pattern in file["document"]["patterns"].as_array_mut().unwrap() {
-            pattern.as_object_mut().unwrap().remove("darts");
+            let pattern = pattern.as_object_mut().unwrap();
+            pattern.remove("darts");
+            pattern.remove("link");
         }
         let loaded = from_json(&file.to_string()).unwrap();
-        assert!(loaded.patterns.iter().all(|p| p.darts.is_empty()));
+        assert!(loaded
+            .patterns
+            .iter()
+            .all(|p| p.darts.is_empty() && p.link.is_none()));
 
         // The current version keeps them.
         assert_eq!(from_json(&to_json(&doc)).unwrap(), doc);

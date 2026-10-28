@@ -4,9 +4,9 @@ use egui::{Key, KeyboardShortcut, Modifiers};
 use egui_dock::{DockArea, DockState, NodeIndex, Style, TabViewer};
 use od_core::{
     AddPattern, AddTack, Axis, Batch, Clip, Command, DeletePattern, DeletePoint, Document,
-    DuplicatePattern, History, MirrorPattern, OutlinePoint, Paste, PatternFlag, PatternId,
-    RemoveSewingLine, RemoveTack, RotatePattern, SetPatternFlag, SetPointKind, SewingLine,
-    SewingLineId, TackId, TackPoint, TackTarget, Vec2,
+    DuplicatePattern, History, Link, LinkedCopy, MirrorPattern, OutlinePoint, Paste, PatternFlag,
+    PatternId, RemoveSewingLine, RemoveTack, RotatePattern, SetPatternFlag, SetPointKind,
+    SewingLine, SewingLineId, TackId, TackPoint, TackTarget, Vec2,
 };
 
 use crate::files::{Discard, FileState, RECENT_KEY};
@@ -265,7 +265,8 @@ impl Session {
         if let Some((id, index)) = self.canvas.selected_point.take() {
             // An outline needs three points; keep the point selected if so.
             if self.doc.pattern(id).is_some_and(|p| p.outline.len() > 3) {
-                self.execute(DeletePoint::new(id, index));
+                let (target, _) = self.edit_target(id);
+                self.execute(DeletePoint::new(target, index));
             } else {
                 self.canvas.selected_point = Some((id, index));
             }
@@ -291,6 +292,31 @@ impl Session {
         self.for_each(ids, "Delete", "patterns", |id| {
             Box::new(DeletePattern::new(id))
         });
+    }
+
+    /// Where an edit to pattern `id`'s shape or markings goes: to the
+    /// source of a linked copy (with the link, to map positions back with
+    /// [`Link::to_source`]), else to `id` itself. Outline indices are the
+    /// same on both.
+    pub fn edit_target(&self, id: PatternId) -> (PatternId, Option<Link>) {
+        match self.doc.pattern(id).and_then(|p| p.link) {
+            Some(link) if self.doc.pattern(link.source).is_some() => (link.source, Some(link)),
+            _ => (id, None),
+        }
+    }
+
+    /// Add a linked copy of each selected pattern, mirrored beside it, and
+    /// select the copies.
+    pub fn linked_copy_selected(&mut self) {
+        let ids = self.selection.ids().to_vec();
+        let count = self.doc.patterns.len();
+        self.for_each(ids, "Linked copy of", "patterns", |id| {
+            Box::new(LinkedCopy::new(id, Some(Axis::Vertical)))
+        });
+        let copies: Vec<_> = self.doc.patterns[count..].iter().map(|p| p.id).collect();
+        if !copies.is_empty() {
+            self.selection.set_all(copies);
+        }
     }
 
     /// The selected patterns that aren't locked: the ones edits act on.
@@ -350,7 +376,8 @@ impl Session {
             .and_then(|p| p.outline.get(index))
             .map(|p| p.kind)
         {
-            self.execute(SetPointKind::new(id, index, kind.toggled()));
+            let (target, _) = self.edit_target(id);
+            self.execute(SetPointKind::new(target, index, kind.toggled()));
         }
     }
 
@@ -2843,6 +2870,43 @@ mod tests {
         let merged = s.doc.pattern(left).unwrap();
         assert!((merged.area() - 16_000.0).abs() < 1.0, "{}", merged.area());
         assert!(s.doc.sewing_lines.is_empty());
+    }
+
+    #[test]
+    fn a_linked_copy_passes_its_edits_to_the_source() {
+        let mut h = harness();
+        let [left, _] = two_pieces(&mut h);
+        h.state_mut().session.selection.set(Some(left));
+        show_tab(&mut h, Tab::Properties);
+        click(&mut h, "Linked mirrored copy");
+        let s = &h.state().session;
+        assert_eq!(s.doc.patterns.len(), 3);
+        let copy = s.selection.primary().unwrap();
+        assert_eq!(s.doc.pattern(copy).unwrap().link.unwrap().source, left);
+        assert!(h.query_by_label("Unlink").is_some());
+
+        // Point 0 picked on the copy: C curves it, Delete removes it, and
+        // both happen to the source too.
+        {
+            let s = &mut h.state_mut().session;
+            s.tool = Tool::EditPoints;
+            s.canvas.selected_point = Some((copy, 0));
+        }
+        h.run();
+        press(&mut h, Modifiers::NONE, Key::C);
+        let kind = |h: &Harness<'_, OpenDesignApp>, id| {
+            h.state().session.doc.pattern(id).unwrap().outline[0].kind
+        };
+        assert_eq!(kind(&h, left), od_core::PointKind::Curve);
+        assert_eq!(kind(&h, copy), od_core::PointKind::Curve);
+        press(&mut h, Modifiers::NONE, Key::Delete);
+        let s = &h.state().session;
+        assert_eq!(s.doc.pattern(left).unwrap().outline.len(), 3);
+        assert_eq!(s.doc.pattern(copy).unwrap().outline.len(), 3);
+        // Undo puts both back.
+        press(&mut h, Modifiers::COMMAND, Key::Z);
+        let s = &h.state().session;
+        assert_eq!(s.doc.pattern(copy).unwrap().outline.len(), 4);
     }
 
     #[test]

@@ -1392,7 +1392,7 @@ impl Command for RemoveSewingLine {
 /// After `before`'s outline points were renumbered, move every seam edge on
 /// that pattern with `remap` (a parameter before, to one after). Seams left
 /// with an empty edge are dropped. Returns all seams as they were, for undo.
-fn remap_sewing(
+pub(crate) fn remap_sewing(
     doc: &mut Document,
     before: &Pattern,
     remap: &impl Fn(&Pattern, &Pattern, f32) -> f32,

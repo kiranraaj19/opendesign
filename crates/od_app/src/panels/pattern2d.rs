@@ -1009,15 +1009,18 @@ fn finish_draft(s: &mut Session) {
         }
         Tool::InternalLine if draft.len() >= 2 => {
             if let Some(id) = s.canvas.draft_owner.take() {
+                let (id, link) = s.edit_target(id);
                 s.execute(AddInternalLine::new(
                     id,
-                    draft.iter().map(|p| p.pos).collect(),
+                    draft.iter().map(|p| to_source(link, p.pos)).collect(),
                 ));
             }
         }
         Tool::Topstitch if draft.len() >= 2 => {
             if let Some(id) = s.canvas.draft_owner.take() {
-                s.execute(AddTopstitch::new(id, draft.iter().map(|p| p.pos).collect()));
+                let (id, link) = s.edit_target(id);
+                let points = draft.iter().map(|p| to_source(link, p.pos)).collect();
+                s.execute(AddTopstitch::new(id, points));
             }
         }
         _ => {}
@@ -1063,7 +1066,8 @@ fn handle_edit_points(response: &egui::Response, rect: Rect, s: &mut Session) {
                     .and_then(|pat| pat.outline.get(index))
                     .map(|p| p.kind);
                 if let Some(kind) = kind {
-                    s.execute(SetPointKind::new(id, index, kind.toggled()));
+                    let (target, _) = s.edit_target(id);
+                    s.execute(SetPointKind::new(target, index, kind.toggled()));
                 }
             } else if let Some(hit) = s
                 .canvas
@@ -1072,10 +1076,11 @@ fn handle_edit_points(response: &egui::Response, rect: Rect, s: &mut Session) {
             {
                 let count = s.doc.pattern(hit.id).map_or(0, |pat| pat.outline.len());
                 let index = (hit.param.floor() as usize % count.max(1)) + 1;
+                let (target, link) = s.edit_target(hit.id);
                 s.execute(InsertPoint::new(
-                    hit.id,
+                    target,
                     index,
-                    OutlinePoint::corner(hit.pos),
+                    OutlinePoint::corner(to_source(link, hit.pos)),
                 ));
                 s.selection.set(Some(hit.id));
                 s.canvas.selected_point = Some((hit.id, index));
@@ -1123,7 +1128,8 @@ fn handle_edit_points(response: &egui::Response, rect: Rect, s: &mut Session) {
                 .and_then(|pat| pat.outline.get(index))
                 .map(|p| p.pos);
             if from.is_some_and(|f| f != to) {
-                s.execute(MovePoint::new(id, index, to));
+                let (target, link) = s.edit_target(id);
+                s.execute(MovePoint::new(target, index, to_source(link, to)));
             }
         }
     }
@@ -1151,11 +1157,13 @@ fn handle_notch(response: &egui::Response, rect: Rect, s: &mut Session) {
     let existing = pattern.notches.iter().position(|n| {
         geometry::point_at_distance(&poly, n.at).is_some_and(|(q, _)| q.distance(p) <= reach)
     });
+    // A linked copy's notches are its source's, at the same distances.
+    let (target, _) = s.edit_target(hit.id);
     match existing {
-        Some(index) => s.execute(RemoveNotch::new(hit.id, index)),
+        Some(index) => s.execute(RemoveNotch::new(target, index)),
         None => {
             if let Some((at, _)) = geometry::distance_along(&poly, hit.pos) {
-                s.execute(AddNotch::new(hit.id, at));
+                s.execute(AddNotch::new(target, at));
             }
         }
     }
@@ -1177,11 +1185,13 @@ fn handle_dart(response: &egui::Response, rect: Rect, s: &mut Session) {
         };
         s.selection.set(Some(hit.id));
         let (width, depth) = (s.canvas.dart_width, s.canvas.dart_depth);
+        let (target, link) = s.edit_target(hit.id);
+        let at = to_source(link, hit.pos);
         let batch = s
             .doc
-            .pattern(hit.id)
+            .pattern(target)
             .filter(|_| unlocked(s, hit.id))
-            .and_then(|pattern| edit::add_outline_dart(pattern, hit.pos, width, depth));
+            .and_then(|pattern| edit::add_outline_dart(pattern, at, width, depth));
         if let Some(batch) = batch {
             s.execute(batch);
         }
@@ -1196,6 +1206,8 @@ fn handle_dart(response: &egui::Response, rect: Rect, s: &mut Session) {
                 .is_some_and(|p| p.contains(start) && p.contains(end));
             if inside && start.distance(end) >= MIN_RECT_MM {
                 let width = s.canvas.dart_width;
+                let (owner, link) = s.edit_target(owner);
+                let (start, end) = (to_source(link, start), to_source(link, end));
                 s.execute(AddDart::new(owner, Dart { start, end, width }));
             }
         }
@@ -1212,12 +1224,14 @@ fn handle_pleat(response: &egui::Response, rect: Rect, s: &mut Session) {
     let Some(Drag::Line { owner, start, end }) = s.canvas.drag.take() else {
         return;
     };
-    let Some(pattern) = s.doc.pattern(owner) else {
-        return;
-    };
     if start.distance(end) < MIN_RECT_MM {
         return;
     }
+    let (owner, link) = s.edit_target(owner);
+    let (start, end) = (to_source(link, start), to_source(link, end));
+    let Some(pattern) = s.doc.pattern(owner) else {
+        return;
+    };
     let p = s.canvas.pleat;
     let lines = edit::pleat_lines(pattern, start, end, p.kind, p.count, p.depth, p.angle);
     let commands: Vec<Box<dyn od_core::Command>> = lines
@@ -1232,6 +1246,12 @@ fn handle_pleat(response: &egui::Response, rect: Rect, s: &mut Session) {
     if !commands.is_empty() {
         s.execute(od_core::Batch::new("Add pleats", commands));
     }
+}
+
+/// A position on a linked copy mapped back to its source (see
+/// [`Session::edit_target`]), or `p` itself without a link.
+fn to_source(link: Option<od_core::Link>, p: Vec2) -> Vec2 {
+    link.map_or(p, |l| l.to_source(p))
 }
 
 /// Track a [`Drag::Line`] inside an unlocked pattern: started on the
@@ -1288,6 +1308,8 @@ fn handle_trim(ui: &egui::Ui, response: &egui::Response, rect: Rect, s: &mut Ses
         .trims
         .iter()
         .position(|t| t.pos.distance(p) <= reach);
+    let (id, link) = s.edit_target(id);
+    let p = to_source(link, p);
     match existing {
         Some(index) => s.execute(RemoveTrim::new(id, index)),
         None => {

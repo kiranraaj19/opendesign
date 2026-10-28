@@ -11,6 +11,7 @@ pub mod dxf;
 pub mod edit;
 pub mod geometry;
 pub mod history;
+pub mod link;
 pub mod piece;
 #[cfg(feature = "python-plugins")]
 pub mod plugin;
@@ -29,11 +30,12 @@ pub use command::{
     PARTICLE_DISTANCE_RANGE,
 };
 pub use document::{
-    Arrangement, Axis, Dart, Document, Fabric, FabricTexture, Fold, Grading, InternalLine, Notch,
-    OutlinePoint, Pattern, PatternId, PointKind, SeamEdge, SewingLine, SewingLineId, SizeChart,
-    Tack, TackId, TackPoint, TackTarget, Topstitch, Trim, TrimKind,
+    Arrangement, Axis, Dart, Document, Fabric, FabricTexture, Fold, Grading, InternalLine, Link,
+    Notch, OutlinePoint, Pattern, PatternId, PointKind, SeamEdge, SewingLine, SewingLineId,
+    SizeChart, Tack, TackId, TackPoint, TackTarget, Topstitch, Trim, TrimKind,
 };
 pub use geometry::Vec2;
 pub use history::History;
+pub use link::{LinkedCopy, Unlink};
 pub use piece::{CutPattern, MergePatterns};
 pub use seam::Side;
