@@ -47,18 +47,26 @@ without this step.
 | Notches | Notch tool (`N`): click an outline to add, click a notch to remove |
 | Internal lines | Internal line tool (`L`): click inside a pattern, `Enter` or double-click to finish |
 | Flip, mirror, duplicate | Properties → Symmetry; `Ctrl+D` duplicates |
+| Rotate a piece | Select tool: drag the round handle above it (`Shift` for 15° steps), or Properties → Rotate (±45°, ±90°) |
+| Cut, copy, paste | `Ctrl+X` / `Ctrl+C` / `Ctrl+V` (or Edit menu): copies keep the seams and tacks between them; `Ctrl+Shift+V` pastes a mirror image beside them |
 | Sew | Sew tool (`S`): click a segment (or drag along an outline for a free stretch, which may cross the outline's start), `Tab` for the other side, `Enter` sews; add more stretches per side for one-to-many. Pick both sides near matching ends and the seam is sewn untwisted. Click a sewn edge to unsew it |
 | Edit a seam | Select tool: click a seam to see its side lengths in Properties; drag the handles at its ends to move them along the outline; Flip side B untwists it, `Del` deletes it |
 | Check sewing length | View → Check sewing length (on, 3% by default): mismatched seams show in the warning colour, and the status bar counts them (click to select the first) |
 | Tack | Tack tool (`K`): click a point on a pattern, then a point on another pattern (2D or 3D view) or on the avatar (3D view). Works on the flat pieces and on the draped cloth; an avatar tack stays on the body when it is resized. `Esc` cancels; select a tack and `Del` deletes it. Clicking two exact outline points with the Sew tool also tacks them |
 | Drape | Drape button above the 3D view; Pin and Strain toggles while draping; Cloth collision keeps pieces from passing through each other |
 | Particle distance | Properties -> Simulation: spacing of a piece's simulation particles (default 20 mm; smaller is finer and slower) |
-| Select / move | Select tool (`V`), click or drag a pattern |
+| Select / move | Select tool (`V`), click or drag a pattern; `Shift`/`Ctrl`+click adds or removes, drag a box from empty space to select what it touches, `Ctrl+A` selects all, `Esc` clears. Moves, flips and deletes act on every selected piece |
+| Hide, lock | Objects tab (next to Library): Show and Lock per piece, plus every seam and tack. Hidden pieces leave both views and the drape; locked pieces can't be moved or edited |
+| Right-click menu | Right-click a piece in either view: cut, copy, paste, hide, lock, rotate, flip, zoom to, delete |
+| Zoom to selection | `F`, in both views; the piece under the pointer is outlined in both |
 | Delete | `Del` (the selected point when editing points), or the button in Properties |
 | Undo / redo | `Ctrl+Z` / `Ctrl+Y` (or `Ctrl+Shift+Z`) |
 | Pan / zoom 2D | Right-drag / scroll |
 | Orbit / pan / zoom 3D | Drag / right- or middle-drag / scroll; double-click or Frame to fit everything |
-| 3D camera presets | Front, Back, Left, Right, Top buttons above the 3D view |
+| 3D camera presets | Front, Back, Left, Right, Top, Bottom and Turn ±45° buttons above the 3D view |
+| Move pieces in 3D | Before draping, drag the selected piece's arrows to move it along an axis, or its ring to turn it (`Shift` for 15° steps). Arrange shows spots on the avatar: click one to place the selected pieces there. Properties → 3D position turns or resets them |
+| Pull the cloth | While draping, drag the cloth to pull it; drag elsewhere to orbit |
+| Show and display | Show in 3D: avatar, seams, trims, pins. Display: avatar and cloth solid, wireframe or see-through, and cloth mesh edges |
 | Select a pattern in 3D | Click it (the avatar blocks patterns behind it) |
 | Change avatar | Library -> Avatars: Female, Male, Kid, or Load avatar file (OBJ/glTF, Y up) |
 | Avatar size | Avatar size button in the 3D view: height, chest, waist, hip |
@@ -72,7 +80,7 @@ the default arrangement.
 ### Project files
 
 Projects are saved as `.odproj`: versioned JSON
-(`{"format": "opendesign-project", "version": 10, "document": {...}}`).
+(`{"format": "opendesign-project", "version": 11, "document": {...}}`).
 Older versions are upgraded when opened.
 Saves go through a temporary file and a rename, so a crash mid-save never
 leaves a half-written project. The title bar shows `*` and the status bar
