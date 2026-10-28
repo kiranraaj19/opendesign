@@ -371,8 +371,9 @@ pub struct InsertPoint {
     id: PatternId,
     index: usize,
     point: OutlinePoint,
-    /// Seams before the insert, restored exactly on undo.
+    /// Seams and grading before the insert, restored exactly on undo.
     sewing_lines: Vec<SewingLine>,
+    grading: Grading,
 }
 
 impl InsertPoint {
@@ -382,6 +383,7 @@ impl InsertPoint {
             index,
             point,
             sewing_lines: Vec::new(),
+            grading: Grading::default(),
         }
     }
 }
@@ -398,6 +400,8 @@ impl Command for InsertPoint {
         let before = p.clone();
         self.index = self.index.min(p.outline.len());
         p.outline.insert(self.index, self.point);
+        p.grading = Grading::carried_over(&before, &p.outline);
+        self.grading = before.grading.clone();
         let index = self.index;
         self.sewing_lines = remap_sewing(doc, &before, &|b, a, t| {
             seam::param_after_insert(b, a, index, t)
@@ -408,6 +412,7 @@ impl Command for InsertPoint {
         if let Some(p) = doc.pattern_mut(self.id) {
             if self.index < p.outline.len() {
                 p.outline.remove(self.index);
+                p.grading = std::mem::take(&mut self.grading);
                 doc.sewing_lines = std::mem::take(&mut self.sewing_lines);
             }
         }
@@ -420,8 +425,9 @@ pub struct DeletePoint {
     id: PatternId,
     index: usize,
     removed: Option<OutlinePoint>,
-    /// Seams before the delete, restored exactly on undo.
+    /// Seams and grading before the delete, restored exactly on undo.
     sewing_lines: Vec<SewingLine>,
+    grading: Grading,
 }
 
 impl DeletePoint {
@@ -431,6 +437,7 @@ impl DeletePoint {
             index,
             removed: None,
             sewing_lines: Vec::new(),
+            grading: Grading::default(),
         }
     }
 }
@@ -447,6 +454,8 @@ impl Command for DeletePoint {
         if p.outline.len() > 3 && self.index < p.outline.len() {
             let before = p.clone();
             self.removed = Some(p.outline.remove(self.index));
+            p.grading = Grading::carried_over(&before, &p.outline);
+            self.grading = before.grading.clone();
             let index = self.index;
             self.sewing_lines = remap_sewing(doc, &before, &|b, a, t| {
                 seam::param_after_delete(b, a, index, t)
@@ -457,6 +466,7 @@ impl Command for DeletePoint {
     fn undo(&mut self, doc: &mut Document) {
         if let (Some(p), Some(point)) = (doc.pattern_mut(self.id), self.removed.take()) {
             p.outline.insert(self.index.min(p.outline.len()), point);
+            p.grading = std::mem::take(&mut self.grading);
             doc.sewing_lines = std::mem::take(&mut self.sewing_lines);
         }
     }
@@ -511,6 +521,7 @@ impl Command for SetOutline {
         let before = p.clone();
         p.outline = self.outline.clone();
         p.notches = remap_notches(&before, p);
+        p.grading = Grading::carried_over(&before, &p.outline);
         let seams = remap_sewing(doc, &before, &|b, a, t| {
             a.nearest_param(b.pos_at_param(t, TOLERANCE)).0
         });

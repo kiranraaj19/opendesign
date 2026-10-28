@@ -337,6 +337,8 @@ fn cut(doc: &mut Document, id: PatternId, line: usize, sew: bool) -> Option<Stat
     {
         return None;
     }
+    a.grading = Grading::carried_over(&p, &a.outline);
+    b.grading = Grading::carried_over(&p, &b.outline);
     // Markings go to the half they lie in.
     let (a_shape, b_shape) = (a.clone(), b.clone());
     let in_a = |q: Vec2| a_shape.contains(q) || !b_shape.contains(q);
@@ -558,9 +560,28 @@ fn merge(doc: &mut Document, seam: SewingLineId) -> Option<State> {
         return None;
     }
 
+    // Each point grades as it did on the piece it came from.
+    let mut placed_b = pb.clone();
+    placed_b.map_points(place);
+    let grading = if pa.grading.point_deltas.is_empty() && pb.grading.point_deltas.is_empty() {
+        Grading::default()
+    } else {
+        Grading {
+            point_deltas: outline
+                .iter()
+                .map(|q| {
+                    if on_outline(&pa, q.pos) {
+                        Grading::delta_at(&pa, q.pos)
+                    } else {
+                        Grading::delta_at(&placed_b, q.pos)
+                    }
+                })
+                .collect(),
+        }
+    };
     let mut merged = Pattern {
         outline,
-        grading: Grading::default(),
+        grading,
         ..pa.clone()
     };
     merged
@@ -798,6 +819,45 @@ mod tests {
         merge.undo(&mut doc);
         assert_eq!(doc.patterns, before.patterns);
         assert_eq!(doc.sewing_lines, before.sewing_lines);
+    }
+
+    #[test]
+    fn cut_and_merged_pieces_keep_their_grading() {
+        let mut doc = Document::default();
+        let id = add_rect(&mut doc, "Front", Vec2::ZERO, Vec2::new(200.0, 100.0));
+        let p = doc.pattern_mut(id).unwrap();
+        p.grading = Grading::uniform_scale(&p.outline, 10.0);
+        p.internal_lines.push(InternalLine::new(vec![
+            Vec2::new(-10.0, 50.0),
+            Vec2::new(210.0, 50.0),
+        ]));
+        let whole = doc.pattern(id).unwrap().clone();
+        let mut cut = CutPattern::new(id, 0, true);
+        cut.apply(&mut doc);
+        let b_id = cut.new_id().unwrap();
+        // Every point of both halves grades where the whole piece did.
+        for half in [id, b_id] {
+            let half = doc.pattern(half).unwrap();
+            assert_eq!(half.grading.point_deltas.len(), half.outline.len());
+            for (q, d) in half.outline.iter().zip(&half.grading.point_deltas) {
+                assert_eq!(*d, Grading::delta_at(&whole, q.pos), "{q:?}");
+            }
+        }
+        // Merged back along the cut, the corners grade as they started.
+        let seam = doc.sewing_lines[0].id;
+        MergePatterns::new(seam).apply(&mut doc);
+        let merged = doc.pattern(id).unwrap();
+        for corner in [Vec2::ZERO, Vec2::new(200.0, 100.0)] {
+            let at = merged
+                .outline
+                .iter()
+                .position(|q| q.pos.distance(corner) < 1e-3)
+                .unwrap();
+            assert_eq!(
+                merged.grading.point_deltas[at],
+                Grading::delta_at(&whole, corner)
+            );
+        }
     }
 
     #[test]

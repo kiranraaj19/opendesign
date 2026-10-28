@@ -484,6 +484,42 @@ impl Grading {
             point_deltas: outline.iter().map(|p| (p.pos - center) * factor).collect(),
         }
     }
+
+    /// How far the point of `pattern`'s outline at `pos` grades: the delta
+    /// of the outline point there, or for a place between two, the blend
+    /// of theirs. Zero without a grading rule.
+    pub fn delta_at(pattern: &Pattern, pos: Vec2) -> Vec2 {
+        let deltas = &pattern.grading.point_deltas;
+        let n = pattern.outline.len();
+        if deltas.is_empty() || n == 0 {
+            return Vec2::ZERO;
+        }
+        let get = |k: usize| deltas.get(k % n).copied().unwrap_or(Vec2::ZERO);
+        if let Some(k) = pattern
+            .outline
+            .iter()
+            .position(|p| p.pos.distance(pos) < 1e-3)
+        {
+            return get(k);
+        }
+        let t = pattern.nearest_param(pos).0;
+        get(t.floor() as usize).lerp(get(t.floor() as usize + 1), t - t.floor())
+    }
+
+    /// `before`'s grading carried over by position (see
+    /// [`Grading::delta_at`]) to a new outline for it, after points were
+    /// added or removed. No rule stays no rule.
+    pub fn carried_over(before: &Pattern, outline: &[OutlinePoint]) -> Grading {
+        if before.grading.point_deltas.is_empty() {
+            return Grading::default();
+        }
+        Grading {
+            point_deltas: outline
+                .iter()
+                .map(|p| Self::delta_at(before, p.pos))
+                .collect(),
+        }
+    }
 }
 
 /// Mirror axis through a pattern.
@@ -708,6 +744,9 @@ impl Pattern {
         if let Some(link) = &mut self.link {
             link.map(|p| axis.reflect(p, about));
         }
+        for d in &mut self.grading.point_deltas {
+            *d = axis.reflect(*d, 0.0);
+        }
         self.grain_angle = normalize_degrees(-self.grain_angle);
     }
 
@@ -731,12 +770,19 @@ impl Pattern {
         if let Some(link) = &mut self.link {
             link.map(turn);
         }
+        for d in &mut self.grading.point_deltas {
+            *d = rotate_point(*d, degrees, Vec2::ZERO);
+        }
         self.grain_angle = normalize_degrees(self.grain_angle + degrees);
     }
 
-    /// Move every point of the pattern and its markings with `f`. The
-    /// grainline and notches are left as they are.
+    /// Move every point of the pattern and its markings with `f` (turning,
+    /// flipping or shifting it), grading deltas with them. The grainline
+    /// and notches are left as they are.
     pub fn map_points(&mut self, f: impl Fn(Vec2) -> Vec2) {
+        for (d, p) in self.grading.point_deltas.iter_mut().zip(&self.outline) {
+            *d = f(p.pos + *d) - f(p.pos);
+        }
         self.outline.iter_mut().for_each(|p| p.pos = f(p.pos));
         for line in &mut self.internal_lines {
             line.points.iter_mut().for_each(|p| *p = f(*p));
@@ -1487,6 +1533,37 @@ mod tests {
         // Grading scales the area up with size.
         let graded = p.graded(1);
         assert!(graded.area() > p.area());
+    }
+
+    #[test]
+    fn grading_turns_and_flips_with_the_pattern() {
+        let mut p = pattern(&[
+            (0.0, 0.0, C),
+            (100.0, 0.0, C),
+            (100.0, 100.0, C),
+            (0.0, 100.0, C),
+        ]);
+        p.grading = Grading::uniform_scale(&p.outline, 10.0);
+        // Graded then turned is the same as turned then graded.
+        let mut turned = p.clone();
+        turned.rotate(30.0, Vec2::new(20.0, -5.0));
+        let mut graded = p.graded(1);
+        graded.rotate(30.0, Vec2::new(20.0, -5.0));
+        let mut flipped = p.clone();
+        flipped.mirror(Axis::Vertical, 140.0);
+        let mut graded_flipped = p.graded(1);
+        graded_flipped.mirror(Axis::Vertical, 140.0);
+        for (a, b) in [(turned, graded), (flipped, graded_flipped)] {
+            for (x, y) in a.graded_outline(1).iter().zip(&b.outline) {
+                assert!(x.pos.distance(y.pos) < 1e-3, "{x:?} {y:?}");
+            }
+        }
+        // A point added half way along an edge grades half way between.
+        let (outline, _) = crate::edit::split_outline(&p.outline, 0.5).unwrap();
+        let g = Grading::carried_over(&p, &outline);
+        assert_eq!(g.point_deltas.len(), 5);
+        assert_eq!(g.point_deltas[1], Vec2::new(0.0, -5.0));
+        assert_eq!(g.point_deltas[2], Vec2::new(5.0, -5.0));
     }
 
     #[test]
