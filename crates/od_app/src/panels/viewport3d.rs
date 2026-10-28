@@ -24,6 +24,7 @@ use od_render::view::{self, Display, FrameInput, PlacedPattern, Style, Theme};
 use od_sim::collision::Collider;
 
 use crate::app::{Session, Tool};
+use crate::panels::context;
 use crate::panels::gizmo::{self, GizmoDrag};
 use crate::panels::pattern2d;
 use crate::theme;
@@ -206,6 +207,8 @@ pub struct Viewport3D {
     pub show: Shown,
     /// How the avatar and cloth are drawn: solid, wireframe or see-through.
     pub display: Display,
+    /// Fit the selected patterns in view on the next frame.
+    pub frame_selection: bool,
     /// A 3D move or turn of the selected patterns in progress.
     pub gizmo: Option<GizmoDrag>,
     /// Showing the avatar's arrangement points, to click one and place the
@@ -271,6 +274,7 @@ impl Viewport3D {
             display: Display::default(),
             gizmo: None,
             arranging: false,
+            frame_selection: false,
         }
     }
 
@@ -906,6 +910,26 @@ pub fn ui(ui: &mut egui::Ui, s: &mut Session) {
     if std::mem::take(&mut s.viewport.needs_framing) {
         s.viewport.frame_all(rect, &placed);
     }
+    if std::mem::take(&mut s.viewport.frame_selection) {
+        let bounds = placed
+            .iter()
+            .filter(|p| s.selection.contains(p.key))
+            .filter_map(|p| p.mesh.bounds())
+            .reduce(od_render::mesh::Aabb::union);
+        if let Some(bounds) = bounds {
+            s.viewport.camera.frame(bounds, aspect(rect));
+        }
+    }
+    if let Some(pos) = response.hover_pos() {
+        s.hover_next = s.viewport.pick(rect, pos, &placed);
+    }
+    if response.secondary_clicked() {
+        let hit = response
+            .interact_pointer_pos()
+            .and_then(|pos| s.viewport.pick(rect, pos, &placed));
+        context::select_for_menu(s, hit);
+    }
+    response.context_menu(|ui| context::menu(ui, s));
     match action {
         Some(ViewAction::Preset(preset)) => {
             s.viewport.camera.set_view(preset);
@@ -1164,6 +1188,8 @@ fn handle_input(
                     (None, true) => {}
                     (hit, false) => s.selection.set(hit),
                 }
+                // Bring it into view in 2D too.
+                s.canvas.reveal = hit;
             }
         }
     }
@@ -1271,6 +1297,18 @@ fn paint(ui: &mut egui::Ui, rect: Rect, s: &Session, placed: &[PlacedPattern<Pat
         }
     }
 
+    // The pattern under the pointer in the other view, outlined here.
+    if let Some(p) = s.hovered.and_then(|id| placed.iter().find(|p| p.key == id)) {
+        let mut pts: Vec<Pos2> = p
+            .outline
+            .iter()
+            .filter_map(|&w| v.screen_pos(rect, w))
+            .collect();
+        if let Some(&first) = pts.first() {
+            pts.push(first);
+            painter.add(egui::Shape::line(pts, (2.0, pal.accent)));
+        }
+    }
     if v.arranging && v.drape.is_none() {
         gizmo::draw_points(&painter, s, rect, pal);
     }
@@ -1461,6 +1499,8 @@ mod tests {
             viewport: Viewport3D::new(None),
             props: PropertiesState::default(),
             preview_size: Document::default().size_chart.base,
+            hovered: None,
+            hover_next: None,
         }
     }
 

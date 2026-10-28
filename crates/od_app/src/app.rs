@@ -193,6 +193,10 @@ pub struct Session {
     /// previews currently show. Not persisted: a document always opens
     /// showing its base size.
     pub preview_size: usize,
+    /// The pattern under the pointer in either view, highlighted in both.
+    /// Set from what the views saw last frame (`hover_next`).
+    pub hovered: Option<PatternId>,
+    pub hover_next: Option<PatternId>,
 }
 
 /// How far each paste lands from the last, in mm on both axes.
@@ -403,6 +407,14 @@ impl Session {
         self.selected_tack = None;
     }
 
+    /// Fit the selected patterns in both views.
+    pub fn frame_selection(&mut self) {
+        if self.selection.primary().is_some() {
+            self.canvas.frame_selection = true;
+            self.viewport.frame_selection = true;
+        }
+    }
+
     /// Select every shown pattern.
     pub fn select_all(&mut self) {
         let shown = self.doc.patterns.iter().filter(|p| !p.hidden);
@@ -501,6 +513,8 @@ impl OpenDesignApp {
                 viewport: Viewport3D::new(cc.wgpu_render_state.as_ref()),
                 props: PropertiesState::default(),
                 preview_size: Document::default().size_chart.base,
+                hovered: None,
+                hover_next: None,
             },
             files: FileState::with_recent(
                 cc.storage
@@ -574,6 +588,9 @@ impl OpenDesignApp {
         }
         if ctx.input(|i| i.key_pressed(Key::C)) {
             s.toggle_selected_point();
+        }
+        if ctx.input(|i| i.key_pressed(Key::F)) {
+            s.frame_selection();
         }
         // Esc while selecting clears the selection; other tools use Esc to
         // cancel what they're drawing.
@@ -930,6 +947,12 @@ impl eframe::App for OpenDesignApp {
                     .show_leaf_close_all_buttons(false)
                     .show_inside(ui, &mut self.session);
             });
+        // What the views found under the pointer, highlighted next frame.
+        let s = &mut self.session;
+        if s.hovered != s.hover_next {
+            ctx.request_repaint();
+        }
+        s.hovered = s.hover_next.take();
 
         egui::Window::new("About OpenDesign")
             .open(&mut self.show_about)
@@ -2632,5 +2655,57 @@ mod tests {
         let p = h.state().session.doc.pattern(left).unwrap();
         assert_eq!(p.grain_angle, 0.0);
         assert_near(p.outline[0].pos, Vec2::ZERO);
+    }
+
+    #[test]
+    fn right_click_menus_act_on_the_clicked_piece() {
+        let mut h = harness();
+        let [left, right] = two_pieces(&mut h);
+        let at = screen(&h, 200.0, 40.0);
+        h.hover_at(at);
+        h.run();
+        h.event(egui::Event::PointerButton {
+            pos: at,
+            button: egui::PointerButton::Secondary,
+            pressed: true,
+            modifiers: Modifiers::NONE,
+        });
+        h.event(egui::Event::PointerButton {
+            pos: at,
+            button: egui::PointerButton::Secondary,
+            pressed: false,
+            modifiers: Modifiers::NONE,
+        });
+        h.run();
+        assert_eq!(h.state().session.selection.ids(), [right]);
+        h.get_by_label("Hide").click();
+        h.run();
+        let s = &h.state().session;
+        assert!(s.doc.pattern(right).unwrap().hidden);
+        assert!(!s.doc.pattern(left).unwrap().hidden);
+    }
+
+    #[test]
+    fn hovering_a_piece_highlights_it_and_f_frames_the_selection() {
+        let mut h = harness();
+        let [left, _] = two_pieces(&mut h);
+        let at = screen(&h, 50.0, 40.0);
+        h.hover_at(at);
+        h.run();
+        assert_eq!(h.state().session.hovered, Some(left));
+
+        click_at(&mut h, at, Modifiers::NONE);
+        press(&mut h, Modifiers::NONE, Key::F);
+        // The 2D view centres the piece.
+        let centre = h.state().session.canvas.screen_pos(Vec2::new(50.0, 40.0));
+        let canvas = h.get_by_label("2D pattern canvas").rect().center();
+        assert!(centre.distance(canvas) < 2.0, "{centre:?} vs {canvas:?}");
+        // The 3D camera looks at it.
+        let s = &h.state().session;
+        let placed = crate::panels::viewport3d::placed_patterns(s);
+        let piece = placed.iter().find(|p| p.key == left).unwrap();
+        let target = s.viewport.camera.target;
+        let middle = piece.mesh.bounds().unwrap().center();
+        assert!(target.distance(middle) < 0.01, "{target} vs {middle}");
     }
 }

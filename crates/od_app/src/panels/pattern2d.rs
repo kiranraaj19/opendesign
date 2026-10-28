@@ -72,6 +72,11 @@ pub struct Canvas2D {
     sew_drag_start: Option<Vec2>,
     /// Unsnapped pointer position, for hover highlights and readouts.
     hover: Option<Vec2>,
+    /// Fit the selected patterns in view on the next frame.
+    pub frame_selection: bool,
+    /// Pan to this pattern on the next frame if it is out of view, e.g.
+    /// after it was picked in the 3D view.
+    pub reveal: Option<PatternId>,
 }
 
 /// What the sew tool has picked so far.
@@ -159,6 +164,8 @@ impl Default for Canvas2D {
             sew_pending: None,
             sew_drag_start: None,
             hover: None,
+            frame_selection: false,
+            reveal: None,
         }
     }
 }
@@ -503,6 +510,17 @@ pub fn ui(ui: &mut egui::Ui, s: &mut Session) {
         s.canvas.selected_point = None;
     }
     s.canvas.hover = response.hover_pos().map(|p| s.canvas.to_doc(rect, p));
+    if let Some(p) = s.canvas.hover {
+        s.hover_next = s.doc.pattern_at(p);
+    }
+    frame_and_reveal(s, rect);
+    if response.secondary_clicked() {
+        let hit = response
+            .interact_pointer_pos()
+            .and_then(|p| s.doc.pattern_at(s.canvas.to_doc(rect, p)));
+        crate::panels::context::select_for_menu(s, hit);
+    }
+    response.context_menu(|ui| crate::panels::context::menu(ui, s));
     s.canvas.cursor = s.canvas.hover.map(|p| s.canvas.snap(&s.doc, p, None));
 
     // Single keys must not fire while typing in a text field.
@@ -625,6 +643,40 @@ fn rotate_handle(s: &Session) -> Option<(Vec2, Vec2)> {
 #[cfg(test)]
 pub fn rotate_handle_for_tests(s: &Session) -> Option<(Vec2, Vec2)> {
     rotate_handle(s)
+}
+
+/// Bounds of `ids`' outlines together, in mm.
+fn bounds_of(doc: &Document, ids: &[PatternId]) -> Option<(Vec2, Vec2)> {
+    let points: Vec<Vec2> = ids
+        .iter()
+        .filter_map(|&id| doc.pattern(id)?.bounds())
+        .flat_map(|(min, max)| [min, max])
+        .collect();
+    geometry::bounds(&points)
+}
+
+/// Act on [`Canvas2D::frame_selection`] and [`Canvas2D::reveal`].
+fn frame_and_reveal(s: &mut Session, rect: Rect) {
+    if std::mem::take(&mut s.canvas.frame_selection) {
+        if let Some((min, max)) = bounds_of(&s.doc, s.selection.ids()) {
+            // A margin of a tenth on each side.
+            let size = (max - min) * 1.2;
+            let zoom = (rect.width() / size.x.max(1.0)).min(rect.height() / size.y.max(1.0));
+            s.canvas.zoom = zoom.clamp(0.05, 20.0);
+            let centre = (min + max) * 0.5;
+            s.canvas.pan = -Px::new(centre.x, centre.y) * s.canvas.zoom;
+        }
+    }
+    if let Some(id) = s.canvas.reveal.take() {
+        if let Some((min, max)) = bounds_of(&s.doc, &[id]) {
+            let seen =
+                Rect::from_two_pos(s.canvas.to_screen(rect, min), s.canvas.to_screen(rect, max));
+            if !rect.contains_rect(seen) {
+                let centre = (min + max) * 0.5;
+                s.canvas.pan = -Px::new(centre.x, centre.y) * s.canvas.zoom;
+            }
+        }
+    }
 }
 
 /// Whether Shift or Ctrl (Cmd on macOS) is held, to add to the selection.
@@ -1364,10 +1416,12 @@ fn draw_pattern(
     }
     painter.add(Shape::mesh(mesh));
 
-    let stroke = if selected {
-        Stroke::new(2.5, pal.selected)
-    } else {
-        Stroke::new(1.5, pal.pattern_stroke)
+    // Under the pointer here or in the 3D view: drawn emphasised.
+    let hovered = s.hovered == Some(pattern.id);
+    let stroke = match (selected, hovered) {
+        (true, _) => Stroke::new(2.5, pal.selected),
+        (false, true) => Stroke::new(2.5, pal.accent),
+        (false, false) => Stroke::new(1.5, pal.pattern_stroke),
     };
     painter.add(Shape::closed_line(points, stroke));
 
