@@ -63,10 +63,52 @@ pub struct Notch {
     pub at: f32,
 }
 
-/// A line drawn inside a pattern: a dart, pocket or placement mark.
+/// A line drawn inside a pattern: a dart, pocket or placement mark, or a
+/// fold line when `fold` is set.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct InternalLine {
     pub points: Vec<Vec2>,
+    /// The cloth folds along this line when draped, as for a pleat.
+    #[serde(default)]
+    pub fold: Option<Fold>,
+}
+
+impl InternalLine {
+    pub fn new(points: Vec<Vec2>) -> Self {
+        Self { points, fold: None }
+    }
+}
+
+/// How the cloth folds along a fold line.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct Fold {
+    /// How far the cloth turns at the line, in degrees (0 stays flat, 180
+    /// folds it right back on itself). Positive folds the two sides
+    /// towards the viewer of the 2D window (a valley seen from there),
+    /// negative away from them (a mountain).
+    pub angle: f32,
+    /// How firmly the fold holds its angle, 0 (as soft as the fabric) to
+    /// 1 (as stiff as the fabric is against stretching).
+    pub strength: f32,
+}
+
+impl Fold {
+    pub const DEFAULT_ANGLE: f32 = 170.0;
+    pub const DEFAULT_STRENGTH: f32 = 0.5;
+
+    pub fn valley() -> Self {
+        Self {
+            angle: Self::DEFAULT_ANGLE,
+            strength: Self::DEFAULT_STRENGTH,
+        }
+    }
+
+    pub fn mountain() -> Self {
+        Self {
+            angle: -Self::DEFAULT_ANGLE,
+            ..Self::valley()
+        }
+    }
 }
 
 /// A dart inside a piece: a diamond from `start` to `end` (its two tips),
@@ -1158,9 +1200,10 @@ mod tests {
     fn mirror_keeps_order_and_flips_grain() {
         let mut p = pattern(&[(0.0, 0.0, C), (100.0, 0.0, Q), (100.0, 50.0, C)]);
         p.grain_angle = 30.0;
-        p.internal_lines.push(InternalLine {
-            points: vec![Vec2::new(10.0, 10.0), Vec2::new(20.0, 10.0)],
-        });
+        p.internal_lines.push(InternalLine::new(vec![
+            Vec2::new(10.0, 10.0),
+            Vec2::new(20.0, 10.0),
+        ]));
         p.topstitches.push(Topstitch {
             points: vec![Vec2::new(5.0, 5.0), Vec2::new(15.0, 5.0)],
         });

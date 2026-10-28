@@ -2,7 +2,7 @@
 //! apply itself and how to reverse that change.
 
 use crate::document::{
-    normalize_degrees, rotate_point, Arrangement, Axis, Dart, Document, Fabric, Grading,
+    normalize_degrees, rotate_point, Arrangement, Axis, Dart, Document, Fabric, Fold, Grading,
     InternalLine, Notch, OutlinePoint, Pattern, PatternId, PointKind, SeamEdge, SewingLine,
     SewingLineId, Tack, TackId, TackPoint, TackTarget, Topstitch, Trim, TrimKind, TOLERANCE,
 };
@@ -814,8 +814,53 @@ impl AddInternalLine {
     pub fn new(id: PatternId, points: Vec<Vec2>) -> Self {
         Self {
             id,
-            line: InternalLine { points },
+            line: InternalLine::new(points),
         }
+    }
+
+    /// A fold line: the cloth folds along it when draped.
+    pub fn folded(id: PatternId, points: Vec<Vec2>, fold: Fold) -> Self {
+        Self {
+            id,
+            line: InternalLine {
+                points,
+                fold: Some(fold),
+            },
+        }
+    }
+}
+
+/// Make an internal line a fold line, change its fold, or make it a plain
+/// line again (`None`).
+pub struct SetFold {
+    id: PatternId,
+    index: usize,
+    /// Swapped with the line's fold on apply and undo, so both are exact.
+    fold: Option<Fold>,
+}
+
+impl SetFold {
+    pub fn new(id: PatternId, index: usize, fold: Option<Fold>) -> Self {
+        Self { id, index, fold }
+    }
+}
+
+impl Command for SetFold {
+    fn label(&self) -> String {
+        "Change fold".into()
+    }
+
+    fn apply(&mut self, doc: &mut Document) {
+        if let Some(line) = doc
+            .pattern_mut(self.id)
+            .and_then(|p| p.internal_lines.get_mut(self.index))
+        {
+            std::mem::swap(&mut line.fold, &mut self.fold);
+        }
+    }
+
+    fn undo(&mut self, doc: &mut Document) {
+        self.apply(doc);
     }
 }
 

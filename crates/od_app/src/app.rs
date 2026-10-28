@@ -57,11 +57,12 @@ pub enum Tool {
     Trim,
     Tack,
     Dart,
+    Pleat,
 }
 
 impl Tool {
     /// Toolbar order, with button label, shortcut key and tooltip.
-    const BUTTONS: [(Tool, &'static str, Key, &'static str); 11] = [
+    const BUTTONS: [(Tool, &'static str, Key, &'static str); 12] = [
         (
             Tool::Select,
             "Select",
@@ -128,6 +129,12 @@ impl Tool {
             Key::D,
             "Click an outline to cut a dart into it; drag inside a pattern for a diamond dart (D)",
         ),
+        (
+            Tool::Pleat,
+            "Pleat",
+            Key::Q,
+            "Drag along a pattern where the first pleat folds; the rest step to the right (Q)",
+        ),
     ];
 
     pub fn name(self) -> &'static str {
@@ -143,6 +150,7 @@ impl Tool {
             Tool::Trim => "Trim",
             Tool::Tack => "Tack",
             Tool::Dart => "Dart",
+            Tool::Pleat => "Pleat",
         }
     }
 }
@@ -2752,6 +2760,38 @@ mod tests {
         assert!(s.doc.pattern(right).unwrap().darts.is_empty());
         assert_eq!(s.doc.pattern(left).unwrap().outline.len(), 4);
         assert!(s.doc.sewing_lines.is_empty());
+    }
+
+    #[test]
+    fn pleat_tool_lays_fold_lines_across_the_piece() {
+        let mut h = harness();
+        let [left, _] = two_pieces(&mut h);
+        press(&mut h, Modifiers::NONE, Key::Q);
+        assert_eq!(h.state().session.tool, Tool::Pleat);
+        h.state_mut().session.canvas.snap.grid = false;
+        // Upwards, so the knife pleat's lines step to the right.
+        drag_mm(&mut h, (20.0, 70.0), (20.0, 10.0));
+        let s = &h.state().session;
+        let lines = &s.doc.pattern(left).unwrap().internal_lines;
+        assert_eq!(lines.len(), 3, "{lines:?}");
+        assert!(
+            lines[0].fold.is_some_and(|f| f.angle < 0.0),
+            "a mountain first"
+        );
+        assert!(
+            lines[1].fold.is_some_and(|f| f.angle > 0.0),
+            "then a valley"
+        );
+        assert_eq!(lines[2].fold, None, "and where it lands");
+        // Each runs from the top edge to the bottom one.
+        for line in lines {
+            let ys: Vec<f32> = line.points.iter().map(|p| p.y).collect();
+            assert!(ys.iter().any(|y| y.abs() < 0.5) && ys.iter().any(|y| (y - 80.0).abs() < 0.5));
+        }
+        assert_eq!(s.history.undo_label().as_deref(), Some("Add pleats"));
+        press(&mut h, Modifiers::COMMAND, Key::Z);
+        let p = h.state().session.doc.pattern(left).unwrap();
+        assert!(p.internal_lines.is_empty());
     }
 
     #[test]

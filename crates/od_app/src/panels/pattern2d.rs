@@ -6,6 +6,7 @@ use egui::{
     Align2, Color32, FontId, Key, PointerButton, Pos2, Rect, Sense, Shape, Stroke, Vec2 as Px,
 };
 use od_core::document::{normalize_degrees, rotate_point, TOLERANCE};
+use od_core::edit::PleatKind;
 use od_core::{
     edit, geometry, AddDart, AddInternalLine, AddNotch, AddSewingLine, AddTack, AddTopstitch,
     AddTrim, Dart, Document, InsertPoint, MovePattern, MovePoint, OutlinePoint, Pattern, PatternId,
@@ -83,6 +84,29 @@ pub struct Canvas2D {
     pub dart_width: f32,
     /// How far an outline dart reaches into the piece, in mm.
     pub dart_depth: f32,
+    pub pleat: PleatSettings,
+}
+
+/// What the Pleat tool lays out.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PleatSettings {
+    pub kind: PleatKind,
+    pub count: usize,
+    /// Between neighbouring fold lines, in mm.
+    pub depth: f32,
+    /// How far each fold turns, in degrees.
+    pub angle: f32,
+}
+
+impl Default for PleatSettings {
+    fn default() -> Self {
+        Self {
+            kind: PleatKind::Knife,
+            count: 1,
+            depth: 30.0,
+            angle: od_core::Fold::DEFAULT_ANGLE,
+        }
+    }
 }
 
 /// What the sew tool has picked so far.
@@ -180,6 +204,7 @@ impl Default for Canvas2D {
             reveal: None,
             dart_width: 30.0,
             dart_depth: 80.0,
+            pleat: PleatSettings::default(),
         }
     }
 }
@@ -550,6 +575,7 @@ pub fn ui(ui: &mut egui::Ui, s: &mut Session) {
         Tool::Trim => handle_trim(ui, &response, rect, s),
         Tool::Tack => handle_tack(ui, &response, rect, s, typing),
         Tool::Dart => handle_dart(&response, rect, s),
+        Tool::Pleat => handle_pleat(&response, rect, s),
     }
 
     // Background and grid.
@@ -599,6 +625,9 @@ pub fn ui(ui: &mut egui::Ui, s: &mut Session) {
         Tool::Notch => "Click an outline to add a notch · click a notch to remove it",
         Tool::Dart => {
             "Click an outline to cut a dart into it · drag inside a pattern, tip to tip, for a diamond dart · sizes in Properties"
+        }
+        Tool::Pleat => {
+            "Drag along where the first pleat folds · the rest step to the right of the drag · kind and depth in Properties"
         }
         Tool::Trim => {
             "Click to place a button (Shift+click: snap) · click a trim to remove it"
@@ -1173,6 +1202,38 @@ fn handle_dart(response: &egui::Response, rect: Rect, s: &mut Session) {
     }
 }
 
+/// The Pleat tool: a drag inside a pattern marks the first fold; the
+/// pleat's fold lines are laid across the whole piece from there.
+fn handle_pleat(response: &egui::Response, rect: Rect, s: &mut Session) {
+    line_drag(response, rect, s);
+    if !response.drag_stopped() {
+        return;
+    }
+    let Some(Drag::Line { owner, start, end }) = s.canvas.drag.take() else {
+        return;
+    };
+    let Some(pattern) = s.doc.pattern(owner) else {
+        return;
+    };
+    if start.distance(end) < MIN_RECT_MM {
+        return;
+    }
+    let p = s.canvas.pleat;
+    let lines = edit::pleat_lines(pattern, start, end, p.kind, p.count, p.depth, p.angle);
+    let commands: Vec<Box<dyn od_core::Command>> = lines
+        .into_iter()
+        .map(|line| -> Box<dyn od_core::Command> {
+            match line.fold {
+                Some(fold) => Box::new(AddInternalLine::folded(owner, line.points, fold)),
+                None => Box::new(AddInternalLine::new(owner, line.points)),
+            }
+        })
+        .collect();
+    if !commands.is_empty() {
+        s.execute(od_core::Batch::new("Add pleats", commands));
+    }
+}
+
 /// Track a [`Drag::Line`] inside an unlocked pattern: started on the
 /// pattern under the press, ended wherever the (snapped) pointer is.
 fn line_drag(response: &egui::Response, rect: Rect, s: &mut Session) {
@@ -1525,8 +1586,26 @@ fn draw_pattern(
     }
 
     for line in &pattern.internal_lines {
-        let pts = line.points.iter().map(|p| to_screen(*p)).collect();
-        painter.add(Shape::line(pts, Stroke::new(1.5, pal.pattern_stroke)));
+        let pts: Vec<Pos2> = line.points.iter().map(|p| to_screen(*p)).collect();
+        match line.fold {
+            None => {
+                painter.add(Shape::line(pts, Stroke::new(1.5, pal.pattern_stroke)));
+            }
+            // Fold lines: long dashes for a valley, short for a mountain.
+            Some(fold) => {
+                let (dash, gap) = if fold.angle >= 0.0 {
+                    (10.0, 4.0)
+                } else {
+                    (3.0, 3.0)
+                };
+                painter.extend(Shape::dashed_line(
+                    &pts,
+                    Stroke::new(1.5, pal.accent),
+                    dash,
+                    gap,
+                ));
+            }
+        }
     }
     for dart in &pattern.darts {
         draw_dart(
@@ -1941,7 +2020,13 @@ fn draw_overlays(painter: &egui::Painter, rect: Rect, s: &Session, pal: &theme::
                 width: canvas.dart_width,
             };
             draw_dart(painter, rect, canvas, &dart, stroke);
-        } else {
+        } else if let Some(pattern) = s.selection.primary().and_then(|id| s.doc.pattern(id)) {
+            let p = canvas.pleat;
+            let lines = edit::pleat_lines(pattern, *start, *end, p.kind, p.count, p.depth, p.angle);
+            for line in lines {
+                let pts: Vec<Pos2> = line.points.iter().map(|q| to_screen(*q)).collect();
+                painter.extend(Shape::dashed_line(&pts, stroke, 6.0, 4.0));
+            }
             painter.line_segment([to_screen(*start), to_screen(*end)], stroke);
         }
         readout(*start, *end);

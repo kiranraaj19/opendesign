@@ -200,9 +200,10 @@ mod tests {
         p.seam_allowance = 10.0;
         p.grain_angle = 0.0;
         p.notches.push(Notch { at: 50.0 });
-        p.internal_lines.push(InternalLine {
-            points: vec![Vec2::new(10.0, 10.0), Vec2::new(20.0, 20.0)],
-        });
+        p.internal_lines.push(InternalLine::new(vec![
+            Vec2::new(10.0, 10.0),
+            Vec2::new(20.0, 20.0),
+        ]));
         doc.patterns.push(p);
         doc
     }

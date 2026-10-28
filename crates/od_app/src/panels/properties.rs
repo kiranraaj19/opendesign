@@ -2,10 +2,11 @@
 //! chart preview) and the bill of materials.
 
 use od_core::document::TOLERANCE;
+use od_core::edit::PleatKind;
 use od_core::{
-    document_bom, edit, total_area_m2, Axis, Fabric, Grading, Pattern, PatternId, PatternValue,
-    PointKind, RemoveDart, RemoveInternalLine, RenamePattern, SetFabric, SetGrading, SetOutline,
-    SetParticleDistance, SetPatternValue, PARTICLE_DISTANCE_RANGE,
+    document_bom, edit, total_area_m2, Axis, Fabric, Fold, Grading, Pattern, PatternId,
+    PatternValue, PointKind, RemoveDart, RemoveInternalLine, RenamePattern, SetFabric, SetFold,
+    SetGrading, SetOutline, SetParticleDistance, SetPatternValue, PARTICLE_DISTANCE_RANGE,
 };
 use od_sim::cloth::DEFAULT_PARTICLE_DISTANCE;
 
@@ -26,6 +27,8 @@ pub struct PropertiesState {
     /// An edge length being dragged or typed: pattern, the corner the edge
     /// starts at, and the length.
     length_pending: Option<(PatternId, usize, f32)>,
+    /// A fold angle being dragged or typed: pattern, line and angle.
+    fold_pending: Option<(PatternId, usize, f32)>,
 }
 
 impl Default for PropertiesState {
@@ -37,6 +40,7 @@ impl Default for PropertiesState {
             distance_pending: None,
             round_distance: 20.0,
             length_pending: None,
+            fold_pending: None,
         }
     }
 }
@@ -160,11 +164,6 @@ pub fn ui(ui: &mut egui::Ui, s: &mut Session) {
 
 /// Settings for the tool in use, for tools that have any.
 fn tool_section(ui: &mut egui::Ui, s: &mut Session) {
-    if s.tool != Tool::Dart {
-        return;
-    }
-    ui.add_space(8.0);
-    ui.heading("Dart tool");
     fn size(value: &mut f32) -> egui::DragValue<'_> {
         egui::DragValue::new(value)
             .range(1.0..=1000.0)
@@ -172,14 +171,94 @@ fn tool_section(ui: &mut egui::Ui, s: &mut Session) {
             .speed(0.5)
             .max_decimals(1)
     }
-    egui::Grid::new("dart_tool").num_columns(2).show(ui, |ui| {
-        ui.label("Width");
-        ui.add(size(&mut s.canvas.dart_width));
-        ui.end_row();
-        ui.label("Depth (outline darts)");
-        ui.add(size(&mut s.canvas.dart_depth));
-        ui.end_row();
-    });
+    match s.tool {
+        Tool::Dart => {
+            ui.add_space(8.0);
+            ui.heading("Dart tool");
+            egui::Grid::new("dart_tool").num_columns(2).show(ui, |ui| {
+                ui.label("Width");
+                ui.add(size(&mut s.canvas.dart_width));
+                ui.end_row();
+                ui.label("Depth (outline darts)");
+                ui.add(size(&mut s.canvas.dart_depth));
+                ui.end_row();
+            });
+        }
+        Tool::Pleat => {
+            ui.add_space(8.0);
+            ui.heading("Pleat tool");
+            let p = &mut s.canvas.pleat;
+            ui.horizontal(|ui| {
+                ui.selectable_value(&mut p.kind, PleatKind::Knife, "Knife");
+                ui.selectable_value(&mut p.kind, PleatKind::Box, "Box");
+            });
+            egui::Grid::new("pleat_tool").num_columns(2).show(ui, |ui| {
+                ui.label("Pleats");
+                ui.add(egui::DragValue::new(&mut p.count).range(1..=20));
+                ui.end_row();
+                ui.label("Depth");
+                ui.add(size(&mut p.depth));
+                ui.end_row();
+                ui.label("Fold angle");
+                ui.add(
+                    egui::DragValue::new(&mut p.angle)
+                        .range(0.0..=180.0)
+                        .suffix("°"),
+                );
+                ui.end_row();
+            });
+        }
+        _ => {}
+    }
+}
+
+/// Plain line, valley fold or mountain fold, and the fold's angle.
+fn fold_edit(ui: &mut egui::Ui, s: &mut Session, id: PatternId, index: usize, fold: Option<Fold>) {
+    let valley = fold.is_some_and(|f| f.angle >= 0.0);
+    let mountain = fold.is_some_and(|f| f.angle < 0.0);
+    let angle = fold.map_or(Fold::DEFAULT_ANGLE, |f| f.angle.abs());
+    let strength = fold.map_or(Fold::DEFAULT_STRENGTH, |f| f.strength);
+    let mut set = None;
+    if ui.selectable_label(fold.is_none(), "Plain").clicked() && fold.is_some() {
+        set = Some(None);
+    }
+    if ui.selectable_label(valley, "Valley").clicked() && !valley {
+        set = Some(Some(Fold { angle, strength }));
+    }
+    if ui.selectable_label(mountain, "Mountain").clicked() && !mountain {
+        set = Some(Some(Fold {
+            angle: -angle,
+            strength,
+        }));
+    }
+    if let Some(fold) = fold {
+        let mut value = match s.props.fold_pending {
+            Some((pid, i, v)) if pid == id && i == index => v,
+            _ => angle,
+        };
+        let response = ui.add(
+            egui::DragValue::new(&mut value)
+                .range(0.0..=180.0)
+                .suffix("°"),
+        );
+        if response.changed() {
+            s.props.fold_pending = Some((id, index, value));
+        }
+        let busy = response.dragged() || response.has_focus();
+        if !busy {
+            if let Some((pid, i, value)) = s.props.fold_pending.take() {
+                if pid == id && i == index && value != angle {
+                    set = Some(Some(Fold {
+                        angle: value * fold.angle.signum(),
+                        ..fold
+                    }));
+                }
+            }
+        }
+    }
+    if let Some(fold) = set {
+        s.execute(SetFold::new(id, index, fold));
+    }
 }
 
 /// The diamond darts inside the pattern.
@@ -505,6 +584,9 @@ fn lines_section(ui: &mut egui::Ui, s: &mut Session, id: PatternId) {
             ui.label(format!("Line {}: {length:.0} mm", i + 1));
             if ui.button(format!("Remove line {}", i + 1)).clicked() {
                 remove = Some(i);
+            }
+            if !pattern.locked {
+                fold_edit(ui, s, id, i, line.fold);
             }
             let crossings = (!pattern.locked)
                 .then(|| edit::points_at_crossings(&pattern, &line.points))

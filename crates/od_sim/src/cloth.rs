@@ -10,7 +10,7 @@ use std::collections::{BTreeSet, HashMap};
 use std::ops::Range;
 
 use od_core::document::{
-    Document, FlatPoint, Pattern, PatternId, SeamEdge, TackTarget, TrimKind, TOLERANCE,
+    Document, FlatPoint, Fold, Pattern, PatternId, SeamEdge, TackTarget, TrimKind, TOLERANCE,
 };
 use od_core::geometry::{self, Vec2};
 use od_render::mesh::Mesh;
@@ -185,23 +185,67 @@ fn points_in_range(
 /// boundary), the pair of vertices opposite it in those two triangles —
 /// the vertices a bending constraint should span to resist folding along
 /// that edge. Local indices, into whatever `faces` indexes.
+#[cfg(test)]
 fn bending_pairs(faces: &[[u32; 3]]) -> Vec<(u32, u32)> {
+    let mut pairs: Vec<(u32, u32)> = bending_quads(faces).into_iter().map(|(_, p)| p).collect();
+    pairs.sort_unstable();
+    pairs
+}
+
+/// Like [`bending_pairs`], with the shared edge each pair spans.
+fn bending_quads(faces: &[[u32; 3]]) -> Vec<((u32, u32), (u32, u32))> {
     let mut opposite: HashMap<(u32, u32), Vec<u32>> = HashMap::new();
     for &[a, b, c] in faces {
         for (x, y, opp) in [(a, b, c), (b, c, a), (c, a, b)] {
             opposite.entry((x.min(y), x.max(y))).or_default().push(opp);
         }
     }
-    let mut pairs: Vec<(u32, u32)> = opposite
-        .into_values()
-        .filter_map(|opps| match opps.as_slice() {
-            [p, q] if p != q => Some((*p, *q)),
+    let mut quads: Vec<_> = opposite
+        .into_iter()
+        .filter_map(|(edge, opps)| match opps.as_slice() {
+            [p, q] if p != q => Some((edge, (*p, *q))),
             _ => None,
         })
         .collect();
     // HashMap order varies from run to run; keep the solver's stable.
-    pairs.sort_unstable();
-    pairs
+    quads.sort_unstable_by_key(|&(_, pair)| pair);
+    quads
+}
+
+/// How far a crease is nudged out of the piece's plane before draping, in
+/// metres, to set which way it folds.
+const CREASE_NUDGE: f32 = 0.003;
+
+/// Is `p` on the open polyline `line`, to within a hundredth of a mm?
+fn on_polyline(line: &[Vec2], p: Vec2) -> bool {
+    line.windows(2)
+        .any(|w| geometry::closest_on_segment(w[0], w[1], p).0.distance(p) < 1e-2)
+}
+
+/// The distance between `p` and `q`, either side of the line through `x`
+/// and `y`, once the cloth is folded `degrees` along that line (0 is flat).
+fn folded_distance(x: Vec2, y: Vec2, p: Vec2, q: Vec2, degrees: f32) -> f32 {
+    let e = (y - x) * (1.0 / x.distance(y));
+    let (rp, rq) = (p - x, q - x);
+    let along = rp.dot(e) - rq.dot(e);
+    let (hp, hq) = (rp.cross(e).abs(), rq.cross(e).abs());
+    let cos = degrees.to_radians().cos();
+    (along * along + hp * hp + hq * hq + 2.0 * hp * hq * cos)
+        .max(0.0)
+        .sqrt()
+}
+
+/// The unit normal of a placed piece pointing at whoever looks at it in
+/// the 2D window, from its flat mesh and where its vertices were placed.
+pub fn towards_viewer(mesh: &PatternMesh, world: &[glam::Vec3]) -> Option<glam::Vec3> {
+    let &[a, b, c] = mesh.faces.first()?;
+    let flat = |v: u32| mesh.vertices[v as usize].pos;
+    let det = (flat(b) - flat(a)).cross(flat(c) - flat(a));
+    let w = |v: u32| world[v as usize];
+    let n = (w(b) - w(a)).cross(w(c) - w(a));
+    // The 2D window's y points down the screen, so x × y points into it.
+    let into_screen = if det > 0.0 { n } else { -n };
+    (-into_screen).try_normalize()
 }
 
 /// One side of a seam, as the particles it touches in travel order along
@@ -396,15 +440,52 @@ pub fn build(
                 }
             }
         }
-        for (p, q) in bending_pairs(&mesh.faces) {
+        let folds: Vec<(&[Vec2], Fold)> = pattern
+            .internal_lines
+            .iter()
+            .filter_map(|l| Some((l.points.as_slice(), l.fold?)))
+            .collect();
+        // A bending pair whose span crosses a fold line rests at the
+        // distance it has once folded there, rather than flat.
+        let flat = |v: u32| mesh.vertices[v as usize].pos;
+        let crossed = |p: u32, q: u32| {
+            folds.iter().find_map(|&(line, fold)| {
+                line.windows(2)
+                    .find(|w| {
+                        geometry::segment_intersection(flat(p), flat(q), w[0], w[1]).is_some()
+                    })
+                    .map(|w| (w[0], w[1], fold))
+            })
+        };
+        for ((x, y), (p, q)) in bending_quads(&mesh.faces) {
             let (ga, gb) = (offset + p as usize, offset + q as usize);
-            let rest_length = world[p as usize].distance(world[q as usize]);
+            let mut rest_length = world[p as usize].distance(world[q as usize]);
+            let mut compliance = pattern.fabric.bending_compliance;
+            let mm = flat(x).distance(flat(y));
+            if let Some((a, b, fold)) = crossed(p, q).filter(|_| mm > 1e-6) {
+                let scale = world[x as usize].distance(world[y as usize]) / mm;
+                rest_length = folded_distance(a, b, flat(p), flat(q), fold.angle) * scale;
+                let s = fold.strength.clamp(0.0, 1.0);
+                compliance += (pattern.fabric.stretch_compliance - compliance) * s;
+            }
             bending.push(DistanceConstraint::new(
                 ga.min(gb),
                 ga.max(gb),
                 rest_length,
-                pattern.fabric.bending_compliance,
+                compliance,
             ));
+        }
+        // Start each crease a little behind (valley) or in front of
+        // (mountain) the piece, so it folds the way it should rather than
+        // whichever way it happens to tip.
+        if let Some(towards) = towards_viewer(&mesh, &world) {
+            for (i, v) in mesh.vertices.iter().enumerate() {
+                let fold = folds.iter().find(|(line, _)| on_polyline(line, v.pos));
+                if let Some((_, fold)) = fold {
+                    let side = if fold.angle >= 0.0 { 1.0 } else { -1.0 };
+                    particles[offset + i].position -= towards * (CREASE_NUDGE * side);
+                }
+            }
         }
 
         let boundary = mesh
@@ -638,6 +719,66 @@ mod tests {
         }
         let end = widest(&world);
         assert!(end < start * 0.3, "{start} -> {end}");
+    }
+
+    #[test]
+    fn a_fold_line_folds_the_cloth_to_its_angle_and_the_right_way() {
+        use od_core::document::{Fold, InternalLine};
+        let folded = |fold: Fold| {
+            let mut doc = Document::new("test");
+            let mut panel = rectangle(1, "panel", 320.0, 200.0);
+            panel.internal_lines.push(InternalLine {
+                points: vec![Vec2::new(160.0, 0.0), Vec2::new(160.0, 200.0)],
+                fold: Some(Fold {
+                    angle: fold.angle,
+                    strength: 1.0,
+                }),
+            });
+            doc.patterns.push(panel);
+            let placements = placements_for(&doc);
+            let scene = build(&doc, &placements, None, &ClothConfig::default());
+            let mesh = &scene.pattern_meshes[0].1;
+            let near = |x: f32, y: f32| {
+                let p = Vec2::new(x, y);
+                (0..mesh.vertices.len())
+                    .min_by(|&a, &b| {
+                        mesh.vertices[a]
+                            .pos
+                            .distance(p)
+                            .total_cmp(&mesh.vertices[b].pos.distance(p))
+                    })
+                    .unwrap()
+            };
+            let (left, crease, right) = (near(0.0, 100.0), near(160.0, 100.0), near(320.0, 100.0));
+            let start: Vec<_> = scene.particles.iter().map(|p| p.position).collect();
+            let towards = towards_viewer(mesh, &start).unwrap();
+            let mut world = World::new(scene.particles.clone());
+            world.gravity = glam::Vec3::ZERO;
+            world.distance_constraints = scene.structural.clone();
+            world.distance_constraints.extend(scene.bending.clone());
+            for _ in 0..900 {
+                world.step(1.0 / 60.0, 8, &[]);
+            }
+            let at = |i: usize| world.particles[i].position;
+            let (l, r) = (at(left) - at(crease), at(right) - at(crease));
+            let angle = l.angle_between(r).to_degrees();
+            (angle, l.dot(towards), r.dot(towards))
+        };
+        // Folding 90° leaves the two halves at right angles.
+        let (angle, l, r) = folded(Fold {
+            angle: 90.0,
+            strength: 1.0,
+        });
+        assert!((angle - 90.0).abs() < 20.0, "{angle}");
+        assert!(
+            l > 0.0 && r > 0.0,
+            "a valley folds towards the viewer: {l} {r}"
+        );
+        let (_, l, r) = folded(Fold {
+            angle: -90.0,
+            strength: 1.0,
+        });
+        assert!(l < 0.0 && r < 0.0, "a mountain folds away: {l} {r}");
     }
 
     #[test]

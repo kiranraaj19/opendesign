@@ -5,7 +5,7 @@
 //! These work out a new outline; [`crate::command::SetOutline`] puts it in
 //! the document, keeping seams and notches on the same stretch of outline.
 
-use crate::document::{OutlinePoint, Pattern, PointKind, TOLERANCE};
+use crate::document::{Fold, InternalLine, OutlinePoint, Pattern, PointKind, TOLERANCE};
 use crate::geometry::{self, Vec2};
 
 /// Closer than this (in outline parameter) to an existing on-curve point,
@@ -319,6 +319,91 @@ pub fn add_outline_dart(
     Some(Batch::new("Add dart", commands))
 }
 
+/// The kinds of pleat the Pleat tool lays out.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PleatKind {
+    /// One fold under the next: a mountain, a valley a pleat depth on,
+    /// and where the mountain lands a depth after that.
+    #[default]
+    Knife,
+    /// Two knife pleats folded towards each other.
+    Box,
+}
+
+impl PleatKind {
+    /// The lines a pleat is made of, a pleat depth apart: each one's fold
+    /// (`None` for the placement line the fold lands on).
+    fn lines(self) -> &'static [Option<bool>] {
+        // `Some(true)` is a mountain, `Some(false)` a valley.
+        match self {
+            PleatKind::Knife => &[Some(true), Some(false), None],
+            PleatKind::Box => &[Some(true), Some(false), None, Some(false), Some(true)],
+        }
+    }
+}
+
+/// The straight line through `a` and `b`, extended both ways to where it
+/// meets `pattern`'s outline either side of their midpoint. `None` if that
+/// midpoint is outside the pattern.
+pub fn across(pattern: &Pattern, a: Vec2, b: Vec2) -> Option<[Vec2; 2]> {
+    let mid = a.lerp(b, 0.5);
+    let d = b - a;
+    let len = d.length();
+    let (min, max) = pattern.bounds()?;
+    if len < 1e-3 || !pattern.contains(mid) {
+        return None;
+    }
+    let reach = (max - min).length() * 2.0 + 1.0;
+    let dir = d * (1.0 / len);
+    let line = [mid - dir * reach, mid + dir * reach];
+    let hits = pattern.crossings(&line);
+    let before = hits.iter().rev().find(|c| c.along < reach)?;
+    let after = hits.iter().find(|c| c.along > reach)?;
+    Some([before.pos, after.pos])
+}
+
+/// The internal lines of `count` pleats of `kind`, the first fold along
+/// the line through `a` and `b` and the rest stepping `depth` mm to its
+/// right (as seen looking from `a` to `b` in the 2D window). Each line
+/// runs right across the piece; folds are `angle` degrees. Lines that
+/// would fall outside the piece are left out.
+pub fn pleat_lines(
+    pattern: &Pattern,
+    a: Vec2,
+    b: Vec2,
+    kind: PleatKind,
+    count: usize,
+    depth: f32,
+    angle: f32,
+) -> Vec<InternalLine> {
+    let d = b - a;
+    let len = d.length();
+    if len < 1e-3 || depth <= 0.0 {
+        return Vec::new();
+    }
+    // The 2D window's y points down, so (-y, x) is to the right.
+    let step = Vec2::new(-d.y, d.x) * (depth / len);
+    let per = kind.lines();
+    let mut out = Vec::new();
+    for pleat in 0..count {
+        for (k, fold) in per.iter().enumerate() {
+            let offset = step * (pleat * per.len() + k) as f32;
+            let Some(ends) = across(pattern, a + offset, b + offset) else {
+                continue;
+            };
+            let fold = fold.map(|mountain| Fold {
+                angle: if mountain { -angle.abs() } else { angle.abs() },
+                strength: Fold::DEFAULT_STRENGTH,
+            });
+            out.push(InternalLine {
+                points: ends.to_vec(),
+                fold,
+            });
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -474,6 +559,37 @@ mod tests {
         assert_eq!(k + 2, n, "the far point is point 0");
         // A V too deep for the piece doesn't fit.
         assert!(outline_dart(&p, Vec2::new(100.0, 0.0), 40.0, 150.0).is_none());
+    }
+
+    #[test]
+    fn pleats_lay_out_fold_lines_across_the_piece() {
+        let p = pattern(
+            geometry::rectangle(Vec2::ZERO, Vec2::new(300.0, 200.0))
+                .into_iter()
+                .map(OutlinePoint::corner)
+                .collect(),
+        );
+        // Drawn upwards, so "right" is +x.
+        let (a, b) = (Vec2::new(50.0, 150.0), Vec2::new(50.0, 50.0));
+        let knife = pleat_lines(&p, a, b, PleatKind::Knife, 2, 20.0, 170.0);
+        assert_eq!(knife.len(), 6);
+        let xs: Vec<f32> = knife.iter().map(|l| l.points[0].x).collect();
+        for (x, want) in xs.iter().zip([50.0, 70.0, 90.0, 110.0, 130.0, 150.0]) {
+            assert!((x - want).abs() < 1e-3, "{xs:?}");
+        }
+        // Each runs right across, top edge to bottom edge.
+        for line in &knife {
+            let ys: Vec<f32> = line.points.iter().map(|q| q.y).collect();
+            assert!(ys.contains(&0.0) && ys.contains(&200.0), "{ys:?}");
+        }
+        let angles: Vec<Option<f32>> = knife.iter().map(|l| l.fold.map(|f| f.angle)).collect();
+        assert_eq!(&angles[..3], [Some(-170.0), Some(170.0), None]);
+
+        let boxed = pleat_lines(&p, a, b, PleatKind::Box, 1, 20.0, 170.0);
+        assert_eq!(boxed.len(), 5);
+        // Lines past the edge of the piece are left out.
+        let many = pleat_lines(&p, a, b, PleatKind::Knife, 10, 20.0, 170.0);
+        assert!(many.len() < 30 && many.iter().all(|l| l.points[0].x <= 300.0));
     }
 
     #[test]

@@ -23,12 +23,12 @@ pub use command::{
     Batch, Command, DeletePattern, DeletePoint, DuplicatePattern, FlipSeamSide, InsertPoint,
     MirrorPattern, MovePattern, MovePoint, PatternFlag, PatternValue, RemoveDart,
     RemoveInternalLine, RemoveNotch, RemoveSewingLine, RemoveTack, RemoveTopstitch, RemoveTrim,
-    RenamePattern, RotatePattern, SetArrangement, SetDart, SetFabric, SetGrading, SetOutline,
-    SetParticleDistance, SetPatternFlag, SetPatternValue, SetPointKind, SetSeamEdge,
+    RenamePattern, RotatePattern, SetArrangement, SetDart, SetFabric, SetFold, SetGrading,
+    SetOutline, SetParticleDistance, SetPatternFlag, SetPatternValue, SetPointKind, SetSeamEdge,
     PARTICLE_DISTANCE_RANGE,
 };
 pub use document::{
-    Arrangement, Axis, Dart, Document, Fabric, FabricTexture, Grading, InternalLine, Notch,
+    Arrangement, Axis, Dart, Document, Fabric, FabricTexture, Fold, Grading, InternalLine, Notch,
     OutlinePoint, Pattern, PatternId, PointKind, SeamEdge, SewingLine, SewingLineId, SizeChart,
     Tack, TackId, TackPoint, TackTarget, Topstitch, Trim, TrimKind,
 };

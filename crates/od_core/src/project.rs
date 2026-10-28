@@ -1,7 +1,7 @@
 //! Project files (`.odproj`): a versioned JSON wrapper around a [`Document`].
 //!
 //! ```json
-//! { "format": "opendesign-project", "version": 11, "document": { ... } }
+//! { "format": "opendesign-project", "version": 12, "document": { ... } }
 //! ```
 //!
 //! Older versions are upgraded on load by the `migrate_*` steps below, so a
@@ -284,7 +284,7 @@ fn migrate_v10(doc: &mut serde_json::Value) {
 }
 
 /// Upgrade a version 11 document to version 12 in place: no pattern has
-/// darts inside it.
+/// darts inside it, and no internal line is a fold line.
 fn migrate_v11(doc: &mut serde_json::Value) {
     use serde_json::Value;
     let Some(patterns) = doc.get_mut("patterns").and_then(Value::as_array_mut) else {
@@ -292,6 +292,12 @@ fn migrate_v11(doc: &mut serde_json::Value) {
     };
     for pattern in patterns.iter_mut().filter_map(Value::as_object_mut) {
         pattern.insert("darts".into(), Value::Array(Vec::new()));
+        let lines = pattern
+            .get_mut("internal_lines")
+            .and_then(Value::as_array_mut);
+        for line in lines.into_iter().flatten().filter_map(Value::as_object_mut) {
+            line.insert("fold".into(), Value::Null);
+        }
     }
 }
 
@@ -435,7 +441,7 @@ mod tests {
             Err(ProjectError::NotAProject)
         ));
         assert!(matches!(
-            from_json(&good.replace("\"version\": 11", "\"version\": 99")),
+            from_json(&good.replace("\"version\": 12", "\"version\": 99")),
             Err(ProjectError::UnsupportedVersion(99))
         ));
         let dup = good.replace("\"id\": 2", "\"id\": 1");
@@ -458,7 +464,7 @@ mod tests {
         doc.patterns[0].seam_allowance = 7.5;
 
         let text = to_json(&doc);
-        assert!(text.contains("\"version\": 11"));
+        assert!(text.contains("\"version\": 12"));
         assert!(text.contains("\"kind\": \"curve\""));
         assert_eq!(from_json(&text).unwrap(), doc);
     }
@@ -507,7 +513,7 @@ mod tests {
 
         // Saving writes the current version, which loads back the same.
         let resaved = to_json(&doc);
-        assert!(resaved.contains("\"version\": 11"));
+        assert!(resaved.contains("\"version\": 12"));
         assert_eq!(from_json(&resaved).unwrap(), doc);
     }
 
@@ -565,7 +571,7 @@ mod tests {
 
         // Saving writes the current version, which loads back the same.
         let resaved = to_json(&doc);
-        assert!(resaved.contains("\"version\": 11"));
+        assert!(resaved.contains("\"version\": 12"));
         assert_eq!(from_json(&resaved).unwrap(), doc);
     }
 
@@ -615,7 +621,7 @@ mod tests {
         assert_eq!(doc.tacks.len(), 1);
 
         let resaved = to_json(&doc);
-        assert!(resaved.contains("\"version\": 11"));
+        assert!(resaved.contains("\"version\": 12"));
         assert_eq!(from_json(&resaved).unwrap(), doc);
     }
 
@@ -678,7 +684,7 @@ mod tests {
         );
 
         let resaved = to_json(&doc);
-        assert!(resaved.contains("\"version\": 11"));
+        assert!(resaved.contains("\"version\": 12"));
         assert_eq!(from_json(&resaved).unwrap(), doc);
     }
 
@@ -719,7 +725,7 @@ mod tests {
         assert_eq!(doc.patterns[0].fabric, crate::document::Fabric::cotton());
 
         let resaved = to_json(&doc);
-        assert!(resaved.contains("\"version\": 11"));
+        assert!(resaved.contains("\"version\": 12"));
         assert_eq!(from_json(&resaved).unwrap(), doc);
     }
 
@@ -738,7 +744,7 @@ mod tests {
         assert_eq!(doc.patterns[0].trims.len(), 1);
 
         let resaved = to_json(&doc);
-        assert!(resaved.contains("\"version\": 11"));
+        assert!(resaved.contains("\"version\": 12"));
         assert_eq!(from_json(&resaved).unwrap(), doc);
     }
 
@@ -802,7 +808,7 @@ mod tests {
         assert_ne!(doc.patterns[0].graded_outline(1), doc.patterns[0].outline);
 
         let resaved = to_json(&doc);
-        assert!(resaved.contains("\"version\": 11"));
+        assert!(resaved.contains("\"version\": 12"));
         assert_eq!(from_json(&resaved).unwrap(), doc);
     }
 
