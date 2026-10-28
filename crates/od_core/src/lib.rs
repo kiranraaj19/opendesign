@@ -11,6 +11,7 @@ pub mod dxf;
 pub mod edit;
 pub mod geometry;
 pub mod history;
+pub mod piece;
 #[cfg(feature = "python-plugins")]
 pub mod plugin;
 pub mod project;
@@ -34,4 +35,5 @@ pub use document::{
 };
 pub use geometry::Vec2;
 pub use history::History;
+pub use piece::{CutPattern, MergePatterns};
 pub use seam::Side;

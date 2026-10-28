@@ -2795,6 +2795,57 @@ mod tests {
     }
 
     #[test]
+    fn cut_and_sew_then_merge_from_properties() {
+        use od_core::{AddInternalLine, AddSewingLine, SeamEdge};
+        let mut h = harness();
+        let [left, right] = two_pieces(&mut h);
+        {
+            let s = &mut h.state_mut().session;
+            s.execute(AddInternalLine::new(
+                left,
+                vec![Vec2::new(-10.0, 40.0), Vec2::new(110.0, 40.0)],
+            ));
+            s.selection.set(Some(left));
+        }
+        show_tab(&mut h, Tab::Properties);
+        click(&mut h, "Cut and sew");
+        let s = &h.state().session;
+        assert_eq!(s.doc.patterns.len(), 3);
+        assert_eq!(s.doc.sewing_lines.len(), 1);
+        assert_eq!(s.selection.len(), 2, "both halves selected");
+        assert_eq!(
+            s.history.undo_label().as_deref(),
+            Some("Cut and sew pattern")
+        );
+        press(&mut h, Modifiers::COMMAND, Key::Z);
+        assert_eq!(h.state().session.doc.patterns.len(), 2);
+
+        // Sew Left's right side to Right's left side, then merge them.
+        let edge = |pattern, start: f32, forward| SeamEdge {
+            pattern,
+            start,
+            end: start + 1.0,
+            forward,
+        };
+        {
+            let s = &mut h.state_mut().session;
+            s.execute(AddSewingLine::new(
+                vec![edge(left, 1.0, true)],
+                vec![edge(right, 3.0, false)],
+            ));
+            s.selected_seam = s.doc.sewing_lines.last().map(|l| l.id);
+            s.selection.clear();
+        }
+        h.run();
+        click(&mut h, "Merge pieces");
+        let s = &h.state().session;
+        assert_eq!(s.doc.patterns.len(), 1);
+        let merged = s.doc.pattern(left).unwrap();
+        assert!((merged.area() - 16_000.0).abs() < 1.0, "{}", merged.area());
+        assert!(s.doc.sewing_lines.is_empty());
+    }
+
+    #[test]
     fn round_corner_from_properties_is_one_undo_step() {
         let mut h = harness();
         let [left, _] = two_pieces(&mut h);

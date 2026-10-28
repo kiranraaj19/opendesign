@@ -578,6 +578,7 @@ fn lines_section(ui: &mut egui::Ui, s: &mut Session, id: PatternId) {
     ui.label("Internal lines");
     let mut remove = None;
     let mut split = None;
+    let mut cut = None;
     for (i, line) in pattern.internal_lines.iter().enumerate() {
         let length: f32 = line.points.windows(2).map(|w| w[0].distance(w[1])).sum();
         ui.horizontal_wrapped(|ui| {
@@ -600,6 +601,24 @@ fn lines_section(ui: &mut egui::Ui, s: &mut Session, id: PatternId) {
                     split = Some(outline);
                 }
             }
+            if !pattern.locked && od_core::piece::can_cut(&s.doc, id, i) {
+                if ui
+                    .button("Cut")
+                    .on_hover_text("Cut the pattern in two along this line")
+                    .clicked()
+                {
+                    cut = Some((i, false));
+                }
+                if ui
+                    .button("Cut and sew")
+                    .on_hover_text(
+                        "Cut the pattern in two along this line, and sew the halves back together",
+                    )
+                    .clicked()
+                {
+                    cut = Some((i, true));
+                }
+            }
         });
     }
     if let Some(i) = remove {
@@ -608,6 +627,17 @@ fn lines_section(ui: &mut egui::Ui, s: &mut Session, id: PatternId) {
     if let Some(outline) = split {
         s.execute(SetOutline::new(id, "Add points at intersection", outline));
         s.canvas.selected_point = None;
+    }
+    if let Some((line, sew)) = cut {
+        s.execute(od_core::CutPattern::new(id, line, sew));
+        s.canvas.selected_point = None;
+        // The new half goes straight after the one that keeps the id.
+        let other = s
+            .doc
+            .index_of(id)
+            .and_then(|i| s.doc.patterns.get(i + 1))
+            .map(|p| p.id);
+        s.selection.set_all([id].into_iter().chain(other));
     }
 }
 
@@ -727,6 +757,7 @@ fn seam_section(ui: &mut egui::Ui, s: &mut Session, id: od_core::SewingLineId) {
     };
     let (a, b) = line.side_lengths(&s.doc).unwrap_or_default();
     let flagged = s.seam_check.flags(&s.doc, line);
+    let keep = line.a.first().map(|e| e.pattern);
     let names = |side| {
         let mut names: Vec<&str> = line
             .side(side)
@@ -779,6 +810,16 @@ fn seam_section(ui: &mut egui::Ui, s: &mut Session, id: od_core::SewingLineId) {
         if ui.button("Delete seam").clicked() {
             s.execute(od_core::RemoveSewingLine::new(id));
             s.selected_seam = None;
+        }
+        if od_core::piece::can_merge(&s.doc, id)
+            && ui
+                .button("Merge pieces")
+                .on_hover_text("Join the two sewn pieces into one along this seam")
+                .clicked()
+        {
+            s.execute(od_core::MergePatterns::new(id));
+            s.selected_seam = None;
+            s.selection.set(keep);
         }
     });
 }

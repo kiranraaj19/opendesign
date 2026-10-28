@@ -670,6 +670,24 @@ impl Pattern {
         self.grain_angle = normalize_degrees(self.grain_angle + degrees);
     }
 
+    /// Move every point of the pattern and its markings with `f`. The
+    /// grainline and notches are left as they are.
+    pub fn map_points(&mut self, f: impl Fn(Vec2) -> Vec2) {
+        self.outline.iter_mut().for_each(|p| p.pos = f(p.pos));
+        for line in &mut self.internal_lines {
+            line.points.iter_mut().for_each(|p| *p = f(*p));
+        }
+        for line in &mut self.topstitches {
+            line.points.iter_mut().for_each(|p| *p = f(*p));
+        }
+        for trim in &mut self.trims {
+            trim.pos = f(trim.pos);
+        }
+        for dart in &mut self.darts {
+            dart.map(&f);
+        }
+    }
+
     /// Move everything by `delta`.
     pub fn translate(&mut self, delta: Vec2) {
         self.outline.iter_mut().for_each(|p| p.pos += delta);
