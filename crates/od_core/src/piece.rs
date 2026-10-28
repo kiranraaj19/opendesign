@@ -126,8 +126,8 @@ impl Command for CutPattern {
 
 /// Merge the two patterns a seam sews together into one, along that seam.
 /// The seam must have one edge on each side, on different patterns. The
-/// second pattern is turned (and flipped, if it would land on top of the
-/// first) so its edge lies along the first's, and joins it there.
+/// second pattern is turned (never flipped, so both keep the same fabric
+/// face up) so its edge lies along the first's, and joins it there.
 pub struct MergePatterns {
     seam: SewingLineId,
     inner: Restructure,
@@ -509,19 +509,21 @@ fn merge(doc: &mut Document, seam: SewingLineId) -> Option<State> {
         return None;
     }
 
-    // Turn B so its edge lies along A's, sewing start on sewing start; if
-    // that puts it on top of A, flip it over the edge.
-    let degrees = (da.y.atan2(da.x) - db.y.atan2(db.x)).to_degrees();
-    let shift = a_first - b_first;
-    let turn = move |q: Vec2| rotate_point(q, degrees, b_first) + shift;
-    let u = da * (1.0 / da.length());
+    // Turn B so its edge lies along A's, sewing start on sewing start. If
+    // that puts it on top of A (a twisted seam), turn it the other way
+    // round instead: B is never flipped over, so its fabric face stays up.
     let side = |q: Vec2| da.cross(q - a_first);
-    let reflect = move |q: Vec2| {
-        let r = q - a_first;
-        a_first + u * (r.dot(u) * 2.0) - r
+    let angle = |d: Vec2| d.y.atan2(d.x);
+    // The points of B's edge that land on A's sewing start and end.
+    let mut onto = [b_first, b_last];
+    let turn = |[from, to]: [Vec2; 2]| {
+        let degrees = (angle(da) - angle(to - from)).to_degrees();
+        move |q: Vec2| rotate_point(q, degrees, from) + (a_first - from)
     };
-    let flip = side(pa.center()) * side(turn(pb.center())) > 0.0;
-    let place = move |q: Vec2| if flip { reflect(turn(q)) } else { turn(q) };
+    if side(pa.center()) * side(turn(onto)(pb.center())) > 0.0 {
+        onto.reverse();
+    }
+    let place = turn(onto);
 
     let (a_start, a_end) = if ea.forward {
         (a_first, a_last)
@@ -529,7 +531,7 @@ fn merge(doc: &mut Document, seam: SewingLineId) -> Option<State> {
         (a_last, a_first)
     };
     let (sa, [i_s, i_e]) = with_corners(&pa, [a_start, a_end])?;
-    let (sb, [j_first, j_last]) = with_corners(&pb, [b_first, b_last])?;
+    let (sb, [j_first, j_last]) = with_corners(&pb, onto)?;
     let mut tb = sb.clone();
     tb.map_points(place);
     let mut index_of = [j_first, j_last];
@@ -861,7 +863,7 @@ mod tests {
     }
 
     #[test]
-    fn merging_flips_a_piece_that_would_land_on_top() {
+    fn merging_turns_a_piece_that_would_land_on_top_without_flipping_it() {
         let mut doc = Document::default();
         let left = add_rect(&mut doc, "Left", Vec2::ZERO, Vec2::new(100.0, 100.0));
         let right = add_rect(
@@ -870,8 +872,17 @@ mod tests {
             Vec2::new(300.0, 0.0),
             Vec2::new(400.0, 100.0),
         );
+        // A button near Right's top left corner, to see which way it lands.
+        doc.pattern_mut(right)
+            .unwrap()
+            .trims
+            .push(crate::document::Trim {
+                kind: crate::document::TrimKind::Button,
+                pos: Vec2::new(310.0, 10.0),
+            });
         // Left's right side sewn top-down to Right's right side top-down:
-        // laid along each other unflipped, Right would cover Left.
+        // laid along each other sewing start on start, Right would cover
+        // Left.
         let seam = sew(
             &mut doc,
             edge(left, 1.0, 2.0, true),
@@ -882,5 +893,9 @@ mod tests {
         assert!((merged.area() - 20_000.0).abs() < 1.0, "{}", merged.area());
         assert!(merged.contains(Vec2::new(150.0, 50.0)));
         assert!(geometry::is_simple(&merged.polyline(TOLERANCE)));
+        // Turned half way round, not mirrored: the button is now near the
+        // bottom right (a flip would have left it at the top).
+        let button = merged.trims[0].pos;
+        assert!(button.distance(Vec2::new(190.0, 90.0)) < 1e-3, "{button:?}");
     }
 }
