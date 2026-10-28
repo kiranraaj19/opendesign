@@ -7,10 +7,11 @@ use egui::{
 };
 use od_core::document::{normalize_degrees, rotate_point, TOLERANCE};
 use od_core::{
-    geometry, AddInternalLine, AddNotch, AddSewingLine, AddTack, AddTopstitch, AddTrim, Document,
-    InsertPoint, MovePattern, MovePoint, OutlinePoint, Pattern, PatternId, PatternValue, PointKind,
-    RemoveNotch, RemoveSewingLine, RemoveTack, RemoveTrim, RotatePattern, SeamEdge, SetPointKind,
-    SetSeamEdge, SewingLine, SewingLineId, Side, TackId, TackPoint, TackTarget, TrimKind, Vec2,
+    edit, geometry, AddDart, AddInternalLine, AddNotch, AddSewingLine, AddTack, AddTopstitch,
+    AddTrim, Dart, Document, InsertPoint, MovePattern, MovePoint, OutlinePoint, Pattern, PatternId,
+    PatternValue, PointKind, RemoveNotch, RemoveSewingLine, RemoveTack, RemoveTrim, RotatePattern,
+    SeamEdge, SetPointKind, SetSeamEdge, SewingLine, SewingLineId, Side, TackId, TackPoint,
+    TackTarget, TrimKind, Vec2,
 };
 
 use crate::app::{Session, Tool};
@@ -77,6 +78,11 @@ pub struct Canvas2D {
     /// Pan to this pattern on the next frame if it is out of view, e.g.
     /// after it was picked in the 3D view.
     pub reveal: Option<PatternId>,
+    /// How wide new darts are, in mm: across the V at the outline, or
+    /// across the middle of a diamond.
+    pub dart_width: f32,
+    /// How far an outline dart reaches into the piece, in mm.
+    pub dart_depth: f32,
 }
 
 /// What the sew tool has picked so far.
@@ -125,6 +131,12 @@ enum Drag {
         grab: Vec2,
         to: Vec2,
     },
+    /// A straight line drawn inside one pattern, for a diamond dart.
+    Line {
+        owner: PatternId,
+        start: Vec2,
+        end: Vec2,
+    },
     /// Moving one end of one edge of the selected seam along its outline.
     SeamEnd {
         end: SeamEnd,
@@ -166,6 +178,8 @@ impl Default for Canvas2D {
             hover: None,
             frame_selection: false,
             reveal: None,
+            dart_width: 30.0,
+            dart_depth: 80.0,
         }
     }
 }
@@ -535,6 +549,7 @@ pub fn ui(ui: &mut egui::Ui, s: &mut Session) {
         Tool::Sew => handle_sew(&response, rect, s),
         Tool::Trim => handle_trim(ui, &response, rect, s),
         Tool::Tack => handle_tack(ui, &response, rect, s, typing),
+        Tool::Dart => handle_dart(&response, rect, s),
     }
 
     // Background and grid.
@@ -582,6 +597,9 @@ pub fn ui(ui: &mut egui::Ui, s: &mut Session) {
             "Click inside a pattern to draw a topstitch line · Enter or double-click finishes · Esc cancels"
         }
         Tool::Notch => "Click an outline to add a notch · click a notch to remove it",
+        Tool::Dart => {
+            "Click an outline to cut a dart into it · drag inside a pattern, tip to tip, for a diamond dart · sizes in Properties"
+        }
         Tool::Trim => {
             "Click to place a button (Shift+click: snap) · click a trim to remove it"
         }
@@ -1114,6 +1132,74 @@ fn handle_notch(response: &egui::Response, rect: Rect, s: &mut Session) {
     }
 }
 
+/// The Dart tool: a click on an outline cuts a V-shaped dart into it (its
+/// legs sewn together); a drag inside a pattern, from tip to tip, adds a
+/// diamond dart there. Sizes come from the canvas's dart settings.
+fn handle_dart(response: &egui::Response, rect: Rect, s: &mut Session) {
+    let pointer = response
+        .interact_pointer_pos()
+        .map(|p| s.canvas.to_doc(rect, p));
+    let unlocked = |s: &Session, id: PatternId| !locked(&s.doc, id);
+
+    if response.clicked() {
+        let Some(p) = pointer else { return };
+        let Some(hit) = s.canvas.edge_at(&s.doc, s.selection.primary(), p) else {
+            return;
+        };
+        s.selection.set(Some(hit.id));
+        let (width, depth) = (s.canvas.dart_width, s.canvas.dart_depth);
+        let batch = s
+            .doc
+            .pattern(hit.id)
+            .filter(|_| unlocked(s, hit.id))
+            .and_then(|pattern| edit::add_outline_dart(pattern, hit.pos, width, depth));
+        if let Some(batch) = batch {
+            s.execute(batch);
+        }
+        return;
+    }
+    line_drag(response, rect, s);
+    if response.drag_stopped() {
+        if let Some(Drag::Line { owner, start, end }) = s.canvas.drag.take() {
+            let inside = s
+                .doc
+                .pattern(owner)
+                .is_some_and(|p| p.contains(start) && p.contains(end));
+            if inside && start.distance(end) >= MIN_RECT_MM {
+                let width = s.canvas.dart_width;
+                s.execute(AddDart::new(owner, Dart { start, end, width }));
+            }
+        }
+    }
+}
+
+/// Track a [`Drag::Line`] inside an unlocked pattern: started on the
+/// pattern under the press, ended wherever the (snapped) pointer is.
+fn line_drag(response: &egui::Response, rect: Rect, s: &mut Session) {
+    let pointer = response
+        .interact_pointer_pos()
+        .map(|p| s.canvas.to_doc(rect, p));
+    if response.drag_started_by(PointerButton::Primary) {
+        let origin = press_origin(response, rect, &s.canvas);
+        let owner = origin
+            .and_then(|o| s.doc.pattern_at(o))
+            .filter(|&id| !locked(&s.doc, id));
+        if let (Some(owner), Some(origin), Some(p)) = (owner, origin, pointer) {
+            s.selection.set(Some(owner));
+            s.canvas.drag = Some(Drag::Line {
+                owner,
+                start: s.canvas.snap(&s.doc, origin, None).0,
+                end: s.canvas.snap(&s.doc, p, None).0,
+            });
+        }
+    } else if response.dragged_by(PointerButton::Primary) {
+        let snapped = pointer.map(|p| s.canvas.snap(&s.doc, p, None).0);
+        if let (Some(p), Some(Drag::Line { end, .. })) = (snapped, &mut s.canvas.drag) {
+            *end = p;
+        }
+    }
+}
+
 /// Place or remove a point trim (button or snap). A click on or inside a
 /// pattern with no trim nearby adds one (a button, or Shift+click for a
 /// snap); a click near an existing trim removes it instead.
@@ -1442,6 +1528,15 @@ fn draw_pattern(
         let pts = line.points.iter().map(|p| to_screen(*p)).collect();
         painter.add(Shape::line(pts, Stroke::new(1.5, pal.pattern_stroke)));
     }
+    for dart in &pattern.darts {
+        draw_dart(
+            painter,
+            rect,
+            canvas,
+            dart,
+            Stroke::new(1.5, pal.pattern_stroke),
+        );
+    }
 
     // Topstitch lines: dashed, so they read as stitching rather than a
     // dart or placement mark.
@@ -1497,6 +1592,20 @@ fn draw_pattern(
     if selected || s.tool == Tool::EditPoints {
         draw_handles(painter, rect, s, &pattern, pal);
     }
+}
+
+/// A diamond dart: its legs, and a dashed fold line from tip to tip.
+fn draw_dart(painter: &egui::Painter, rect: Rect, canvas: &Canvas2D, dart: &Dart, stroke: Stroke) {
+    let to_screen = |p: Vec2| canvas.to_screen(rect, p);
+    for leg in dart.legs() {
+        painter.add(Shape::line(leg.map(to_screen).to_vec(), stroke));
+    }
+    painter.extend(Shape::dashed_line(
+        &[to_screen(dart.start), to_screen(dart.end)],
+        Stroke::new(1.0, stroke.color),
+        4.0,
+        3.0,
+    ));
 }
 
 /// Seams and tacks. Each seam has its own colour (the warning colour when
@@ -1821,6 +1930,21 @@ fn draw_overlays(painter: &egui::Painter, rect: Rect, s: &Session, pal: &theme::
             FontId::monospace(12.0),
             pal.preview,
         );
+    }
+
+    if let Some(Drag::Line { start, end, .. }) = &canvas.drag {
+        let stroke = Stroke::new(1.5, pal.preview);
+        if s.tool == Tool::Dart {
+            let dart = Dart {
+                start: *start,
+                end: *end,
+                width: canvas.dart_width,
+            };
+            draw_dart(painter, rect, canvas, &dart, stroke);
+        } else {
+            painter.line_segment([to_screen(*start), to_screen(*end)], stroke);
+        }
+        readout(*start, *end);
     }
 
     if let Some(Drag::Point { to, .. }) = &canvas.drag {

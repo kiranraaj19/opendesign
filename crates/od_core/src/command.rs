@@ -2,9 +2,9 @@
 //! apply itself and how to reverse that change.
 
 use crate::document::{
-    normalize_degrees, rotate_point, Arrangement, Axis, Document, Fabric, Grading, InternalLine,
-    Notch, OutlinePoint, Pattern, PatternId, PointKind, SeamEdge, SewingLine, SewingLineId, Tack,
-    TackId, TackPoint, TackTarget, Topstitch, Trim, TrimKind, TOLERANCE,
+    normalize_degrees, rotate_point, Arrangement, Axis, Dart, Document, Fabric, Grading,
+    InternalLine, Notch, OutlinePoint, Pattern, PatternId, PointKind, SeamEdge, SewingLine,
+    SewingLineId, Tack, TackId, TackPoint, TackTarget, Topstitch, Trim, TrimKind, TOLERANCE,
 };
 use crate::geometry::{self, Vec2};
 use crate::seam::{self, Side};
@@ -871,6 +871,104 @@ impl Command for RemoveInternalLine {
             p.internal_lines
                 .insert(self.index.min(p.internal_lines.len()), line);
         }
+    }
+}
+
+pub struct AddDart {
+    id: PatternId,
+    dart: Dart,
+}
+
+impl AddDart {
+    pub fn new(id: PatternId, dart: Dart) -> Self {
+        Self { id, dart }
+    }
+}
+
+impl Command for AddDart {
+    fn label(&self) -> String {
+        "Add dart".into()
+    }
+
+    fn apply(&mut self, doc: &mut Document) {
+        if let Some(p) = doc.pattern_mut(self.id) {
+            p.darts.push(self.dart);
+        }
+    }
+
+    fn undo(&mut self, doc: &mut Document) {
+        if let Some(p) = doc.pattern_mut(self.id) {
+            p.darts.pop();
+        }
+    }
+}
+
+pub struct RemoveDart {
+    id: PatternId,
+    index: usize,
+    removed: Option<Dart>,
+}
+
+impl RemoveDart {
+    pub fn new(id: PatternId, index: usize) -> Self {
+        Self {
+            id,
+            index,
+            removed: None,
+        }
+    }
+}
+
+impl Command for RemoveDart {
+    fn label(&self) -> String {
+        "Remove dart".into()
+    }
+
+    fn apply(&mut self, doc: &mut Document) {
+        if let Some(p) = doc.pattern_mut(self.id) {
+            if self.index < p.darts.len() {
+                self.removed = Some(p.darts.remove(self.index));
+            }
+        }
+    }
+
+    fn undo(&mut self, doc: &mut Document) {
+        if let (Some(p), Some(dart)) = (doc.pattern_mut(self.id), self.removed.take()) {
+            p.darts.insert(self.index.min(p.darts.len()), dart);
+        }
+    }
+}
+
+/// Change a dart inside a piece, e.g. its width.
+pub struct SetDart {
+    id: PatternId,
+    index: usize,
+    /// Swapped with the dart on apply and undo, so both are exact.
+    dart: Dart,
+}
+
+impl SetDart {
+    pub fn new(id: PatternId, index: usize, dart: Dart) -> Self {
+        Self { id, index, dart }
+    }
+}
+
+impl Command for SetDart {
+    fn label(&self) -> String {
+        "Edit dart".into()
+    }
+
+    fn apply(&mut self, doc: &mut Document) {
+        if let Some(dart) = doc
+            .pattern_mut(self.id)
+            .and_then(|p| p.darts.get_mut(self.index))
+        {
+            std::mem::swap(dart, &mut self.dart);
+        }
+    }
+
+    fn undo(&mut self, doc: &mut Document) {
+        self.apply(doc);
     }
 }
 

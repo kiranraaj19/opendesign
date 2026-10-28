@@ -4,12 +4,12 @@
 use od_core::document::TOLERANCE;
 use od_core::{
     document_bom, edit, total_area_m2, Axis, Fabric, Grading, Pattern, PatternId, PatternValue,
-    PointKind, RemoveInternalLine, RenamePattern, SetFabric, SetGrading, SetOutline,
+    PointKind, RemoveDart, RemoveInternalLine, RenamePattern, SetFabric, SetGrading, SetOutline,
     SetParticleDistance, SetPatternValue, PARTICLE_DISTANCE_RANGE,
 };
 use od_sim::cloth::DEFAULT_PARTICLE_DISTANCE;
 
-use crate::app::Session;
+use crate::app::{Session, Tool};
 
 /// Edits in progress, so typing or dragging a value makes one undo step
 /// when it is let go rather than one per keystroke or pixel.
@@ -55,6 +55,7 @@ pub fn ui(ui: &mut egui::Ui, s: &mut Session) {
     size_section(ui, s);
     ui.add_space(8.0);
     bom_section(ui, s);
+    tool_section(ui, s);
 
     if let Some(id) = s.selected_tack.filter(|&id| s.doc.tack(id).is_some()) {
         ui.add_space(8.0);
@@ -152,8 +153,62 @@ pub fn ui(ui: &mut egui::Ui, s: &mut Session) {
         point_section(ui, s, pattern.clone());
     }
     lines_section(ui, s, id);
+    darts_section(ui, s, id);
 
     selection_actions(ui, s, "Delete pattern");
+}
+
+/// Settings for the tool in use, for tools that have any.
+fn tool_section(ui: &mut egui::Ui, s: &mut Session) {
+    if s.tool != Tool::Dart {
+        return;
+    }
+    ui.add_space(8.0);
+    ui.heading("Dart tool");
+    fn size(value: &mut f32) -> egui::DragValue<'_> {
+        egui::DragValue::new(value)
+            .range(1.0..=1000.0)
+            .suffix(" mm")
+            .speed(0.5)
+            .max_decimals(1)
+    }
+    egui::Grid::new("dart_tool").num_columns(2).show(ui, |ui| {
+        ui.label("Width");
+        ui.add(size(&mut s.canvas.dart_width));
+        ui.end_row();
+        ui.label("Depth (outline darts)");
+        ui.add(size(&mut s.canvas.dart_depth));
+        ui.end_row();
+    });
+}
+
+/// The diamond darts inside the pattern.
+fn darts_section(ui: &mut egui::Ui, s: &mut Session, id: PatternId) {
+    let Some(pattern) = s.doc.pattern(id) else {
+        return;
+    };
+    if pattern.darts.is_empty() {
+        return;
+    }
+    ui.add_space(8.0);
+    ui.label("Darts");
+    let mut remove = None;
+    for (i, dart) in pattern.darts.iter().enumerate() {
+        ui.horizontal(|ui| {
+            ui.label(format!(
+                "Dart {}: {:.0} mm long, {:.0} mm wide",
+                i + 1,
+                dart.start.distance(dart.end),
+                dart.width
+            ));
+            if ui.button(format!("Remove dart {}", i + 1)).clicked() {
+                remove = Some(i);
+            }
+        });
+    }
+    if let Some(i) = remove {
+        s.execute(RemoveDart::new(id, i));
+    }
 }
 
 /// Several patterns selected: their names, and what can be done to all of

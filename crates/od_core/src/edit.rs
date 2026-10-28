@@ -230,6 +230,95 @@ pub fn with_edge_length(pattern: &Pattern, index: usize, length: f32) -> Option<
     Some(out)
 }
 
+/// `pattern`'s outline with a dart cut into it at the outline point
+/// nearest `at`: a V `width` mm across at the edge and `depth` mm deep,
+/// pointing into the piece. Returns the outline and the index of the V's
+/// first point; the apex follows it and the far point after that (which
+/// may wrap to index 0). `None` if the V doesn't fit inside the piece.
+pub fn outline_dart(
+    pattern: &Pattern,
+    at: Vec2,
+    width: f32,
+    depth: f32,
+) -> Option<(Vec<OutlinePoint>, usize)> {
+    let poly = pattern.polyline(TOLERANCE);
+    let total = geometry::perimeter(&poly);
+    if width <= 0.0 || depth <= 0.0 || width >= total * 0.5 {
+        return None;
+    }
+    let (along, centre) = geometry::distance_along(&poly, at)?;
+    let half = width * 0.5;
+    let (p0, _) = geometry::point_at_distance(&poly, (along - half).rem_euclid(total))?;
+    let (p2, _) = geometry::point_at_distance(&poly, (along + half).rem_euclid(total))?;
+    let chord = p2 - p0;
+    let len = chord.length();
+    if len < 1e-3 {
+        return None;
+    }
+    let normal = Vec2::new(-chord.y, chord.x) * (1.0 / len);
+    let inward = if pattern.contains(centre + normal) {
+        normal
+    } else {
+        normal * -1.0
+    };
+    let apex = centre + inward * depth;
+    if !pattern.contains(apex) {
+        return None;
+    }
+
+    let mut work = pattern.clone();
+    let (outline, _) = split_outline(&work.outline, work.nearest_param(p0).0)?;
+    work.outline = outline;
+    let (outline, i2) = split_outline(&work.outline, work.nearest_param(p2).0)?;
+    let i0 = outline.iter().position(|q| q.pos.distance(p0) < 1e-2)?;
+    if i0 == i2 {
+        return None;
+    }
+    let apex = OutlinePoint::corner(apex);
+    let (out, first) = if i0 < i2 {
+        let mut out = outline[..=i0].to_vec();
+        out.push(apex);
+        out.extend_from_slice(&outline[i2..]);
+        (out, i0)
+    } else {
+        // The V spans the outline's first point: start the outline at the
+        // V's far point instead.
+        let mut out = outline[i2..=i0].to_vec();
+        out.push(apex);
+        (out, i0 - i2)
+    };
+    (out.len() >= 4).then_some((out, first))
+}
+
+/// The commands that add an outline dart (see [`outline_dart`]) to
+/// `pattern`: the new outline, and a seam sewing each leg from the edge
+/// to the apex.
+pub fn add_outline_dart(
+    pattern: &Pattern,
+    at: Vec2,
+    width: f32,
+    depth: f32,
+) -> Option<crate::command::Batch> {
+    use crate::command::{AddSewingLine, Batch, Command, SetOutline};
+    use crate::document::SeamEdge;
+    let (outline, k) = outline_dart(pattern, at, width, depth)?;
+    let k = k as f32;
+    let leg = |start: f32, forward: bool| SeamEdge {
+        pattern: pattern.id,
+        start,
+        end: start + 1.0,
+        forward,
+    };
+    let commands: Vec<Box<dyn Command>> = vec![
+        Box::new(SetOutline::new(pattern.id, "Add dart", outline)),
+        Box::new(AddSewingLine::new(
+            vec![leg(k, true)],
+            vec![leg(k + 1.0, false)],
+        )),
+    ];
+    Some(Batch::new("Add dart", commands))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -339,6 +428,52 @@ mod tests {
         // Through existing corners there is nothing to add.
         let diagonal = [Vec2::new(-10.0, -5.0), Vec2::new(110.0, 55.0)];
         assert_eq!(points_at_crossings(&p, &diagonal), None);
+    }
+
+    #[test]
+    fn outline_dart_cuts_a_v_with_its_legs_sewn_together() {
+        use crate::command::Command;
+        use crate::document::Document;
+        let mut doc = Document::default();
+        let mut p = pattern(
+            geometry::rectangle(Vec2::ZERO, Vec2::new(200.0, 100.0))
+                .into_iter()
+                .map(OutlinePoint::corner)
+                .collect(),
+        );
+        p.id = doc.allocate_id();
+        let id = p.id;
+        doc.patterns.push(p.clone());
+        let mut add = add_outline_dart(&p, Vec2::new(100.0, -1.0), 40.0, 60.0).unwrap();
+        add.apply(&mut doc);
+        let after = doc.pattern(id).unwrap();
+        let pos: Vec<Vec2> = after.positions().collect();
+        assert_eq!(
+            &pos[..4],
+            [
+                Vec2::ZERO,
+                Vec2::new(80.0, 0.0),
+                Vec2::new(100.0, 60.0),
+                Vec2::new(120.0, 0.0)
+            ]
+        );
+        let seam = &doc.sewing_lines[0];
+        // Both legs sewn from the edge to the apex.
+        assert_eq!(after.edge_points(&seam.a[0])[0], Vec2::new(80.0, 0.0));
+        assert_eq!(after.edge_points(&seam.b[0])[0], Vec2::new(120.0, 0.0));
+        assert_eq!(seam.length_mismatch(&doc), Some(0.0));
+        add.undo(&mut doc);
+        assert_eq!(doc.pattern(id).unwrap(), &p);
+        assert!(doc.sewing_lines.is_empty());
+
+        // A dart across the outline's first point starts the outline anew.
+        let (out, k) = outline_dart(&p, Vec2::new(0.0, 10.0), 40.0, 30.0).unwrap();
+        let wrapped = pattern(out);
+        let n = wrapped.outline.len();
+        assert!(wrapped.contains(Vec2::new(150.0, 50.0)));
+        assert_eq!(k + 2, n, "the far point is point 0");
+        // A V too deep for the piece doesn't fit.
+        assert!(outline_dart(&p, Vec2::new(100.0, 0.0), 40.0, 150.0).is_none());
     }
 
     #[test]

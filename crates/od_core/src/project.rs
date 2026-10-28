@@ -38,7 +38,7 @@ pub const FORMAT: &str = "opendesign-project";
 ///   tack can hold a point on the avatar's surface (a triangle and
 ///   barycentric weights) that follows the body when it is resized.
 /// - 11: patterns can be hidden or locked, and keep a 3D arrangement.
-pub const VERSION: u32 = 11;
+pub const VERSION: u32 = 12;
 
 #[derive(Debug)]
 pub enum ProjectError {
@@ -283,6 +283,18 @@ fn migrate_v10(doc: &mut serde_json::Value) {
     }
 }
 
+/// Upgrade a version 11 document to version 12 in place: no pattern has
+/// darts inside it.
+fn migrate_v11(doc: &mut serde_json::Value) {
+    use serde_json::Value;
+    let Some(patterns) = doc.get_mut("patterns").and_then(Value::as_array_mut) else {
+        return; // leave it for deserialisation to report
+    };
+    for pattern in patterns.iter_mut().filter_map(Value::as_object_mut) {
+        pattern.insert("darts".into(), Value::Array(Vec::new()));
+    }
+}
+
 pub fn to_json(doc: &Document) -> String {
     let file = FileOut {
         format: FORMAT,
@@ -342,6 +354,9 @@ pub fn from_json(text: &str) -> Result<Document, ProjectError> {
     }
     if header.version < 11 {
         migrate_v10(&mut body);
+    }
+    if header.version < 12 {
+        migrate_v11(&mut body);
     }
     let mut doc: Document = serde_json::from_value(body).map_err(ProjectError::Malformed)?;
     doc.validate()?;
@@ -921,6 +936,27 @@ mod tests {
             .patterns
             .iter()
             .all(|p| !p.hidden && !p.locked && p.arrangement.is_none()));
+
+        // The current version keeps them.
+        assert_eq!(from_json(&to_json(&doc)).unwrap(), doc);
+    }
+
+    #[test]
+    fn version_11_files_load_with_no_darts() {
+        use crate::document::Dart;
+        let mut doc = sample();
+        doc.patterns[0].darts.push(Dart {
+            start: Vec2::new(10.0, 10.0),
+            end: Vec2::new(10.0, 60.0),
+            width: 20.0,
+        });
+        let mut file: serde_json::Value = serde_json::from_str(&to_json(&doc)).unwrap();
+        file["version"] = 11.into();
+        for pattern in file["document"]["patterns"].as_array_mut().unwrap() {
+            pattern.as_object_mut().unwrap().remove("darts");
+        }
+        let loaded = from_json(&file.to_string()).unwrap();
+        assert!(loaded.patterns.iter().all(|p| p.darts.is_empty()));
 
         // The current version keeps them.
         assert_eq!(from_json(&to_json(&doc)).unwrap(), doc);

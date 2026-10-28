@@ -56,11 +56,12 @@ pub enum Tool {
     Topstitch,
     Trim,
     Tack,
+    Dart,
 }
 
 impl Tool {
     /// Toolbar order, with button label, shortcut key and tooltip.
-    const BUTTONS: [(Tool, &'static str, Key, &'static str); 10] = [
+    const BUTTONS: [(Tool, &'static str, Key, &'static str); 11] = [
         (
             Tool::Select,
             "Select",
@@ -121,6 +122,12 @@ impl Tool {
             Key::K,
             "Hold a point on a pattern to another pattern, or to the avatar in the 3D view (K)",
         ),
+        (
+            Tool::Dart,
+            "Dart",
+            Key::D,
+            "Click an outline to cut a dart into it; drag inside a pattern for a diamond dart (D)",
+        ),
     ];
 
     pub fn name(self) -> &'static str {
@@ -135,6 +142,7 @@ impl Tool {
             Tool::Topstitch => "Topstitch",
             Tool::Trim => "Trim",
             Tool::Tack => "Tack",
+            Tool::Dart => "Dart",
         }
     }
 }
@@ -2707,6 +2715,43 @@ mod tests {
         let target = s.viewport.camera.target;
         let middle = piece.mesh.bounds().unwrap().center();
         assert!(target.distance(middle) < 0.01, "{target} vs {middle}");
+    }
+
+    #[test]
+    fn dart_tool_cuts_outline_darts_and_draws_diamond_darts() {
+        let mut h = harness();
+        let [left, right] = two_pieces(&mut h);
+        press(&mut h, Modifiers::NONE, Key::D);
+        assert_eq!(h.state().session.tool, Tool::Dart);
+        h.state_mut().session.canvas.dart_depth = 40.0;
+        // A click on Left's top edge: a V with its legs sewn.
+        let at = screen(&h, 50.0, 0.0);
+        click_at(&mut h, at, Modifiers::NONE);
+        let s = &h.state().session;
+        let p = s.doc.pattern(left).unwrap();
+        assert_eq!(p.outline.len(), 7);
+        assert!(p
+            .positions()
+            .any(|q| q.distance(Vec2::new(50.0, 40.0)) < 1e-3));
+        assert_eq!(s.doc.sewing_lines.len(), 1);
+        assert_eq!(s.history.undo_label().as_deref(), Some("Add dart"));
+
+        // A drag inside Right: a diamond dart, tip to tip.
+        h.state_mut().session.canvas.snap.grid = false;
+        drag_mm(&mut h, (200.0, 10.0), (200.0, 70.0));
+        let p = h.state().session.doc.pattern(right).unwrap();
+        assert_eq!(p.darts.len(), 1);
+        let (start, end) = (p.darts[0].start, p.darts[0].end);
+        assert!(start.distance(Vec2::new(200.0, 10.0)) < 1.0, "{start:?}");
+        assert!(end.distance(Vec2::new(200.0, 70.0)) < 1.0, "{end:?}");
+
+        // Each is one undo step.
+        press(&mut h, Modifiers::COMMAND, Key::Z);
+        press(&mut h, Modifiers::COMMAND, Key::Z);
+        let s = &h.state().session;
+        assert!(s.doc.pattern(right).unwrap().darts.is_empty());
+        assert_eq!(s.doc.pattern(left).unwrap().outline.len(), 4);
+        assert!(s.doc.sewing_lines.is_empty());
     }
 
     #[test]

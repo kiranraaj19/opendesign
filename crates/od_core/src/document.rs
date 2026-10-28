@@ -69,6 +69,47 @@ pub struct InternalLine {
     pub points: Vec<Vec2>,
 }
 
+/// A dart inside a piece: a diamond from `start` to `end` (its two tips),
+/// `width` mm across at the middle. When draping, its two legs (the sides
+/// either side of the line between the tips) are stitched together, so
+/// the fabric between them folds away and the piece takes on shape.
+///
+/// A dart on the outline needs no type of its own: it is a V in the
+/// outline whose legs are sewn together by an ordinary [`SewingLine`]
+/// (see [`crate::edit::outline_dart`]).
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct Dart {
+    pub start: Vec2,
+    pub end: Vec2,
+    pub width: f32,
+}
+
+impl Dart {
+    /// The diamond's two side points, left and right of `start` → `end`.
+    pub fn sides(&self) -> [Vec2; 2] {
+        let mid = self.start.lerp(self.end, 0.5);
+        let d = self.end - self.start;
+        let len = d.length();
+        if len < 1e-6 {
+            return [mid, mid];
+        }
+        let perp = Vec2::new(-d.y, d.x) * (self.width * 0.5 / len);
+        [mid + perp, mid - perp]
+    }
+
+    /// The two legs, each from `start` via one side point to `end`. They
+    /// are sewn together point for point.
+    pub fn legs(&self) -> [[Vec2; 3]; 2] {
+        let [a, b] = self.sides();
+        [[self.start, a, self.end], [self.start, b, self.end]]
+    }
+
+    fn map(&mut self, f: impl Fn(Vec2) -> Vec2) {
+        self.start = f(self.start);
+        self.end = f(self.end);
+    }
+}
+
 /// A topstitch line: visually and structurally like an [`InternalLine`]
 /// (an open polyline in the pattern's own mm coordinates), but drawn and
 /// draped as a decorative/reinforcing line of stitching — typically offset
@@ -448,6 +489,7 @@ pub struct Pattern {
     pub grain_angle: f32,
     pub notches: Vec<Notch>,
     pub internal_lines: Vec<InternalLine>,
+    pub darts: Vec<Dart>,
     /// What this piece is cut from. Defaults to [`Fabric::default`] for a
     /// new pattern.
     pub fabric: Fabric,
@@ -490,6 +532,7 @@ impl Pattern {
             grain_angle: 0.0,
             notches: Vec::new(),
             internal_lines: Vec::new(),
+            darts: Vec::new(),
             fabric: Fabric::default(),
             topstitches: Vec::new(),
             trims: Vec::new(),
@@ -559,6 +602,9 @@ impl Pattern {
         for trim in &mut self.trims {
             trim.pos = axis.reflect(trim.pos, about);
         }
+        for dart in &mut self.darts {
+            dart.map(|p| axis.reflect(p, about));
+        }
         self.grain_angle = normalize_degrees(-self.grain_angle);
     }
 
@@ -576,6 +622,9 @@ impl Pattern {
         for trim in &mut self.trims {
             trim.pos = turn(trim.pos);
         }
+        for dart in &mut self.darts {
+            dart.map(turn);
+        }
         self.grain_angle = normalize_degrees(self.grain_angle + degrees);
     }
 
@@ -590,6 +639,9 @@ impl Pattern {
         }
         for trim in &mut self.trims {
             trim.pos += delta;
+        }
+        for dart in &mut self.darts {
+            dart.map(|p| p + delta);
         }
     }
 

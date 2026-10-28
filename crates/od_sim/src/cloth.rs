@@ -140,10 +140,12 @@ pub fn particle_distance(pattern: &Pattern, config: &ClothConfig) -> f32 {
 /// Mesh `pattern` at its particle distance, or `config`'s default.
 pub fn mesh_for(pattern: &Pattern, config: &ClothConfig) -> PatternMesh {
     let flat = pattern.flatten(TOLERANCE);
+    // A dart's legs are mesh edges too, so they can be stitched together.
     let lines: Vec<Vec<Vec2>> = pattern
         .internal_lines
         .iter()
         .map(|l| l.points.clone())
+        .chain(pattern.darts.iter().flat_map(|d| d.legs().map(Vec::from)))
         .collect();
     mesher::mesh_pattern(
         &flat,
@@ -261,6 +263,29 @@ fn nearest_by_fraction(chain: &[(usize, f32)], frac: f32) -> Option<usize> {
     } else {
         ib
     })
+}
+
+/// The mesh vertices lying on the open polyline `line` (local indices),
+/// in order along it, each with its fraction of the way along.
+fn line_chain(mesh: &PatternMesh, line: &[Vec2]) -> Vec<(usize, f32)> {
+    let total: f32 = line.windows(2).map(|w| w[0].distance(w[1])).sum();
+    if total <= 0.0 {
+        return Vec::new();
+    }
+    let mut chain: Vec<(usize, f32)> = Vec::new();
+    for (i, v) in mesh.vertices.iter().enumerate() {
+        let mut walked = 0.0;
+        for w in line.windows(2) {
+            let (q, t) = geometry::closest_on_segment(w[0], w[1], v.pos);
+            if q.distance(v.pos) < 1e-2 {
+                chain.push((i, (walked + t * w[0].distance(w[1])) / total));
+                break;
+            }
+            walked += w[0].distance(w[1]);
+        }
+    }
+    chain.sort_by(|a, b| a.1.total_cmp(&b.1));
+    chain
 }
 
 /// An open polyline with extra points so no segment is longer than `spacing`.
@@ -443,6 +468,25 @@ pub fn build(
             }
         }
     }
+    for id in &order {
+        let layout = &layouts[id];
+        for dart in &layout.pattern.darts {
+            let [left, right] = dart.legs().map(|leg| {
+                line_chain(&layout.mesh, &leg)
+                    .into_iter()
+                    .map(|(v, f)| (layout.offset + v, f))
+                    .collect::<Vec<_>>()
+            });
+            for (from, to) in [(&left, &right), (&right, &left)] {
+                for &(i, f) in from {
+                    if let Some(j) = nearest_by_fraction(to, f) {
+                        stitch_pairs.insert((i.min(j), i.max(j)));
+                    }
+                }
+            }
+        }
+    }
+    // A dart's tips are on both legs: stitching one to itself is no stitch.
     stitch_pairs.retain(|&(a, b)| a != b);
     let stitches = stitch_pairs
         .into_iter()
@@ -542,6 +586,58 @@ mod tests {
         // other two corners.
         assert_eq!(scene.bending.len(), 1);
         assert!(scene.stitches.is_empty());
+    }
+
+    #[test]
+    fn a_dart_stitches_its_legs_together_and_closes_when_simulated() {
+        use od_core::document::Dart;
+        let mut doc = Document::new("test");
+        let mut panel = rectangle(1, "panel", 300.0, 300.0);
+        let dart = Dart {
+            start: Vec2::new(150.0, 40.0),
+            end: Vec2::new(150.0, 260.0),
+            width: 60.0,
+        };
+        panel.darts.push(dart);
+        doc.patterns.push(panel);
+        let placements = placements_for(&doc);
+        let scene = build(&doc, &placements, None, &ClothConfig::default());
+        let mesh = &scene.pattern_meshes[0].1;
+        let flat = |i: usize| mesh.vertices[i].pos;
+        let on = |p: Vec2, leg: &[Vec2; 3]| {
+            leg.windows(2)
+                .any(|w| geometry::closest_on_segment(w[0], w[1], p).0.distance(p) < 1e-2)
+        };
+        let [left, right] = dart.legs();
+        // Every stitch joins a point on one leg to a point at the same
+        // height on the other.
+        assert!(scene.stitches.len() >= 6, "{}", scene.stitches.len());
+        for s in &scene.stitches {
+            let (a, b) = (flat(s.a), flat(s.b));
+            assert!(on(a, &left) && on(b, &right) || on(a, &right) && on(b, &left));
+            assert!((a.y - b.y).abs() < 15.0, "{a:?} {b:?}");
+        }
+
+        let mut world = World::new(scene.particles.clone());
+        world.distance_constraints = scene.structural.clone();
+        world.distance_constraints.extend(scene.stitches.clone());
+        let widest = |world: &World| {
+            scene
+                .stitches
+                .iter()
+                .map(|s| {
+                    world.particles[s.a]
+                        .position
+                        .distance(world.particles[s.b].position)
+                })
+                .fold(0.0, f32::max)
+        };
+        let start = widest(&world);
+        for _ in 0..120 {
+            world.step(1.0 / 60.0, 8, &[]);
+        }
+        let end = widest(&world);
+        assert!(end < start * 0.3, "{start} -> {end}");
     }
 
     #[test]
