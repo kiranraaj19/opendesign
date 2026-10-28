@@ -192,6 +192,74 @@ impl Command for MovePattern {
     }
 }
 
+/// A pattern's on/off settings.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PatternFlag {
+    Hidden,
+    Locked,
+}
+
+impl PatternFlag {
+    pub fn get(self, p: &Pattern) -> bool {
+        match self {
+            PatternFlag::Hidden => p.hidden,
+            PatternFlag::Locked => p.locked,
+        }
+    }
+
+    fn get_mut(self, p: &mut Pattern) -> &mut bool {
+        match self {
+            PatternFlag::Hidden => &mut p.hidden,
+            PatternFlag::Locked => &mut p.locked,
+        }
+    }
+}
+
+/// Hide or show, lock or unlock a pattern.
+pub struct SetPatternFlag {
+    id: PatternId,
+    flag: PatternFlag,
+    value: bool,
+    before: Option<bool>,
+}
+
+impl SetPatternFlag {
+    pub fn new(id: PatternId, flag: PatternFlag, value: bool) -> Self {
+        Self {
+            id,
+            flag,
+            value,
+            before: None,
+        }
+    }
+}
+
+impl Command for SetPatternFlag {
+    fn label(&self) -> String {
+        match (self.flag, self.value) {
+            (PatternFlag::Hidden, true) => "Hide pattern",
+            (PatternFlag::Hidden, false) => "Show pattern",
+            (PatternFlag::Locked, true) => "Lock pattern",
+            (PatternFlag::Locked, false) => "Unlock pattern",
+        }
+        .into()
+    }
+
+    fn apply(&mut self, doc: &mut Document) {
+        if let Some(p) = doc.pattern_mut(self.id) {
+            let flag = self.flag.get_mut(p);
+            self.before = Some(*flag);
+            *flag = self.value;
+        }
+    }
+
+    fn undo(&mut self, doc: &mut Document) {
+        if let (Some(p), Some(before)) = (doc.pattern_mut(self.id), self.before) {
+            *self.flag.get_mut(p) = before;
+        }
+    }
+}
+
 pub struct RenamePattern {
     id: PatternId,
     name: String,
@@ -1281,6 +1349,16 @@ mod tests {
         assert_eq!(doc.pattern(id).unwrap().outline[0].pos, Vec2::new(5.0, 0.0));
         batch.undo(&mut doc);
         assert_eq!(doc.patterns, before);
+    }
+
+    #[test]
+    fn hiding_and_locking_round_trip() {
+        round_trip(SetPatternFlag::new(ID, PatternFlag::Hidden, true), |d| {
+            assert!(pat(d).hidden && !pat(d).locked);
+        });
+        round_trip(SetPatternFlag::new(ID, PatternFlag::Locked, true), |d| {
+            assert!(pat(d).locked);
+        });
     }
 
     #[test]

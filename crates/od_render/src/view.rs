@@ -7,7 +7,7 @@ use glam::{Vec2, Vec3};
 use crate::camera::OrbitCamera;
 use crate::material::Material;
 use crate::mesh::{Aabb, Mesh};
-use crate::pattern::{pattern_mesh, RingLayout};
+use crate::pattern::{pattern_mesh, Placement, RingLayout};
 use crate::pick::{closest_hit, Ray};
 use crate::scene::{blob_shadow, floor_grid, AvatarDraw, Color, Frame, Globals, GridColors};
 
@@ -39,17 +39,22 @@ pub fn place_patterns<K>(
     let count = patterns.len();
     patterns
         .enumerate()
-        .filter_map(|(i, (key, outline))| {
-            let placement = ring.placement(i, count);
-            let mesh = pattern_mesh(&outline, &placement)?;
-            Some(PlacedPattern {
-                key,
-                mesh,
-                outline: placement.place(&outline),
-                normal: placement.normal(),
-            })
-        })
+        .filter_map(|(i, (key, outline))| place_pattern(key, &outline, &ring.placement(i, count)))
         .collect()
+}
+
+/// One pattern's flat outline (mm) laid out at `placement`.
+pub fn place_pattern<K>(
+    key: K,
+    outline: &[Vec2],
+    placement: &Placement,
+) -> Option<PlacedPattern<K>> {
+    Some(PlacedPattern {
+        key,
+        mesh: pattern_mesh(outline, placement)?,
+        outline: placement.place(outline),
+        normal: placement.normal(),
+    })
 }
 
 /// Everything worth framing: the avatar plus the patterns.

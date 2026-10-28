@@ -20,15 +20,15 @@ pub use clipboard::{Clip, Paste};
 pub use command::{
     AddInternalLine, AddNotch, AddPattern, AddSewingLine, AddTack, AddTopstitch, AddTrim, Batch,
     Command, DeletePattern, DeletePoint, DuplicatePattern, FlipSeamSide, InsertPoint,
-    MirrorPattern, MovePattern, MovePoint, PatternValue, RemoveInternalLine, RemoveNotch,
-    RemoveSewingLine, RemoveTack, RemoveTopstitch, RemoveTrim, RenamePattern, SetFabric,
-    SetGrading, SetParticleDistance, SetPatternValue, SetPointKind, SetSeamEdge,
-    PARTICLE_DISTANCE_RANGE,
+    MirrorPattern, MovePattern, MovePoint, PatternFlag, PatternValue, RemoveInternalLine,
+    RemoveNotch, RemoveSewingLine, RemoveTack, RemoveTopstitch, RemoveTrim, RenamePattern,
+    SetFabric, SetGrading, SetParticleDistance, SetPatternFlag, SetPatternValue, SetPointKind,
+    SetSeamEdge, PARTICLE_DISTANCE_RANGE,
 };
 pub use document::{
-    Axis, Document, Fabric, FabricTexture, Grading, InternalLine, Notch, OutlinePoint, Pattern,
-    PatternId, PointKind, SeamEdge, SewingLine, SewingLineId, SizeChart, Tack, TackId, TackPoint,
-    TackTarget, Topstitch, Trim, TrimKind,
+    Arrangement, Axis, Document, Fabric, FabricTexture, Grading, InternalLine, Notch, OutlinePoint,
+    Pattern, PatternId, PointKind, SeamEdge, SewingLine, SewingLineId, SizeChart, Tack, TackId,
+    TackPoint, TackTarget, Topstitch, Trim, TrimKind,
 };
 pub use geometry::Vec2;
 pub use history::History;

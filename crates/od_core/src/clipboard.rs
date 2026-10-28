@@ -52,7 +52,7 @@ impl Clip {
         })
     }
 
-    pub fn len(&self) -> usize {
+    fn len(&self) -> usize {
         self.patterns.len()
     }
 

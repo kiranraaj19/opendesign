@@ -458,6 +458,22 @@ pub struct Pattern {
     /// Target spacing between this piece's simulation particles, in mm.
     /// `None` uses the simulation's default; smaller is finer and slower.
     pub particle_distance: Option<f32>,
+    /// Left out of both views and the drape.
+    pub hidden: bool,
+    /// Can be selected but not moved or edited.
+    pub locked: bool,
+    /// Where the piece starts in 3D before draping. `None` places it
+    /// automatically, around the avatar.
+    pub arrangement: Option<Arrangement>,
+}
+
+/// A pattern's plane in the 3D scene, in metres: where its centre is and
+/// which ways its flat x (right) and y (up on screen) axes point.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct Arrangement {
+    pub center: [f32; 3],
+    pub right: [f32; 3],
+    pub up: [f32; 3],
 }
 
 /// Seam allowance given to new patterns, in mm.
@@ -479,6 +495,9 @@ impl Pattern {
             trims: Vec::new(),
             grading: Grading::default(),
             particle_distance: None,
+            hidden: false,
+            locked: false,
+            arrangement: None,
         }
     }
 
@@ -923,12 +942,12 @@ impl Document {
         self.patterns.iter().position(|p| p.id == id)
     }
 
-    /// Topmost pattern under `p` (later patterns draw on top).
+    /// Topmost shown pattern under `p` (later patterns draw on top).
     pub fn pattern_at(&self, p: Vec2) -> Option<PatternId> {
         self.patterns
             .iter()
             .rev()
-            .find(|pat| pat.contains(p))
+            .find(|pat| !pat.hidden && pat.contains(p))
             .map(|pat| pat.id)
     }
 }

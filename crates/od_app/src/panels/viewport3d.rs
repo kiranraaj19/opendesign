@@ -197,6 +197,30 @@ pub struct Viewport3D {
     /// Color the draped cloth by how stretched it is, instead of the
     /// theme fill.
     pub show_strain: bool,
+    /// What the view draws besides the patterns.
+    pub show: Shown,
+}
+
+/// Things the 3D view can hide, to see the garment more clearly.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Shown {
+    pub avatar: bool,
+    /// Seam and tack threads.
+    pub seams: bool,
+    /// Buttons, snaps and topstitches.
+    pub trims: bool,
+    pub pins: bool,
+}
+
+impl Default for Shown {
+    fn default() -> Self {
+        Self {
+            avatar: true,
+            seams: true,
+            trims: true,
+            pins: true,
+        }
+    }
 }
 
 impl Viewport3D {
@@ -230,6 +254,7 @@ impl Viewport3D {
             cloth_collision: true,
             pinning: false,
             show_strain: false,
+            show: Shown::default(),
         }
     }
 
@@ -362,27 +387,41 @@ fn aspect(rect: Rect) -> f32 {
 
 /// The document's patterns, laid out around the avatar.
 pub fn placed_patterns(s: &Session) -> Vec<PlacedPattern<PatternId>> {
-    let outlines = s.doc.patterns.iter().map(|p| {
-        let outline = pattern_polyline(p)
-            .into_iter()
-            .map(|v| glam::Vec2::new(v.x, v.y))
-            .collect();
-        (p.id, outline)
-    });
-    view::place_patterns(s.viewport.avatar.bounds, outlines)
+    placements(s)
+        .into_iter()
+        .filter_map(|(id, placement)| {
+            let outline: Vec<glam::Vec2> = pattern_polyline(s.doc.pattern(id)?)
+                .into_iter()
+                .map(|v| glam::Vec2::new(v.x, v.y))
+                .collect();
+            view::place_pattern(id, &outline, &placement)
+        })
+        .collect()
 }
 
-/// Where each pattern starts out on the ring, for [`od_sim::drape::Drape`]
-/// to build a cloth scene from. Mirrors [`view::place_patterns`]'s layout
-/// so draping starts from the same pose the flat preview shows.
-fn ring_placements(s: &Session) -> Vec<(PatternId, od_render::pattern::Placement)> {
+/// Where each shown pattern starts out in 3D, both in the flat preview
+/// and for [`od_sim::drape::Drape`] to build a cloth scene from: its saved
+/// arrangement, else its slot on a ring around the avatar. Hidden patterns
+/// keep their slot, so hiding one doesn't move the others.
+pub fn placements(s: &Session) -> Vec<(PatternId, Placement)> {
     let ring = RingLayout::around(s.viewport.avatar.bounds);
     let count = s.doc.patterns.len();
     s.doc
         .patterns
         .iter()
         .enumerate()
-        .map(|(i, p)| (p.id, ring.placement(i, count)))
+        .filter(|(_, p)| !p.hidden)
+        .map(|(i, p)| {
+            let placement = match p.arrangement {
+                Some(a) => Placement {
+                    center: a.center.into(),
+                    right: a.right.into(),
+                    up: a.up.into(),
+                },
+                None => ring.placement(i, count),
+            };
+            (p.id, placement)
+        })
         .collect()
 }
 
@@ -412,7 +451,7 @@ impl FlatFrame {
 
 pub fn flat_frames(s: &Session) -> HashMap<PatternId, FlatFrame> {
     let by_id: HashMap<PatternId, &Pattern> = s.doc.patterns.iter().map(|p| (p.id, p)).collect();
-    ring_placements(s)
+    placements(s)
         .into_iter()
         .filter_map(|(id, placement)| {
             let poly = pattern_polyline(by_id.get(&id)?);
@@ -564,7 +603,7 @@ fn new_drape(s: &Session) -> od_sim::drape::Drape {
     let avatar = s.viewport.avatar.mesh();
     let mut drape = od_sim::drape::Drape::new(
         &s.doc,
-        &ring_placements(s),
+        &placements(s),
         Some(avatar),
         &od_sim::cloth::ClothConfig::default(),
     );
@@ -617,7 +656,12 @@ fn step_drape(ui: &egui::Ui, s: &mut Session) {
 /// otherwise the flat ring layout.
 fn current_placed_patterns(s: &Session) -> Vec<PlacedPattern<PatternId>> {
     match &s.viewport.drape {
-        Some(drape) => drape.placed_patterns(),
+        Some(drape) => {
+            // A piece hidden while draping stays in the cloth, unseen.
+            let mut placed = drape.placed_patterns();
+            placed.retain(|p| s.doc.pattern(p.key).is_some_and(|p| !p.hidden));
+            placed
+        }
         None => placed_patterns(s),
     }
 }
@@ -877,6 +921,15 @@ fn view_buttons(ui: &mut egui::Ui, s: &mut Session) -> Option<ViewAction> {
         action = Some(ViewAction::Frame);
     }
     ui.separator();
+    ui.menu_button("Show in 3D", |ui| {
+        let show = &mut s.viewport.show;
+        ui.checkbox(&mut show.avatar, "Avatar");
+        ui.checkbox(&mut show.seams, "Seams and tacks");
+        ui.checkbox(&mut show.trims, "Trims and topstitches");
+        ui.checkbox(&mut show.pins, "Pins");
+    })
+    .response
+    .on_hover_text("Choose what the 3D view draws");
     ui.toggle_value(&mut s.viewport.show_sizing, "Avatar size")
         .on_hover_text("Height, chest, waist and hip of the avatar");
     ui.separator();
@@ -1027,7 +1080,7 @@ fn paint(ui: &mut egui::Ui, rect: Rect, s: &Session, placed: &[PlacedPattern<Pat
             camera: &v.camera,
             aspect: aspect(rect),
             encode_srgb: !targets.color.is_srgb(),
-            avatar: Some(AvatarDraw {
+            avatar: v.show.avatar.then(|| AvatarDraw {
                 key: v.avatar.generation << 1 | u64::from(dark),
                 mesh: v.avatar.mesh.clone(),
                 color: theme.avatar,
@@ -1053,7 +1106,12 @@ fn paint(ui: &mut egui::Ui, rect: Rect, s: &Session, placed: &[PlacedPattern<Pat
         ui.put(Rect::from_center_size(rect.center(), size), label);
     }
 
-    for line in overlays(s, pal) {
+    let threads = if v.show.seams {
+        overlays(s, pal)
+    } else {
+        Vec::new()
+    };
+    for line in threads {
         let pts: Vec<Pos2> = line
             .points
             .iter()
@@ -1080,19 +1138,29 @@ fn paint(ui: &mut egui::Ui, rect: Rect, s: &Session, placed: &[PlacedPattern<Pat
     }
 
     if let Some(drape) = &v.drape {
-        for pos in drape.pin_positions() {
+        let pins = if v.show.pins {
+            drape.pin_positions()
+        } else {
+            Vec::new()
+        };
+        for pos in pins {
             if let Some(screen) = v.screen_pos(rect, pos) {
                 painter.circle_filled(screen, 5.0, pal.selected);
                 painter.circle_stroke(screen, 5.0, (1.0, pal.canvas_bg));
             }
         }
-        for line in drape.topstitch_positions() {
+        let (topstitches, trims) = if v.show.trims {
+            (drape.topstitch_positions(), drape.trim_positions())
+        } else {
+            Default::default()
+        };
+        for line in topstitches {
             let pts: Vec<Pos2> = line.iter().filter_map(|&p| v.screen_pos(rect, p)).collect();
             if pts.len() >= 2 {
                 painter.add(egui::Shape::dashed_line(&pts, (1.5, pal.preview), 5.0, 3.0));
             }
         }
-        for (kind, pos) in drape.trim_positions() {
+        for (kind, pos) in trims {
             if let Some(screen) = v.screen_pos(rect, pos) {
                 match kind {
                     TrimKind::Button => {

@@ -4,8 +4,9 @@ use egui::{Key, KeyboardShortcut, Modifiers};
 use egui_dock::{DockArea, DockState, NodeIndex, Style, TabViewer};
 use od_core::{
     AddPattern, AddTack, Axis, Batch, Clip, Command, DeletePattern, DeletePoint, Document,
-    DuplicatePattern, History, MirrorPattern, OutlinePoint, Paste, PatternId, RemoveSewingLine,
-    RemoveTack, SetPointKind, SewingLine, SewingLineId, TackId, TackPoint, TackTarget, Vec2,
+    DuplicatePattern, History, MirrorPattern, OutlinePoint, Paste, PatternFlag, PatternId,
+    RemoveSewingLine, RemoveTack, SetPatternFlag, SetPointKind, SewingLine, SewingLineId, TackId,
+    TackPoint, TackTarget, Vec2,
 };
 
 use crate::files::{Discard, FileState, RECENT_KEY};
@@ -21,15 +22,17 @@ pub enum Tab {
     Viewport3D,
     Pattern2D,
     Library,
+    Objects,
     Properties,
     History,
 }
 
 impl Tab {
-    pub const ALL: [Tab; 5] = [
+    pub const ALL: [Tab; 6] = [
         Tab::Viewport3D,
         Tab::Pattern2D,
         Tab::Library,
+        Tab::Objects,
         Tab::Properties,
         Tab::History,
     ];
@@ -256,11 +259,47 @@ impl Session {
             self.execute(RemoveSewingLine::new(id));
             return;
         }
-        let ids = self.selection.ids().to_vec();
-        self.selection.clear();
+        // Locked patterns stay, and stay selected.
+        let ids = self.unlocked_selection();
+        self.selection.set_all(
+            self.selection
+                .ids()
+                .to_vec()
+                .into_iter()
+                .filter(|id| !ids.contains(id)),
+        );
         self.for_each(ids, "Delete", "patterns", |id| {
             Box::new(DeletePattern::new(id))
         });
+    }
+
+    /// The selected patterns that aren't locked: the ones edits act on.
+    pub fn unlocked_selection(&self) -> Vec<PatternId> {
+        self.selection
+            .ids()
+            .iter()
+            .copied()
+            .filter(|&id| self.doc.pattern(id).is_some_and(|p| !p.locked))
+            .collect()
+    }
+
+    /// Hide or show, lock or unlock `ids`, as one undo step. Hidden
+    /// patterns leave the selection.
+    pub fn set_flag(&mut self, ids: Vec<PatternId>, flag: PatternFlag, value: bool) {
+        let ids: Vec<_> = ids
+            .into_iter()
+            .filter(|&id| self.doc.pattern(id).is_some_and(|p| flag.get(p) != value))
+            .collect();
+        let verb = match (flag, value) {
+            (PatternFlag::Hidden, true) => "Hide",
+            (PatternFlag::Hidden, false) => "Show",
+            (PatternFlag::Locked, true) => "Lock",
+            (PatternFlag::Locked, false) => "Unlock",
+        };
+        self.for_each(ids, verb, "patterns", |id| {
+            Box::new(SetPatternFlag::new(id, flag, value))
+        });
+        self.fix_selection();
     }
 
     /// Run `command` on each of `ids` as one undo step: on its own for one
@@ -297,7 +336,7 @@ impl Session {
 
     /// Flip each selected pattern in place.
     pub fn mirror_selected(&mut self, axis: Axis) {
-        let ids = self.selection.ids().to_vec();
+        let ids = self.unlocked_selection();
         self.for_each(ids, "Flip", "patterns", |id| {
             Box::new(MirrorPattern::new(id, axis))
         });
@@ -327,9 +366,9 @@ impl Session {
 
     /// Copy the selected patterns, then delete them.
     pub fn cut_selected(&mut self) {
-        if Clip::copy(&self.doc, self.selection.ids()).is_some() {
-            self.copy_selected();
-            let ids = self.selection.ids().to_vec();
+        let ids = self.unlocked_selection();
+        if let Some(clip) = Clip::copy(&self.doc, &ids) {
+            self.clipboard = Some((clip, 0));
             self.selection.clear();
             self.for_each(ids, "Cut", "patterns", |id| {
                 Box::new(DeletePattern::new(id))
@@ -355,17 +394,27 @@ impl Session {
         self.selected_tack = None;
     }
 
-    /// Select every pattern.
+    /// Select every shown pattern.
     pub fn select_all(&mut self) {
-        self.selection
-            .set_all(self.doc.patterns.iter().map(|p| p.id));
+        let shown = self.doc.patterns.iter().filter(|p| !p.hidden);
+        self.selection.set_all(shown.map(|p| p.id));
         self.selected_seam = None;
         self.selected_tack = None;
     }
 
     /// Drop selections that undo or redo made stale.
-    fn fix_selection(&mut self) {
+    pub fn fix_selection(&mut self) {
         self.selection.retain_existing(&self.doc);
+        let hidden: Vec<_> = self
+            .selection
+            .ids()
+            .iter()
+            .copied()
+            .filter(|&id| self.doc.pattern(id).is_some_and(|p| p.hidden))
+            .collect();
+        for id in hidden {
+            self.selection.toggle(id);
+        }
         if self
             .selected_seam
             .is_some_and(|id| self.doc.sewing_line(id).is_none())
@@ -906,6 +955,7 @@ impl TabViewer for Session {
             Tab::Viewport3D => "3D Garment",
             Tab::Pattern2D => "2D Pattern",
             Tab::Library => "Library",
+            Tab::Objects => "Objects",
             Tab::Properties => "Properties",
             Tab::History => "History",
         }
@@ -917,6 +967,7 @@ impl TabViewer for Session {
             Tab::Viewport3D => panels::viewport3d::ui(ui, self),
             Tab::Pattern2D => panels::pattern2d::ui(ui, self),
             Tab::Library => panels::library::ui(ui, self),
+            Tab::Objects => panels::objects::ui(ui, self),
             Tab::Properties => panels::properties::ui(ui, self),
             Tab::History => panels::history::ui(ui, self),
         }
@@ -924,7 +975,10 @@ impl TabViewer for Session {
 
     fn scroll_bars(&self, tab: &Tab) -> [bool; 2] {
         // Canvases handle their own panning.
-        let side_panel = matches!(tab, Tab::Library | Tab::Properties | Tab::History);
+        let side_panel = matches!(
+            tab,
+            Tab::Library | Tab::Objects | Tab::Properties | Tab::History
+        );
         [false, side_panel]
     }
 }
@@ -935,7 +989,7 @@ fn default_layout() -> DockState<Tab> {
     let tree = dock.main_surface_mut();
     let [center, _] = tree.split_right(NodeIndex::root(), 0.8, vec![Tab::Properties, Tab::History]);
     // Fractions size the left/top child, which for split_left is the new node.
-    let [center, _] = tree.split_left(center, 0.2, vec![Tab::Library]);
+    let [center, _] = tree.split_left(center, 0.2, vec![Tab::Library, Tab::Objects]);
     tree.split_right(center, 0.5, vec![Tab::Pattern2D]);
     dock
 }
@@ -2355,6 +2409,14 @@ mod tests {
         assert_eq!(h.state().session.doc.tacks, [tack]);
     }
 
+    /// Bring `tab` to the front of its dock group.
+    fn show_tab(h: &mut Harness<'_, OpenDesignApp>, tab: Tab) {
+        let dock = &mut h.state_mut().dock;
+        let found = dock.find_tab(&tab).unwrap();
+        dock.set_active_tab(found).unwrap();
+        h.run();
+    }
+
     /// Two 100 × 80 mm rectangles side by side, not selected.
     fn two_pieces(h: &mut Harness<'_, OpenDesignApp>) -> [PatternId; 2] {
         let s = &mut h.state_mut().session;
@@ -2486,5 +2548,45 @@ mod tests {
         press(&mut h, Modifiers::COMMAND | Modifiers::SHIFT, Key::V);
         assert_eq!(pattern_count(&h), 6);
         assert_eq!(last_step(&h), "Paste 2 patterns mirrored");
+    }
+
+    #[test]
+    fn hidden_pieces_drop_out_and_locked_ones_stay_put() {
+        let mut h = harness();
+        let [left, right] = two_pieces(&mut h);
+        show_tab(&mut h, Tab::Objects);
+        // Hide the left piece from the Objects list.
+        h.get_all_by_label("Show").next().unwrap().click();
+        h.run();
+        assert_eq!(last_step(&h), "Hide pattern");
+        let s = &h.state().session;
+        assert!(s.doc.pattern(left).unwrap().hidden);
+        let shown: Vec<_> = crate::panels::viewport3d::placements(s)
+            .into_iter()
+            .map(|(id, _)| id)
+            .collect();
+        assert_eq!(shown, [right], "a hidden piece isn't placed in 3D");
+        // Clicking where it was picks nothing, and select all skips it.
+        let at = screen(&h, 50.0, 40.0);
+        click_at(&mut h, at, Modifiers::NONE);
+        assert_eq!(h.state().session.selection.len(), 0);
+        press(&mut h, Modifiers::COMMAND, Key::Z);
+        assert!(!h.state().session.doc.pattern(left).unwrap().hidden);
+
+        // Lock the right piece: dragging it does nothing, and Delete
+        // removes only the unlocked piece.
+        h.get_all_by_label("Lock").nth(1).unwrap().click();
+        h.run();
+        assert!(h.state().session.doc.pattern(right).unwrap().locked);
+        let (from, to) = (screen(&h, 200.0, 40.0), screen(&h, 200.0, 140.0));
+        drag(&mut h, from, to);
+        let first = h.state().session.doc.pattern(right).unwrap().outline[0].pos;
+        assert_near(first, Vec2::new(150.0, 0.0));
+        press(&mut h, Modifiers::COMMAND, Key::A);
+        press(&mut h, Modifiers::NONE, Key::Delete);
+        let s = &h.state().session;
+        assert_eq!(s.doc.patterns.len(), 1);
+        assert_eq!(s.doc.patterns[0].id, right);
+        assert_eq!(s.selection.ids(), [right]);
     }
 }

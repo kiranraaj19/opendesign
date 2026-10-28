@@ -1,7 +1,7 @@
 //! Project files (`.odproj`): a versioned JSON wrapper around a [`Document`].
 //!
 //! ```json
-//! { "format": "opendesign-project", "version": 10, "document": { ... } }
+//! { "format": "opendesign-project", "version": 11, "document": { ... } }
 //! ```
 //!
 //! Older versions are upgraded on load by the `migrate_*` steps below, so a
@@ -37,7 +37,8 @@ pub const FORMAT: &str = "opendesign-project";
 /// - 10: patterns gain an optional particle distance for simulation; a
 ///   tack can hold a point on the avatar's surface (a triangle and
 ///   barycentric weights) that follows the body when it is resized.
-pub const VERSION: u32 = 10;
+/// - 11: patterns can be hidden or locked, and keep a 3D arrangement.
+pub const VERSION: u32 = 11;
 
 #[derive(Debug)]
 pub enum ProjectError {
@@ -268,6 +269,20 @@ fn migrate_v9(doc: &mut serde_json::Value) {
     }
 }
 
+/// Upgrade a version 10 document to version 11 in place: every pattern is
+/// shown, unlocked and placed automatically.
+fn migrate_v10(doc: &mut serde_json::Value) {
+    use serde_json::Value;
+    let Some(patterns) = doc.get_mut("patterns").and_then(Value::as_array_mut) else {
+        return; // leave it for deserialisation to report
+    };
+    for pattern in patterns.iter_mut().filter_map(Value::as_object_mut) {
+        pattern.insert("hidden".into(), Value::Bool(false));
+        pattern.insert("locked".into(), Value::Bool(false));
+        pattern.insert("arrangement".into(), Value::Null);
+    }
+}
+
 pub fn to_json(doc: &Document) -> String {
     let file = FileOut {
         format: FORMAT,
@@ -324,6 +339,9 @@ pub fn from_json(text: &str) -> Result<Document, ProjectError> {
     }
     if header.version < 10 {
         migrate_v9(&mut body);
+    }
+    if header.version < 11 {
+        migrate_v10(&mut body);
     }
     let mut doc: Document = serde_json::from_value(body).map_err(ProjectError::Malformed)?;
     doc.validate()?;
@@ -402,7 +420,7 @@ mod tests {
             Err(ProjectError::NotAProject)
         ));
         assert!(matches!(
-            from_json(&good.replace("\"version\": 10", "\"version\": 99")),
+            from_json(&good.replace("\"version\": 11", "\"version\": 99")),
             Err(ProjectError::UnsupportedVersion(99))
         ));
         let dup = good.replace("\"id\": 2", "\"id\": 1");
@@ -425,7 +443,7 @@ mod tests {
         doc.patterns[0].seam_allowance = 7.5;
 
         let text = to_json(&doc);
-        assert!(text.contains("\"version\": 10"));
+        assert!(text.contains("\"version\": 11"));
         assert!(text.contains("\"kind\": \"curve\""));
         assert_eq!(from_json(&text).unwrap(), doc);
     }
@@ -474,7 +492,7 @@ mod tests {
 
         // Saving writes the current version, which loads back the same.
         let resaved = to_json(&doc);
-        assert!(resaved.contains("\"version\": 10"));
+        assert!(resaved.contains("\"version\": 11"));
         assert_eq!(from_json(&resaved).unwrap(), doc);
     }
 
@@ -532,7 +550,7 @@ mod tests {
 
         // Saving writes the current version, which loads back the same.
         let resaved = to_json(&doc);
-        assert!(resaved.contains("\"version\": 10"));
+        assert!(resaved.contains("\"version\": 11"));
         assert_eq!(from_json(&resaved).unwrap(), doc);
     }
 
@@ -582,7 +600,7 @@ mod tests {
         assert_eq!(doc.tacks.len(), 1);
 
         let resaved = to_json(&doc);
-        assert!(resaved.contains("\"version\": 10"));
+        assert!(resaved.contains("\"version\": 11"));
         assert_eq!(from_json(&resaved).unwrap(), doc);
     }
 
@@ -645,7 +663,7 @@ mod tests {
         );
 
         let resaved = to_json(&doc);
-        assert!(resaved.contains("\"version\": 10"));
+        assert!(resaved.contains("\"version\": 11"));
         assert_eq!(from_json(&resaved).unwrap(), doc);
     }
 
@@ -686,7 +704,7 @@ mod tests {
         assert_eq!(doc.patterns[0].fabric, crate::document::Fabric::cotton());
 
         let resaved = to_json(&doc);
-        assert!(resaved.contains("\"version\": 10"));
+        assert!(resaved.contains("\"version\": 11"));
         assert_eq!(from_json(&resaved).unwrap(), doc);
     }
 
@@ -705,7 +723,7 @@ mod tests {
         assert_eq!(doc.patterns[0].trims.len(), 1);
 
         let resaved = to_json(&doc);
-        assert!(resaved.contains("\"version\": 10"));
+        assert!(resaved.contains("\"version\": 11"));
         assert_eq!(from_json(&resaved).unwrap(), doc);
     }
 
@@ -769,7 +787,7 @@ mod tests {
         assert_ne!(doc.patterns[0].graded_outline(1), doc.patterns[0].outline);
 
         let resaved = to_json(&doc);
-        assert!(resaved.contains("\"version\": 10"));
+        assert!(resaved.contains("\"version\": 11"));
         assert_eq!(from_json(&resaved).unwrap(), doc);
     }
 
@@ -877,6 +895,35 @@ mod tests {
         // The current version keeps it.
         let kept = from_json(&to_json(&doc)).unwrap();
         assert_eq!(kept.patterns[0].particle_distance, Some(12.0));
+    }
+
+    #[test]
+    fn version_10_files_load_shown_unlocked_and_placed_automatically() {
+        use crate::document::Arrangement;
+        let mut doc = sample();
+        doc.patterns[0].hidden = true;
+        doc.patterns[0].locked = true;
+        doc.patterns[0].arrangement = Some(Arrangement {
+            center: [0.0, 1.2, 0.3],
+            right: [1.0, 0.0, 0.0],
+            up: [0.0, 1.0, 0.0],
+        });
+        let mut file: serde_json::Value = serde_json::from_str(&to_json(&doc)).unwrap();
+        file["version"] = 10.into();
+        for pattern in file["document"]["patterns"].as_array_mut().unwrap() {
+            let pattern = pattern.as_object_mut().unwrap();
+            for key in ["hidden", "locked", "arrangement"] {
+                pattern.remove(key);
+            }
+        }
+        let loaded = from_json(&file.to_string()).unwrap();
+        assert!(loaded
+            .patterns
+            .iter()
+            .all(|p| !p.hidden && !p.locked && p.arrangement.is_none()));
+
+        // The current version keeps them.
+        assert_eq!(from_json(&to_json(&doc)).unwrap(), doc);
     }
 
     #[test]
