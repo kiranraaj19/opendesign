@@ -102,7 +102,9 @@ pub fn ui(ui: &mut egui::Ui, s: &mut Session) {
     };
     let response = ui.horizontal(|ui| {
         ui.label("Name");
-        ui.text_edit_singleline(name)
+        // As wide as the panel, not egui's fixed default, which is wider
+        // than the panel starts out and would widen every row below it.
+        ui.add(egui::TextEdit::singleline(name).desired_width(f32::INFINITY))
     });
     let committed = response.inner.lost_focus();
     let new_name = name.trim().to_owned();
@@ -334,7 +336,7 @@ fn darts_section(ui: &mut egui::Ui, s: &mut Session, id: PatternId) {
     let mut remove = None;
     let mut set = None;
     for (i, dart) in darts.iter().enumerate() {
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             ui.label(format!("Dart {}", i + 1));
             let length = dart.start.distance(dart.end);
             for (field, current, suffix) in [

@@ -2841,6 +2841,78 @@ mod tests {
         assert!(s.doc.tacks.is_empty());
     }
 
+    /// Screenshots of the dart, pleat and linked-copy tools for a look by
+    /// eye, written to `$OD_SHOTS` (default: a temporary folder). Needs a
+    /// wgpu adapter; a software one (lavapipe) is enough.
+    #[test]
+    #[ignore = "writes screenshots; run with --ignored"]
+    fn screenshots_of_darts_pleats_and_linked_copies() {
+        let dir = std::env::var_os("OD_SHOTS")
+            .map_or_else(|| std::env::temp_dir().join("od_shots"), Into::into);
+        std::fs::create_dir_all(&dir).unwrap();
+        let shot = |h: &mut Harness<'_, OpenDesignApp>, name: &str| {
+            h.run();
+            let image = h.render().expect("a wgpu adapter to render with");
+            image.save(dir.join(name)).unwrap();
+        };
+        let mut h = Harness::builder()
+            .with_size(egui::vec2(1440.0, 880.0))
+            .wgpu()
+            .build_eframe(|cc| OpenDesignApp::new(cc));
+        // The 3D view draws with a depth buffer the test renderer's pass
+        // doesn't have; these shots are of the 2D window and Properties.
+        let dock = &mut h.state_mut().dock;
+        if let Some(found) = dock.find_tab(&Tab::Viewport3D) {
+            dock.remove_tab(found);
+        }
+        h.run();
+        let [left, right] = two_pieces(&mut h);
+        h.state_mut().session.canvas.snap.grid = false;
+        press(&mut h, Modifiers::COMMAND, Key::A);
+        press(&mut h, Modifiers::NONE, Key::F);
+        h.state_mut().session.selection.clear();
+        h.run();
+
+        // Darts: an outline dart in Right's top edge, a diamond inside it,
+        // and the diamond tool mid-drag.
+        press(&mut h, Modifiers::NONE, Key::D);
+        h.state_mut().session.canvas.dart_depth = 35.0;
+        let at = screen(&h, 200.0, 0.0);
+        click_at(&mut h, at, Modifiers::NONE);
+        drag_mm(&mut h, (175.0, 25.0), (175.0, 75.0));
+        let (from, to) = (screen(&h, 225.0, 25.0), screen(&h, 225.0, 70.0));
+        h.drag_at(from);
+        h.run();
+        h.hover_at(to);
+        shot(&mut h, "dart-tool.png");
+        h.drop_at(to);
+        h.run();
+
+        // Pleats across Left, then its Properties: the fold lines with
+        // their angle and strength, and the pleat tool's settings.
+        press(&mut h, Modifiers::NONE, Key::Q);
+        drag_mm(&mut h, (15.0, 75.0), (15.0, 5.0));
+        h.state_mut().session.selection.set(Some(left));
+        show_tab(&mut h, Tab::Properties);
+        shot(&mut h, "pleats.png");
+
+        // Right's Properties: its darts, editable.
+        h.state_mut().session.tool = Tool::Select;
+        h.state_mut().session.selection.set(Some(right));
+        shot(&mut h, "darts-properties.png");
+
+        // A linked mirrored copy of Left, selected.
+        h.state_mut().session.selection.set(Some(left));
+        h.state_mut().session.linked_copy_selected();
+        h.run();
+        press(&mut h, Modifiers::COMMAND, Key::A);
+        press(&mut h, Modifiers::NONE, Key::F);
+        let copy = h.state().session.doc.patterns.last().unwrap().id;
+        h.state_mut().session.selection.set(Some(copy));
+        shot(&mut h, "linked-copy.png");
+        eprintln!("screenshots in {}", dir.display());
+    }
+
     #[test]
     fn diamond_darts_are_resized_in_properties() {
         use od_core::{AddDart, Dart};
