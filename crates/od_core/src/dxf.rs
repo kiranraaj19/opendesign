@@ -7,9 +7,13 @@
 //! family of layers, named after the sanitised pattern name plus its id (so
 //! two pieces can never collide) — `<PIECE>` for the boundary (cutting
 //! line), `<PIECE>_SEAM` for the seam allowance, `<PIECE>_GRAIN` for the
-//! grainline, `<PIECE>_NOTCH` for notch ticks, and `<PIECE>_INTERNAL` for
-//! internal lines. Entities are classic `POLYLINE`/`VERTEX`/`SEQEND` and
-//! `LINE`, which every DXF reader back to R12 understands (newer
+//! grainline, `<PIECE>_NOTCH` for notch ticks, `<PIECE>_INTERNAL` for
+//! internal lines, `<PIECE>_FOLD` for fold lines (each labelled with a
+//! `TEXT` such as `VALLEY 170`: its kind and angle in degrees) and
+//! `<PIECE>_DART` for diamond darts (closed: tip, side, tip, side). Outline
+//! darts are part of the boundary. Entities are classic
+//! `POLYLINE`/`VERTEX`/`SEQEND`, `LINE` and `TEXT`, which every DXF reader
+//! back to R12 understands (newer
 //! `LWPOLYLINE`-only readers also accept them). Units are millimetres
 //! throughout (`$INSUNITS` 4).
 
@@ -22,6 +26,9 @@ use crate::geometry::{self, Vec2};
 
 /// Half-length of a notch tick mark, in mm, drawn across the outline.
 const NOTCH_HALF_LENGTH: f32 = 3.0;
+
+/// Height of the label on a fold line, in mm.
+const LABEL_HEIGHT: f32 = 5.0;
 
 /// The document's patterns as DXF text.
 pub fn write(doc: &Document) -> String {
@@ -108,6 +115,13 @@ fn write_polyline(out: &mut String, layer: &str, points: &[Vec2], closed: bool) 
     out.push_str("0\nSEQEND\n");
 }
 
+fn write_text(out: &mut String, layer: &str, at: Vec2, text: &str) {
+    out.push_str("0\nTEXT\n");
+    out.push_str(&format!("8\n{layer}\n"));
+    out.push_str(&format!("10\n{:.4}\n20\n{:.4}\n30\n0.0\n", at.x, at.y));
+    out.push_str(&format!("40\n{LABEL_HEIGHT:.1}\n1\n{text}\n"));
+}
+
 fn write_line(out: &mut String, layer: &str, a: Vec2, b: Vec2) {
     out.push_str("0\nLINE\n");
     out.push_str(&format!("8\n{layer}\n"));
@@ -169,11 +183,38 @@ fn write_entities(out: &mut String, doc: &Document, layers: &mut Vec<String>) {
             }
         }
 
-        if !p.internal_lines.is_empty() {
+        let (folds, plain): (Vec<_>, Vec<_>) =
+            p.internal_lines.iter().partition(|l| l.fold.is_some());
+        if !plain.is_empty() {
             let internal_layer = format!("{base}_INTERNAL");
             layers.push(internal_layer.clone());
-            for line in &p.internal_lines {
+            for line in plain {
                 write_polyline(out, &internal_layer, &line.points, false);
+            }
+        }
+        if !folds.is_empty() {
+            let fold_layer = format!("{base}_FOLD");
+            layers.push(fold_layer.clone());
+            for line in folds {
+                write_polyline(out, &fold_layer, &line.points, false);
+                if let (Some(fold), Some(&at)) = (line.fold, line.points.first()) {
+                    let kind = if fold.angle < 0.0 {
+                        "MOUNTAIN"
+                    } else {
+                        "VALLEY"
+                    };
+                    let label = format!("{kind} {:.0}", fold.angle.abs());
+                    write_text(out, &fold_layer, at, &label);
+                }
+            }
+        }
+
+        if !p.darts.is_empty() {
+            let dart_layer = format!("{base}_DART");
+            layers.push(dart_layer.clone());
+            for dart in &p.darts {
+                let [a, b] = dart.sides();
+                write_polyline(out, &dart_layer, &[dart.start, a, dart.end, b], true);
             }
         }
     }
@@ -275,6 +316,39 @@ mod tests {
         let dxf = write(&doc);
         assert!(dxf.contains("2\nFRONT_PANEL_1\n"));
         assert!(dxf.contains("2\nFRONT_PANEL_2\n"));
+    }
+
+    #[test]
+    fn fold_lines_and_darts_get_their_own_layers() {
+        use crate::document::{Dart, Fold};
+        let mut doc = sample_doc();
+        let p = &mut doc.patterns[0];
+        p.internal_lines.push(InternalLine {
+            points: vec![Vec2::new(0.0, 100.0), Vec2::new(100.0, 100.0)],
+            fold: Some(Fold::mountain()),
+        });
+        p.darts.push(Dart {
+            start: Vec2::new(50.0, 20.0),
+            end: Vec2::new(50.0, 80.0),
+            width: 10.0,
+        });
+        let dxf = write(&doc);
+        for layer in ["FRONT_PANEL_1_FOLD", "FRONT_PANEL_1_DART"] {
+            assert!(dxf.contains(&format!("2\n{layer}\n")), "{layer} missing");
+        }
+        // The plain line stays an internal line; the fold is labelled.
+        assert_eq!(
+            dxf.matches("0\nPOLYLINE\n8\nFRONT_PANEL_1_INTERNAL\n")
+                .count(),
+            1
+        );
+        assert!(dxf.contains("0\nTEXT\n8\nFRONT_PANEL_1_FOLD\n"));
+        assert!(dxf.contains("1\nMOUNTAIN 170\n"));
+        // The dart is a closed diamond: tip, side, tip, side.
+        assert!(dxf.contains("8\nFRONT_PANEL_1_DART\n66\n1\n70\n1\n"));
+        assert_eq!(dxf.matches("0\nVERTEX\n8\nFRONT_PANEL_1_DART\n").count(), 4);
+        assert!(dxf.contains("10\n45.0000\n20\n50.0000\n"));
+        assert!(dxf.contains("10\n55.0000\n20\n50.0000\n"));
     }
 
     #[test]
