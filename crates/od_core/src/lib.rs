@@ -8,6 +8,7 @@ pub mod clipboard;
 pub mod command;
 pub mod document;
 pub mod dxf;
+pub mod dxf_import;
 pub mod edit;
 pub mod geometry;
 pub mod history;

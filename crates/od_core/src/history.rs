@@ -47,6 +47,12 @@ impl History {
         self.saved_depth = Some(self.undo.len());
     }
 
+    /// Record that the document as it is now differs from any saved file,
+    /// e.g. when it was restored from an auto-saved copy.
+    pub fn mark_unsaved(&mut self) {
+        self.saved_depth = None;
+    }
+
     /// True when the document differs from the last save.
     pub fn is_dirty(&self) -> bool {
         self.saved_depth != Some(self.undo.len())

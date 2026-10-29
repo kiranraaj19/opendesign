@@ -10,6 +10,29 @@ use crate::mesh::Mesh;
 pub const EXTENSIONS: [&str; 3] = ["obj", "gltf", "glb"];
 
 pub fn load_avatar(path: &Path) -> Result<Mesh, String> {
+    load(path, "avatar").map(normalize)
+}
+
+/// Load a garment (or any other model) to show next to the avatar for
+/// reference, from OBJ or glTF. Unlike an avatar it stays where the file
+/// puts it, which for a garment exported from a CAD tool is usually on
+/// its avatar; only the unit is guessed, from its size.
+pub fn load_reference(path: &Path) -> Result<Mesh, String> {
+    let mut mesh = load(path, "garment")?;
+    let size = mesh.bounds().map_or(0.0, |b| b.size().max_element());
+    let scale = if size > 250.0 {
+        0.001 // millimetres
+    } else if size > 2.5 {
+        0.01 // centimetres
+    } else {
+        1.0
+    };
+    mesh.scale_translate(scale, Vec3::ZERO);
+    Ok(mesh)
+}
+
+/// The triangles in an OBJ or glTF file, as they are in the file.
+fn load(path: &Path, what: &str) -> Result<Mesh, String> {
     let ext = path
         .extension()
         .and_then(|e| e.to_str())
@@ -20,14 +43,14 @@ pub fn load_avatar(path: &Path) -> Result<Mesh, String> {
         "gltf" | "glb" => load_gltf(path)?,
         _ => {
             return Err(format!(
-                "Unsupported avatar file type \".{ext}\"; use OBJ or glTF."
+                "Unsupported {what} file type \".{ext}\"; use OBJ or glTF."
             ))
         }
     };
     if mesh.triangle_count() == 0 {
         return Err("The file has no triangles.".into());
     }
-    Ok(normalize(mesh))
+    Ok(mesh)
 }
 
 fn load_obj(path: &Path) -> Result<Mesh, String> {
@@ -217,6 +240,27 @@ mod tests {
         // 85 units * 2 = 170 cm.
         assert!((b.size().y - 1.7).abs() < 1e-4, "{b:?}");
         assert!(mesh.signed_volume() > 0.0);
+    }
+
+    #[test]
+    fn reference_garment_keeps_its_place_in_metres() {
+        let path = temp_dir("reference").join("shirt.obj");
+        let mut obj = String::new();
+        // Centimetres, around chest height and off to one side.
+        for [x, y, z] in TETRA {
+            obj += &format!("v {} {} {}\n", x / 10.0, y / 10.0 + 100.0, z / 10.0);
+        }
+        obj += "f 1 2 3\nf 1 4 2\nf 2 4 3\nf 3 4 1\n";
+        std::fs::write(&path, obj).unwrap();
+
+        let mesh = load_reference(&path).unwrap();
+        let b = mesh.bounds().unwrap();
+        assert!((b.size().y - 1.7).abs() < 1e-4, "cm to m: {b:?}");
+        assert!((b.min.y - 1.05).abs() < 1e-4, "not moved to the floor");
+        assert!((b.min.x - 0.1).abs() < 1e-4, "not centred");
+        assert!(load_reference(&path.with_extension("txt"))
+            .unwrap_err()
+            .contains("garment"));
     }
 
     #[test]
