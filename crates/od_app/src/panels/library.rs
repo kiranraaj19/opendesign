@@ -4,7 +4,7 @@
 //! from, and a scoped Phase 8 doesn't need one — a silhouette for each
 //! avatar body type, a flat colour swatch for each fabric.
 
-use od_core::{geometry, Fabric, OutlinePoint, PointKind, Vec2};
+use od_core::{geometry, Fabric, OutlinePoint, PointKind, SetFabric, Vec2};
 use od_render::avatar::AvatarKind;
 
 use crate::app::Session;
@@ -208,7 +208,73 @@ fn fabrics(ui: &mut egui::Ui, s: &mut Session) {
                     fabric_swatch(ui, fabric.color, &fabric.name);
                 }
             });
+            fabric_files(ui, s);
         });
+}
+
+/// Fabrics saved to or loaded from files: click one to put it on the
+/// selected patterns.
+fn fabric_files(ui: &mut egui::Ui, s: &mut Session) {
+    let mut use_fabric = None;
+    let mut forget = None;
+    for (i, (path, fabric)) in s.fabrics.fabrics.iter().enumerate() {
+        ui.horizontal(|ui| {
+            fabric_swatch(ui, fabric.color, &fabric.name);
+            let response = ui
+                .add_enabled(
+                    s.selection.primary().is_some(),
+                    egui::Button::new(&fabric.name),
+                )
+                .on_hover_text(format!("Put on the selected patterns ({})", path.display()))
+                .on_disabled_hover_text("Select a pattern to put this fabric on");
+            if response.clicked() {
+                use_fabric = Some(fabric.clone());
+            }
+            if ui
+                .small_button("Forget")
+                .on_hover_text("Take it off this list (the file stays)")
+                .clicked()
+            {
+                forget = Some(i);
+            }
+        });
+    }
+    if ui
+        .button("Load fabric file…")
+        .on_hover_text("An OpenDesign fabric (.odfab)")
+        .clicked()
+    {
+        s.fabrics.load_dialog();
+    }
+    if let Some(error) = s.fabrics.error.clone() {
+        let pal = theme::palette(ui.visuals().dark_mode);
+        ui.horizontal_wrapped(|ui| {
+            ui.label(egui::RichText::new(error).color(pal.warning));
+            if ui.small_button("OK").clicked() {
+                s.fabrics.error = None;
+            }
+        });
+    }
+    if let Some(i) = forget {
+        s.fabrics.forget(i);
+    }
+    if let Some(fabric) = use_fabric {
+        put_on_selection(s, fabric);
+    }
+}
+
+/// Give every selected pattern that can be edited `fabric`, as one undo
+/// step (a linked copy's goes to its source, which it follows).
+pub fn put_on_selection(s: &mut Session, fabric: Fabric) {
+    let mut targets: Vec<_> = s
+        .unlocked_selection()
+        .into_iter()
+        .map(|id| s.edit_target(id).0)
+        .collect();
+    targets.dedup();
+    s.for_each(targets, "Set fabric of", "patterns", |id| {
+        Box::new(SetFabric::new(id, fabric.clone()))
+    });
 }
 
 fn fabric_swatch(ui: &mut egui::Ui, color: [u8; 3], name: &str) {

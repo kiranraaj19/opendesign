@@ -214,6 +214,8 @@ pub struct Session {
     /// Set from what the views saw last frame (`hover_next`).
     pub hovered: Option<PatternId>,
     pub hover_next: Option<PatternId>,
+    /// Fabric files saved or loaded, listed in the Library.
+    pub fabrics: crate::fabric_shelf::FabricShelf,
 }
 
 /// How far each paste lands from the last, in mm on both axes.
@@ -560,6 +562,7 @@ impl OpenDesignApp {
                 preview_size: Document::default().size_chart.base,
                 hovered: None,
                 hover_next: None,
+                fabrics: crate::fabric_shelf::FabricShelf::restore(cc.storage),
             },
             files: FileState::with_recent(
                 cc.storage
@@ -1060,6 +1063,8 @@ impl eframe::App for OpenDesignApp {
         eframe::set_value(storage, LAYOUT_KEY, &self.dock);
         eframe::set_value(storage, RECENT_KEY, &self.files.recent);
         eframe::set_value(storage, LOCALE_KEY, &self.locale);
+        let fabrics = self.session.fabrics.paths();
+        eframe::set_value(storage, crate::fabric_shelf::FABRICS_KEY, &fabrics);
     }
 }
 
@@ -1125,6 +1130,9 @@ fn restore_layout(storage: Option<&dyn eframe::Storage>) -> DockState<Tab> {
 
 /// Drive the real app headlessly: clicks and keys go through egui exactly as
 /// they would from a mouse and keyboard, no window or GPU needed.
+#[cfg(test)]
+mod fabric_tests;
+
 #[cfg(test)]
 mod tests {
     use super::*;

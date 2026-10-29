@@ -1,6 +1,8 @@
 //! One module per dockable tab.
 
+pub mod colourways;
 pub mod context;
+pub mod fabric_editor;
 pub mod gizmo;
 pub mod history;
 pub mod library;

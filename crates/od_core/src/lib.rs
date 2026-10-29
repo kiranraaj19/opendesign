@@ -5,11 +5,14 @@
 
 pub mod bom;
 pub mod clipboard;
+pub mod colourway;
 pub mod command;
 pub mod document;
 pub mod dxf;
 pub mod dxf_import;
 pub mod edit;
+pub mod fabric;
+pub mod fabric_file;
 pub mod geometry;
 pub mod history;
 pub mod link;
@@ -35,6 +38,7 @@ pub use document::{
     Notch, OutlinePoint, Pattern, PatternId, PointKind, SeamEdge, SewingLine, SewingLineId,
     SizeChart, Tack, TackId, TackPoint, TackTarget, Topstitch, Trim, TrimKind,
 };
+pub use fabric::{EditFabric, FabricValue};
 pub use geometry::Vec2;
 pub use history::History;
 pub use link::{LinkedCopy, Unlink};

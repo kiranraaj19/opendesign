@@ -91,6 +91,8 @@ pub fn ui(ui: &mut egui::Ui, s: &mut Session) {
         ui.add_space(8.0);
         ui.label(format!("Document: {}", s.doc.name));
         ui.label(format!("Patterns: {}", s.doc.patterns.len()));
+        // Garment-wide, so shown with the document rather than a piece.
+        crate::panels::colourways::ui(ui, s);
         return;
     };
     let id = pattern.id;
@@ -549,10 +551,10 @@ fn value_edit(
     }
 }
 
-/// Pick a fabric for the pattern from the built-in presets. Custom fabrics
-/// aren't editable here (out of scope for this pass); the picker just
-/// shows the current one, matched by name, with "Custom" if it was loaded
-/// from a project that set something else.
+/// Pick a fabric for the pattern from the built-in presets, or edit its
+/// values (see [`crate::panels::fabric_editor`]). A preset shows as
+/// picked only while the fabric is exactly it, so picking it again after
+/// an edit goes back to the preset's values.
 fn fabric_section(ui: &mut egui::Ui, s: &mut Session, id: PatternId) {
     let Some(fabric) = s.doc.pattern(id).map(|p| p.fabric.clone()) else {
         return;
@@ -561,7 +563,7 @@ fn fabric_section(ui: &mut egui::Ui, s: &mut Session, id: PatternId) {
     ui.label("Fabric");
     ui.horizontal_wrapped(|ui| {
         for preset in Fabric::presets() {
-            let selected = preset.name == fabric.name;
+            let selected = preset == fabric;
             if ui.selectable_label(selected, &preset.name).clicked() && !selected {
                 let (target, _) = s.edit_target(id);
                 s.execute(SetFabric::new(target, preset));
@@ -573,6 +575,7 @@ fn fabric_section(ui: &mut egui::Ui, s: &mut Session, id: PatternId) {
         fabric.mass_per_area * 1000.0,
         fabric.friction
     ));
+    crate::panels::fabric_editor::ui(ui, s, id);
 }
 
 /// How finely the pattern is meshed for draping: its own particle
