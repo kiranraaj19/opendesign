@@ -10,6 +10,7 @@ pub mod document;
 pub mod dxf;
 pub mod edit;
 pub mod fabric;
+pub mod fabric_file;
 pub mod geometry;
 pub mod history;
 pub mod link;

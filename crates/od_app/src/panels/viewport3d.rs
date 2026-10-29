@@ -1506,6 +1506,7 @@ mod tests {
             preview_size: Document::default().size_chart.base,
             hovered: None,
             hover_next: None,
+            fabrics: Default::default(),
         }
     }
 

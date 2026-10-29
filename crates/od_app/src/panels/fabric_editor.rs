@@ -1,7 +1,7 @@
 //! The fabric editor in Properties: a pattern's fabric's name, colour,
 //! weave and physical values, each change one undo step.
 
-use od_core::{EditFabric, Fabric, FabricTexture, FabricValue, PatternId};
+use od_core::{EditFabric, Fabric, FabricTexture, FabricValue, PatternId, SetFabric};
 
 use crate::app::Session;
 
@@ -125,6 +125,26 @@ fn editor(ui: &mut egui::Ui, s: &mut Session, id: PatternId, fabric: &Fabric) {
     if !fabric.is_isotropic() {
         ui.weak("Stretches and bends differently along and across the grainline.");
     }
+
+    ui.horizontal_wrapped(|ui| {
+        if ui
+            .button("Save fabric file…")
+            .on_hover_text("Keep this fabric to use in other projects; it's listed in the Library")
+            .clicked()
+        {
+            s.fabrics.save_dialog(fabric);
+        }
+        if ui
+            .button("Load fabric file…")
+            .on_hover_text("Use a fabric saved earlier (.odfab) on this pattern")
+            .clicked()
+        {
+            if let Some(loaded) = s.fabrics.load_dialog() {
+                commit = None;
+                s.execute(SetFabric::new(target, loaded));
+            }
+        }
+    });
 
     if let Some((edited, what)) = commit {
         s.execute(EditFabric::new(target, edited, what));

@@ -115,6 +115,62 @@ fn the_fabric_editor_changes_one_value_per_undo_step() {
     }
     assert_eq!(fabric(&h, id), before);
 }
+#[test]
+fn a_saved_fabric_is_listed_in_the_library_and_can_be_used() {
+    let mut h = harness();
+    let id = one_piece(&mut h);
+    let dir = std::env::temp_dir().join(format!("od_app_{}_fabric_files", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let wool = Fabric {
+        name: "Boiled wool".into(),
+        ..FabricValue::BendWarp.set(&Fabric::denim(), 90.0)
+    };
+    let path = dir.join("wool.odfab");
+    assert!(h.state_mut().session.fabrics.save(&wool, &path));
+    show_tab(&mut h, Tab::Library);
+    click(&mut h, "Boiled wool");
+    assert_eq!(fabric(&h, id), wool);
+    assert_eq!(last_step(&h), "Set fabric: Boiled wool");
+    h.key_press_modifiers(Modifiers::COMMAND, Key::Z);
+    h.run();
+    assert_eq!(fabric(&h, id), Fabric::default());
+
+    // A file joins the list once, however often it's loaded, and the
+    // list is remembered by path for next time.
+    let shelf = &mut h.state_mut().session.fabrics;
+    assert!(shelf.load(&path).is_some());
+    assert_eq!(shelf.fabrics.len(), 1);
+    let mut storage = MemStorage::default();
+    eframe::App::save(h.state_mut(), &mut storage);
+    let paths: Vec<std::path::PathBuf> =
+        eframe::get_value(&storage, crate::fabric_shelf::FABRICS_KEY).unwrap();
+    assert_eq!(paths, vec![path]);
+
+    // Taking it off the list.
+    h.run();
+    click(&mut h, "Forget");
+    assert!(h.state().session.fabrics.fabrics.is_empty());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// In-memory stand-in for eframe's on-disk storage.
+#[derive(Default)]
+struct MemStorage(std::collections::HashMap<String, String>);
+
+impl eframe::Storage for MemStorage {
+    fn get_string(&self, key: &str) -> Option<String> {
+        self.0.get(key).cloned()
+    }
+    fn set_string(&mut self, key: &str, value: String) {
+        self.0.insert(key.to_owned(), value);
+    }
+    fn remove_string(&mut self, key: &str) {
+        self.0.remove(key);
+    }
+    fn flush(&mut self) {}
+}
+
 /// Screenshots of the fabric editor, the Library's fabric list and the
 /// colourways, for a look by eye, written to `$OD_SHOTS`. Needs a wgpu
 /// adapter; a software one (lavapipe) is enough.
@@ -149,5 +205,16 @@ fn screenshots_of_fabric_editor_and_colourways() {
     h.run();
     click(&mut h, "Edit fabric");
     shot(&mut h, "fabric-editor.png");
+
+    let saved = std::env::temp_dir().join(format!("od_shots_{}.odfab", std::process::id()));
+    let linen = Fabric {
+        name: "Linen".into(),
+        color: [200, 190, 160],
+        ..Fabric::cotton()
+    };
+    h.state_mut().session.fabrics.save(&linen, &saved);
+    show_tab(&mut h, Tab::Library);
+    shot(&mut h, "fabric-library.png");
+    let _ = std::fs::remove_file(&saved);
     eprintln!("screenshots in {}", dir.display());
 }

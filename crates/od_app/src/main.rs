@@ -3,6 +3,7 @@
 
 mod app;
 mod export;
+mod fabric_shelf;
 mod files;
 mod i18n;
 mod panels;
