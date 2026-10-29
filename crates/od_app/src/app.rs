@@ -14,6 +14,7 @@ use crate::i18n::{self, Key as TKey, Locale};
 use crate::panels::{
     self, pattern2d::Canvas2D, properties::PropertiesState, viewport3d::Viewport3D,
 };
+use crate::recovery::AutoSave;
 use crate::selection::Selection;
 use crate::theme;
 
@@ -535,6 +536,7 @@ pub struct OpenDesignApp {
     files: FileState,
     show_about: bool,
     locale: Locale,
+    autosave: AutoSave,
 }
 
 impl OpenDesignApp {
@@ -569,6 +571,11 @@ impl OpenDesignApp {
                 .storage
                 .and_then(|s| eframe::get_value(s, LOCALE_KEY))
                 .unwrap_or_default(),
+            autosave: {
+                let mut autosave = AutoSave::new(AutoSave::default_dir());
+                autosave.check();
+                autosave
+            },
         }
     }
 
@@ -979,8 +986,14 @@ impl eframe::App for OpenDesignApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
         self.files.intercept_close(&self.session, &ctx);
+        // A close that goes through is a normal quit: nothing unsaved is
+        // kept for recovery.
+        let closing = ctx.input(|i| i.viewport().close_requested());
+        if closing && (self.files.quitting || !self.session.history.is_dirty()) {
+            self.autosave.quit();
+        }
         // While a dialog is up, the document must not change underneath it.
-        if !self.files.is_blocking() {
+        if !self.files.is_blocking() && self.autosave.offer.is_none() {
             self.files.handle_dropped(&mut self.session, &ctx);
             if let Some(path) = crate::import::dropped_dxf(&ctx) {
                 if let Err(err) = crate::import::import_dxf(&mut self.session, &path) {
@@ -1023,6 +1036,10 @@ impl eframe::App for OpenDesignApp {
             });
 
         self.files.dialogs(&mut self.session, &ctx);
+        self.autosave
+            .dialog(&mut self.session, &mut self.files, &ctx);
+        let now = ctx.input(|i| i.time);
+        self.autosave.tick(&self.session, &self.files, &ctx, now);
         self.files.update_title(&self.session, &ctx);
     }
 
@@ -3196,5 +3213,181 @@ mod tests {
         click(&mut h, "File");
         click(&mut h, "Import ⏵");
         h.get_by_label("Patterns from DXF (AAMA)…");
+    }
+
+    // ---- Auto-save and recovery (CLO3D gap Phase 5) ----
+
+    use crate::recovery;
+
+    /// A harness whose auto-save uses its own folder, writing every frame.
+    fn autosaving(test: &str) -> (Harness<'static, OpenDesignApp>, PathBuf) {
+        let dir = temp_dir(test).join("data");
+        let mut h = harness();
+        let mut autosave = AutoSave::new(Some(dir.clone()));
+        autosave.interval = 0.0;
+        h.state_mut().autosave = autosave;
+        (h, dir)
+    }
+
+    #[test]
+    fn unsaved_work_is_auto_saved_and_cleared_by_saving() {
+        let (mut h, dir) = autosaving("autosave");
+        h.run();
+        assert!(recovery::find(&dir).is_none(), "nothing unsaved yet");
+        click(&mut h, "+ Sleeve");
+        h.run();
+        let found = recovery::find(&dir).expect("written while unsaved");
+        assert_eq!(found.doc, h.state().session.doc);
+        assert_eq!(found.source, None);
+
+        let project = dir.parent().unwrap().join("mine.odproj");
+        {
+            let app = h.state_mut();
+            assert!(app.files.write(&mut app.session, &project));
+        }
+        h.run();
+        assert!(recovery::find(&dir).is_none(), "a clean save clears it");
+        assert!(project.exists(), "the user's file is separate");
+
+        // Changes after a save point back at the project.
+        click(&mut h, "+ Sleeve");
+        h.run();
+        let found = recovery::find(&dir).unwrap();
+        assert_eq!(found.source.as_deref(), Some(project.as_path()));
+        assert_eq!(od_core::project::load(&project).unwrap().patterns.len(), 1);
+        // Undo back to the saved state is clean again.
+        press(&mut h, Modifiers::COMMAND, Key::Z);
+        h.run();
+        assert!(recovery::find(&dir).is_none());
+    }
+
+    #[test]
+    fn closing_normally_drops_the_recovery_file() {
+        let (mut h, dir) = autosaving("autosave_quit");
+        click(&mut h, "+ Sleeve");
+        h.run();
+        assert!(recovery::find(&dir).is_some());
+        let request_close = |h: &mut Harness<'_, OpenDesignApp>| {
+            h.input_mut()
+                .viewports
+                .entry(egui::ViewportId::ROOT)
+                .or_default()
+                .events
+                .push(egui::ViewportEvent::Close);
+            h.run();
+        };
+        request_close(&mut h);
+        click(&mut h, "Cancel");
+        assert!(recovery::find(&dir).is_some(), "still open, still unsaved");
+        request_close(&mut h);
+        click(&mut h, "Don't save");
+        // The window closes on the next close request eframe sends.
+        request_close(&mut h);
+        assert!(recovery::find(&dir).is_none());
+    }
+
+    /// A harness that starts up finding `doc` left in its recovery folder.
+    fn recovering(
+        test: &str,
+        doc: &Document,
+        source: Option<&Path>,
+    ) -> (Harness<'static, OpenDesignApp>, PathBuf) {
+        let (mut h, dir) = autosaving(test);
+        recovery::write(&dir, doc, source).unwrap();
+        h.state_mut().autosave.check();
+        h.run();
+        (h, dir)
+    }
+
+    fn crashed_doc() -> Document {
+        let mut doc = Document::new("Crashed");
+        let outline = od_core::geometry::rectangle(Vec2::ZERO, Vec2::new(200.0, 90.0));
+        AddPattern::new("Cuff", outline).apply(&mut doc);
+        doc
+    }
+
+    #[test]
+    fn recovered_work_is_offered_and_restored_as_unsaved() {
+        let project = temp_dir("recover_restore").join("shirt.odproj");
+        od_core::project::save(&Document::new("shirt"), &project).unwrap();
+        // The project was saved before the crash copy was written.
+        let earlier = std::time::SystemTime::now() - std::time::Duration::from_secs(600);
+        std::fs::File::options()
+            .write(true)
+            .open(&project)
+            .unwrap()
+            .set_modified(earlier)
+            .unwrap();
+        let (mut h, _dir) = recovering("recover_restore_app", &crashed_doc(), Some(&project));
+        h.get_by_label("Recover unsaved work?");
+        // The document can't be changed while the offer is up.
+        press(&mut h, Modifiers::COMMAND, Key::N);
+        click(&mut h, "Restore");
+        let app = h.state();
+        assert_eq!(app.session.doc, crashed_doc());
+        assert!(app.session.history.is_dirty(), "restored work is unsaved");
+        assert_eq!(app.files.path.as_deref(), Some(project.as_path()));
+        assert!(h.query_by_label("Recover unsaved work?").is_none());
+    }
+
+    #[test]
+    fn discarding_recovered_work_deletes_it() {
+        let (mut h, dir) = recovering("recover_discard", &crashed_doc(), None);
+        click(&mut h, "Discard");
+        assert!(h.state().session.doc.patterns.is_empty());
+        assert!(recovery::find(&dir).is_none());
+        assert!(h.query_by_label("Recover unsaved work?").is_none());
+    }
+
+    /// Like the darts and pleats screenshots above, for Phase 5: pieces
+    /// imported from DXF, the Import menu and the recovery offer.
+    #[test]
+    #[ignore = "writes screenshots; run with --ignored"]
+    fn screenshots_of_imports_and_recovery() {
+        let dir = std::env::var_os("OD_SHOTS")
+            .map_or_else(|| std::env::temp_dir().join("od_shots"), Into::into);
+        std::fs::create_dir_all(&dir).unwrap();
+        let shot = |h: &mut Harness<'_, OpenDesignApp>, name: &str| {
+            h.run();
+            let image = h.render().expect("a wgpu adapter to render with");
+            image.save(dir.join(name)).unwrap();
+        };
+        let mut h = Harness::builder()
+            .with_size(egui::vec2(1440.0, 880.0))
+            .wgpu()
+            .build_eframe(|cc| OpenDesignApp::new(cc));
+        let dock = &mut h.state_mut().dock;
+        if let Some(found) = dock.find_tab(&Tab::Viewport3D) {
+            dock.remove_tab(found);
+        }
+        h.run();
+
+        // A sleeve exported to DXF and dropped back in beside the original.
+        click(&mut h, "+ Sleeve");
+        let files = temp_dir("shots_import");
+        let dxf = files.join("sleeve.dxf");
+        od_core::dxf::export(&h.state().session.doc, &dxf).unwrap();
+        h.input_mut()
+            .dropped_files
+            .push(std::sync::Arc::new(DroppedPath(dxf)));
+        h.run();
+        press(&mut h, Modifiers::COMMAND, Key::A);
+        press(&mut h, Modifiers::NONE, Key::F);
+        show_tab(&mut h, Tab::Properties);
+        shot(&mut h, "dxf-import.png");
+
+        click(&mut h, "File");
+        click(&mut h, "Import ⏵");
+        shot(&mut h, "import-menu.png");
+        press(&mut h, Modifiers::NONE, Key::Escape);
+
+        // The offer to restore auto-saved work at start-up.
+        let data = files.join("data");
+        let source = files.join("shirt.odproj");
+        recovery::write(&data, &crashed_doc(), Some(&source)).unwrap();
+        h.state_mut().autosave = AutoSave::new(Some(data));
+        h.state_mut().autosave.check();
+        shot(&mut h, "recovery-offer.png");
+        eprintln!("screenshots in {}", dir.display());
     }
 }
