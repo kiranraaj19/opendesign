@@ -5,6 +5,7 @@ pub mod gizmo;
 pub mod history;
 pub mod library;
 pub mod measure2d;
+pub mod measure3d;
 pub mod objects;
 pub mod pattern2d;
 pub mod properties;

@@ -26,6 +26,7 @@ use od_sim::collision::Collider;
 use crate::app::{Session, Tool};
 use crate::panels::context;
 use crate::panels::gizmo::{self, GizmoDrag};
+use crate::panels::measure3d;
 use crate::panels::pattern2d;
 use crate::theme;
 
@@ -214,6 +215,8 @@ pub struct Viewport3D {
     /// Showing the avatar's arrangement points, to click one and place the
     /// selected patterns there.
     pub arranging: bool,
+    /// The circumference and tape tools (see [`measure3d`]).
+    pub measure: measure3d::Measure3D,
 }
 
 /// Things the 3D view can hide, to see the garment more clearly.
@@ -275,6 +278,7 @@ impl Viewport3D {
             gizmo: None,
             arranging: false,
             frame_selection: false,
+            measure: Default::default(),
         }
     }
 
@@ -1023,6 +1027,7 @@ fn view_buttons(ui: &mut egui::Ui, s: &mut Session) -> Option<ViewAction> {
     .on_hover_text("Draw the avatar and cloth solid, as wireframe or see-through");
     ui.toggle_value(&mut s.viewport.show_sizing, "Avatar size")
         .on_hover_text("Height, chest, waist and hip of the avatar");
+    measure3d::buttons(ui, s);
     ui.separator();
     let label = if s.viewport.draping {
         "Stop draping"
@@ -1111,6 +1116,11 @@ fn handle_input(
         return;
     }
 
+    // The circumference and tape tools take clicks on the avatar.
+    let measured = response.clicked()
+        && response
+            .interact_pointer_pos()
+            .is_some_and(|pos| measure3d::click(s, rect, pos));
     let v = &mut s.viewport;
     let delta = response.drag_delta();
     // While draping, a left-drag that starts on the cloth pulls it.
@@ -1164,7 +1174,7 @@ fn handle_input(
             ..OrbitCamera::default()
         };
         v.frame_all(rect, placed);
-    } else if response.clicked() {
+    } else if response.clicked() && !measured {
         if let Some(pos) = response.interact_pointer_pos() {
             if s.tool == Tool::Tack {
                 tack_click(s, rect, pos, placed);
@@ -1358,10 +1368,14 @@ fn paint(ui: &mut egui::Ui, rect: Rect, s: &Session, placed: &[PlacedPattern<Pat
         }
     }
 
+    measure3d::draw(&painter, s, rect, pal);
+
     painter.text(
         rect.left_top() + egui::vec2(10.0, 8.0),
         egui::Align2::LEFT_TOP,
-        if s.tool == Tool::Tack {
+        if let Some(hint) = measure3d::hint(s) {
+            hint
+        } else if s.tool == Tool::Tack {
             "Tack: click a pattern, then a pattern or the avatar · Esc cancels"
         } else if v.pinning {
             "Click the cloth to pin or unpin a point"

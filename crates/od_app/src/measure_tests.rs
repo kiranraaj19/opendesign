@@ -7,6 +7,7 @@ use egui_kittest::{kittest::Queryable, Harness};
 use od_core::{Grading, MeasureKind, PatternId, SetGrading, Vec2};
 
 use super::{OpenDesignApp, Tab, Tool};
+use crate::panels::measure3d::Mode;
 
 fn harness() -> Harness<'static, OpenDesignApp> {
     let mut h = Harness::builder()
@@ -205,6 +206,67 @@ fn the_chart_shows_every_size_and_the_overlay_draws_them() {
     press(&mut h, Modifiers::NONE, Key::Escape);
     click(&mut h, "Show all sizes");
     assert!(!h.state().session.canvas.measure.all_sizes);
+}
+
+#[test]
+fn circumference_and_tape_are_taken_on_the_avatar() {
+    use od_render::avatar::landmarks;
+    use od_render::glam::Vec3;
+    let mut h = harness();
+    let view = h.get_by_label("3D garment view").rect();
+    let (kind, m) = {
+        let avatar = &h.state().session.viewport.avatar;
+        (avatar.kind().unwrap(), avatar.measurements)
+    };
+    let waist = landmarks(kind, m).waist;
+    // A point on the waist's front, as the camera sees it.
+    let front = |h: &Harness<'_, OpenDesignApp>| {
+        let mesh = h.state().session.viewport.avatar.mesh();
+        let cut = od_render::measure::slice(mesh, Vec3::new(0.0, waist, 0.0), Vec3::Y);
+        let p = cut
+            .iter()
+            .flat_map(|s| s.points.iter().copied())
+            .filter(|p| p.x.abs() < 0.02)
+            .max_by(|a, b| a.z.total_cmp(&b.z))
+            .unwrap();
+        h.state().session.viewport.screen_pos(view, p).unwrap()
+    };
+
+    click(&mut h, "Measure body");
+    click(&mut h, "Circumference");
+    assert_eq!(h.state().session.viewport.measure.mode, Mode::Girth);
+    let at = front(&h);
+    click_at(&mut h, at, Modifiers::NONE);
+    let girths = h.state().session.viewport.measure.girth_lengths();
+    assert_eq!(girths.len(), 1);
+    let want = m.waist / 100.0;
+    let got = girths[0].expect("a loop round the waist");
+    assert!((got - want).abs() < want * 0.03, "{got} vs {want}");
+    // Measuring doesn't select or change anything else.
+    assert!(h.state().session.selection.primary().is_none());
+
+    // The tape: two clicks on the front of the body.
+    h.state_mut().session.viewport.measure.mode = Mode::Tape;
+    h.run();
+    click_at(&mut h, at, Modifiers::NONE);
+    click_at(&mut h, at + egui::vec2(0.0, -40.0), Modifiers::NONE);
+    let s = &mut h.state_mut().session;
+    assert_eq!(s.viewport.measure.tape.len(), 2);
+    let v = &mut s.viewport;
+    v.measure.refresh(&v.avatar);
+    let tape = v.measure.tape_length();
+    assert!(tape > 0.02 && tape < 0.5, "{tape}");
+
+    // Resizing the avatar measures again on the new body.
+    let mut bigger = m;
+    bigger.waist += 10.0;
+    v.avatar.set_measurements(bigger);
+    v.measure.refresh(&v.avatar);
+    let got = v.measure.girth_lengths()[0].unwrap();
+    assert!((got - bigger.waist / 100.0).abs() < 0.03, "{got}");
+    v.measure.clear();
+    v.measure.refresh(&v.avatar);
+    assert!(v.measure.girth_lengths().is_empty());
 }
 
 /// Pictures of the measuring UI for checking it by eye, written to
