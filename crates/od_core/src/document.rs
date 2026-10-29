@@ -1162,6 +1162,11 @@ pub struct Document {
     next_id: u64,
     next_sewing_id: u64,
     next_tack_id: u64,
+    /// Named garment measurements (see [`crate::measure`]).
+    #[serde(default)]
+    pub measurements: Vec<crate::measure::Measurement>,
+    #[serde(default)]
+    pub(crate) next_measurement_id: u64,
 }
 
 impl Default for Document {
@@ -1185,6 +1190,8 @@ impl Document {
             next_id: 1,
             next_sewing_id: 1,
             next_tack_id: 1,
+            measurements: Vec::new(),
+            next_measurement_id: 0,
         }
     }
 
