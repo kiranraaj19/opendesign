@@ -2,6 +2,7 @@
 
 pub mod context;
 pub mod gizmo;
+pub mod groups;
 pub mod history;
 pub mod library;
 pub mod objects;

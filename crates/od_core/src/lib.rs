@@ -18,6 +18,7 @@ pub mod piece;
 pub mod plugin;
 pub mod project;
 pub mod seam;
+pub mod workspace;
 
 pub use align::Align;
 pub use bom::{document_bom, piece_bom, total_area_m2, PieceBom};

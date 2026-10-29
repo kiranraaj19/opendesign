@@ -4,7 +4,7 @@
 
 use super::*;
 use egui_kittest::{
-    kittest::{NodeT, Queryable},
+    kittest::{By, NodeT, Queryable},
     Harness,
 };
 use od_core::geometry::rectangle;
@@ -49,6 +49,15 @@ fn three_pieces(h: &mut Harness<'_, OpenDesignApp>) -> [PatternId; 3] {
     let ids = [0, 1, 2].map(|i| s.doc.patterns[i].id);
     h.run();
     ids
+}
+
+/// The text field holding `value`.
+fn text_field<'h>(h: &'h Harness<'_, OpenDesignApp>, value: &'h str) -> egui_kittest::Node<'h> {
+    h.get(
+        By::new()
+            .role(egui::accesskit::Role::TextInput)
+            .value(value),
+    )
 }
 
 fn bounds(h: &Harness<'_, OpenDesignApp>, id: PatternId) -> (Vec2, Vec2) {
@@ -115,4 +124,90 @@ fn the_right_click_menu_aligns_the_selection() {
     click(&mut h, "Align ⏵");
     click(&mut h, "Align right");
     assert!(ids.iter().all(|&id| bounds(&h, id).1.x == 360.0));
+}
+
+// ---- Groups ----
+
+#[test]
+fn a_group_is_made_from_the_selection_and_clicking_it_selects_it() {
+    let mut h = harness();
+    let ids = three_pieces(&mut h);
+    show_tab(&mut h, Tab::Objects);
+    assert!(h
+        .get_by_label("Group selected")
+        .accesskit_node()
+        .is_disabled());
+    h.state_mut().session.selection.set_all([ids[0], ids[2]]);
+    h.run();
+    click(&mut h, "Group selected");
+    assert_eq!(last_step(&h), "Add Group 1");
+    let group = &h.state().session.doc.groups[0];
+    assert_eq!(group.members, [ids[0], ids[2]]);
+
+    h.state_mut().session.selection.set(Some(ids[1]));
+    h.run();
+    click(&mut h, "Group 1 (2)");
+    assert_eq!(h.state().session.selection.ids(), [ids[0], ids[2]]);
+    // Shift-click adds the group to what is selected.
+    h.state_mut().session.selection.set(Some(ids[1]));
+    h.run();
+    h.get_by_label("Group 1 (2)")
+        .click_modifiers(Modifiers::SHIFT);
+    h.run();
+    assert_eq!(h.state().session.selection.len(), 3);
+}
+
+#[test]
+fn a_group_survives_deleting_and_undoing_its_pieces() {
+    let mut h = harness();
+    let ids = three_pieces(&mut h);
+    show_tab(&mut h, Tab::Objects);
+    press(&mut h, Modifiers::COMMAND, Key::A);
+    click(&mut h, "Group selected");
+    h.state_mut().session.selection.set(Some(ids[1]));
+    h.run();
+    press(&mut h, Modifiers::NONE, Key::Delete);
+    // The deleted piece no longer counts...
+    click(&mut h, "Group 1 (2)");
+    assert_eq!(h.state().session.selection.ids(), [ids[0], ids[2]]);
+    // ...and is back in the group when the delete is undone.
+    press(&mut h, Modifiers::COMMAND, Key::Z);
+    click(&mut h, "Group 1 (3)");
+    assert_eq!(h.state().session.selection.len(), 3);
+    // Undoing the group itself removes it.
+    press(&mut h, Modifiers::COMMAND, Key::Z);
+    assert!(h.state().session.doc.groups.is_empty());
+    assert!(h.query_by_label("Group 1 (3)").is_none());
+}
+
+#[test]
+fn the_group_menu_renames_refills_and_ungroups() {
+    let mut h = harness();
+    let ids = three_pieces(&mut h);
+    show_tab(&mut h, Tab::Objects);
+    h.state_mut().session.selection.set(Some(ids[0]));
+    h.run();
+    click(&mut h, "Group selected");
+
+    h.get_by_label("Group 1 (1)").click_secondary();
+    h.run();
+    let field = text_field(&h, "Group 1");
+    field.focus();
+    field.type_text(" front");
+    h.run();
+    click(&mut h, "Rename");
+    assert_eq!(h.state().session.doc.groups[0].name, "Group 1 front");
+    assert_eq!(last_step(&h), "Rename group to Group 1 front");
+
+    press(&mut h, Modifiers::COMMAND, Key::A);
+    h.get_by_label("Group 1 front (1)").click_secondary();
+    h.run();
+    click(&mut h, "Set to selection");
+    assert_eq!(h.state().session.doc.groups[0].members.len(), 3);
+
+    h.get_by_label("Group 1 front (3)").click_secondary();
+    h.run();
+    click(&mut h, "Ungroup");
+    assert!(h.state().session.doc.groups.is_empty());
+    assert_eq!(h.state().session.doc.patterns.len(), 3, "the pieces stay");
 }

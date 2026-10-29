@@ -1124,6 +1124,9 @@ pub struct Document {
     pub sewing_lines: Vec<SewingLine>,
     pub tacks: Vec<Tack>,
     pub size_chart: SizeChart,
+    /// Named sets of pieces (see [`crate::workspace::Group`]).
+    #[serde(default)]
+    pub groups: Vec<crate::workspace::Group>,
     next_id: u64,
     next_sewing_id: u64,
     next_tack_id: u64,
@@ -1143,6 +1146,7 @@ impl Document {
             sewing_lines: Vec::new(),
             tacks: Vec::new(),
             size_chart: SizeChart::default(),
+            groups: Vec::new(),
             next_id: 1,
             next_sewing_id: 1,
             next_tack_id: 1,
@@ -1169,6 +1173,10 @@ impl Document {
             if !tack.points().all(|p| known(&p.pattern)) {
                 return Err(Invalid::BadTack(tack.id));
             }
+        }
+        // Groups forget pieces that aren't there.
+        for group in &mut self.groups {
+            group.members.retain(known);
         }
         // A linked copy of a pattern that isn't there is just a pattern.
         for pattern in &mut self.patterns {
