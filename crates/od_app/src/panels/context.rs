@@ -1,6 +1,6 @@
 //! The right-click menu shared by the 2D and 3D views.
 
-use od_core::{Axis, PatternFlag};
+use od_core::{Align, Axis, PatternFlag};
 
 use crate::app::Session;
 
@@ -76,11 +76,30 @@ pub fn menu(ui: &mut egui::Ui, s: &mut Session) {
     if ui.button("Reset 3D position").clicked() {
         crate::panels::gizmo::reset_selected(s);
     }
+    if s.selection.len() > 1 {
+        ui.menu_button("Align", |ui| align_buttons(ui, s));
+    }
     ui.separator();
     if ui.add(item("Zoom to", "F")).clicked() {
         s.frame_selection();
     }
     if ui.add(item("Delete", "Del")).clicked() {
         s.delete_selected();
+    }
+}
+
+/// One button per way of lining up the selected patterns (Properties and
+/// the right-click menu). Distributing needs three or more.
+pub fn align_buttons(ui: &mut egui::Ui, s: &mut Session) {
+    let count = s.selection.len();
+    for how in Align::EDGES.into_iter().chain(Align::DISTRIBUTE) {
+        if ui
+            .add_enabled(count >= how.min_pieces(), egui::Button::new(how.label()))
+            .on_hover_text(how.tip())
+            .on_disabled_hover_text(how.tip())
+            .clicked()
+        {
+            s.align_selected(how);
+        }
     }
 }

@@ -424,7 +424,15 @@ fn several_section(ui: &mut egui::Ui, s: &mut Session) {
             ui.label(&pattern.name);
         }
     }
+    align_section(ui, s);
     selection_actions(ui, s, "Delete patterns");
+}
+
+/// Align edges or centres of the selected patterns, or spread them out.
+fn align_section(ui: &mut egui::Ui, s: &mut Session) {
+    ui.add_space(8.0);
+    ui.label("Align");
+    ui.horizontal_wrapped(|ui| crate::panels::context::align_buttons(ui, s));
 }
 
 /// Flip, copy and delete, acting on every selected pattern.

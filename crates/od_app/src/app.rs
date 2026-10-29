@@ -398,6 +398,14 @@ impl Session {
         });
     }
 
+    /// Line up the selected patterns (see [`od_core::Align`]) as one undo
+    /// step. Locked ones count but stay put.
+    pub fn align_selected(&mut self, how: od_core::Align) {
+        if let Some(batch) = od_core::align::align(&self.doc, self.selection.ids(), how) {
+            self.execute(batch);
+        }
+    }
+
     /// Copy the selected patterns, optionally mirrored, and select the
     /// copies.
     pub fn duplicate_selected(&mut self, mirror: Option<Axis>) {
@@ -1077,6 +1085,10 @@ fn restore_layout(storage: Option<&dyn eframe::Storage>) -> DockState<Tab> {
         .filter(|dock| Tab::ALL.iter().all(|tab| dock.find_tab(tab).is_some()))
         .unwrap_or_else(default_layout)
 }
+
+#[cfg(test)]
+#[path = "app_workspace_tests.rs"]
+mod workspace_tests;
 
 /// Drive the real app headlessly: clicks and keys go through egui exactly as
 /// they would from a mouse and keyboard, no window or GPU needed.

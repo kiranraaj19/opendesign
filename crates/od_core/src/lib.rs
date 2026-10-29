@@ -3,6 +3,7 @@
 //! Every change to a [`Document`] goes through a [`Command`] executed by a
 //! [`History`], so every tool in the app gets undo/redo for free.
 
+pub mod align;
 pub mod bom;
 pub mod clipboard;
 pub mod command;
@@ -18,6 +19,7 @@ pub mod plugin;
 pub mod project;
 pub mod seam;
 
+pub use align::Align;
 pub use bom::{document_bom, piece_bom, total_area_m2, PieceBom};
 pub use clipboard::{Clip, Paste};
 pub use command::{
