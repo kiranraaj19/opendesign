@@ -1,4 +1,4 @@
-﻿//! UI tests for Phase 7's fabric work: the fabric editor, fabric files in
+//! UI tests for Phase 7's fabric work: the fabric editor, fabric files in
 //! the Library, and colourways. A child of `app` so it can reach the
 //! app's state the way the main test module does.
 
@@ -154,6 +154,59 @@ fn a_saved_fabric_is_listed_in_the_library_and_can_be_used() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+#[test]
+fn colourways_switch_the_garments_colours_and_undo() {
+    let mut h = harness();
+    let id = one_piece(&mut h);
+    h.state_mut().session.selection.clear();
+    h.run();
+    let natural = fabric(&h, id).color;
+    click(&mut h, "New colourway");
+    assert_eq!(last_step(&h), "Add colourway: Colourway 1");
+
+    // Recolour, and keep that as a second colourway.
+    {
+        let s = &mut h.state_mut().session;
+        let red = Fabric {
+            color: [190, 30, 40],
+            ..s.doc.patterns[0].fabric.clone()
+        };
+        s.execute(EditFabric::new(id, red, "colour"));
+    }
+    h.run();
+    click(&mut h, "New colourway");
+    assert_eq!(h.state().session.doc.colourways.len(), 2);
+
+    click(&mut h, "Colourway 1");
+    assert_eq!(fabric(&h, id).color, natural);
+    assert_eq!(last_step(&h), "Switch colourway: Colourway 1");
+    click(&mut h, "Colourway 2");
+    assert_eq!(fabric(&h, id).color, [190, 30, 40]);
+    h.key_press_modifiers(Modifiers::COMMAND, Key::Z);
+    h.run();
+    assert_eq!(fabric(&h, id).color, natural);
+    assert_eq!(h.state().session.doc.active_colourway, Some(0));
+
+    // Recolouring the shown colourway can be saved into it.
+    {
+        let s = &mut h.state_mut().session;
+        let blue = Fabric {
+            color: [20, 40, 160],
+            ..s.doc.patterns[0].fabric.clone()
+        };
+        s.execute(EditFabric::new(id, blue, "colour"));
+    }
+    h.run();
+    click(&mut h, "Save colours");
+    assert_eq!(
+        h.state().session.doc.colourways[0].colors,
+        vec![(id, [20, 40, 160])]
+    );
+    click(&mut h, "Delete colourway");
+    assert_eq!(h.state().session.doc.colourways.len(), 1);
+    assert_eq!(h.state().session.doc.active_colourway, None);
+}
+
 /// In-memory stand-in for eframe's on-disk storage.
 #[derive(Default)]
 struct MemStorage(std::collections::HashMap<String, String>);
@@ -216,5 +269,22 @@ fn screenshots_of_fabric_editor_and_colourways() {
     show_tab(&mut h, Tab::Library);
     shot(&mut h, "fabric-library.png");
     let _ = std::fs::remove_file(&saved);
+
+    show_tab(&mut h, Tab::Properties);
+    h.state_mut().session.selection.clear();
+    h.run();
+    click(&mut h, "New colourway");
+    {
+        let s = &mut h.state_mut().session;
+        let red = Fabric {
+            color: [190, 30, 40],
+            ..s.doc.patterns[0].fabric.clone()
+        };
+        s.execute(EditFabric::new(id, red, "colour"));
+    }
+    h.run();
+    click(&mut h, "New colourway");
+    click(&mut h, "Colourway 1");
+    shot(&mut h, "colourways.png");
     eprintln!("screenshots in {}", dir.display());
 }

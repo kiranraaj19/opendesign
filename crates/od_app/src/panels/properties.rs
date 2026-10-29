@@ -91,6 +91,8 @@ pub fn ui(ui: &mut egui::Ui, s: &mut Session) {
         ui.add_space(8.0);
         ui.label(format!("Document: {}", s.doc.name));
         ui.label(format!("Patterns: {}", s.doc.patterns.len()));
+        // Garment-wide, so shown with the document rather than a piece.
+        crate::panels::colourways::ui(ui, s);
         return;
     };
     let id = pattern.id;

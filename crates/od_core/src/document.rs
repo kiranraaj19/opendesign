@@ -1147,6 +1147,12 @@ pub struct Document {
     pub sewing_lines: Vec<SewingLine>,
     pub tacks: Vec<Tack>,
     pub size_chart: SizeChart,
+    /// Named colour variants of the garment (see [`crate::colourway`]).
+    #[serde(default)]
+    pub colourways: Vec<crate::colourway::Colourway>,
+    /// The colourway last switched to, if any.
+    #[serde(default)]
+    pub active_colourway: Option<usize>,
     next_id: u64,
     next_sewing_id: u64,
     next_tack_id: u64,
@@ -1166,6 +1172,8 @@ impl Document {
             sewing_lines: Vec::new(),
             tacks: Vec::new(),
             size_chart: SizeChart::default(),
+            colourways: Vec::new(),
+            active_colourway: None,
             next_id: 1,
             next_sewing_id: 1,
             next_tack_id: 1,

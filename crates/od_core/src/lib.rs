@@ -5,6 +5,7 @@
 
 pub mod bom;
 pub mod clipboard;
+pub mod colourway;
 pub mod command;
 pub mod document;
 pub mod dxf;
