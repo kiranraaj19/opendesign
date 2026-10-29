@@ -15,7 +15,10 @@
 //! `POLYLINE`/`VERTEX`/`SEQEND`, `LINE` and `TEXT`, which every DXF reader
 //! back to R12 understands (newer
 //! `LWPOLYLINE`-only readers also accept them). Units are millimetres
-//! throughout (`$INSUNITS` 4).
+//! throughout (`$INSUNITS` 4). DXF's y axis points up and the pattern
+//! window's down, so y is negated on the way out (and back in by
+//! [`crate::dxf_import`]); pieces then look the same way up in other CAD
+//! tools as they do here.
 
 use std::fs;
 use std::io;
@@ -110,7 +113,7 @@ fn write_polyline(out: &mut String, layer: &str, points: &[Vec2], closed: bool) 
     for p in points {
         out.push_str("0\nVERTEX\n");
         out.push_str(&format!("8\n{layer}\n"));
-        out.push_str(&format!("10\n{:.4}\n20\n{:.4}\n30\n0.0\n", p.x, p.y));
+        out.push_str(&format!("10\n{:.4}\n20\n{:.4}\n30\n0.0\n", p.x, -p.y));
     }
     out.push_str("0\nSEQEND\n");
 }
@@ -118,15 +121,15 @@ fn write_polyline(out: &mut String, layer: &str, points: &[Vec2], closed: bool) 
 fn write_text(out: &mut String, layer: &str, at: Vec2, text: &str) {
     out.push_str("0\nTEXT\n");
     out.push_str(&format!("8\n{layer}\n"));
-    out.push_str(&format!("10\n{:.4}\n20\n{:.4}\n30\n0.0\n", at.x, at.y));
+    out.push_str(&format!("10\n{:.4}\n20\n{:.4}\n30\n0.0\n", at.x, -at.y));
     out.push_str(&format!("40\n{LABEL_HEIGHT:.1}\n1\n{text}\n"));
 }
 
 fn write_line(out: &mut String, layer: &str, a: Vec2, b: Vec2) {
     out.push_str("0\nLINE\n");
     out.push_str(&format!("8\n{layer}\n"));
-    out.push_str(&format!("10\n{:.4}\n20\n{:.4}\n30\n0.0\n", a.x, a.y));
-    out.push_str(&format!("11\n{:.4}\n21\n{:.4}\n31\n0.0\n", b.x, b.y));
+    out.push_str(&format!("10\n{:.4}\n20\n{:.4}\n30\n0.0\n", a.x, -a.y));
+    out.push_str(&format!("11\n{:.4}\n21\n{:.4}\n31\n0.0\n", b.x, -b.y));
 }
 
 /// The grainline's two endpoints, mirroring `pattern2d::draw_grainline`'s
@@ -347,8 +350,9 @@ mod tests {
         // The dart is a closed diamond: tip, side, tip, side.
         assert!(dxf.contains("8\nFRONT_PANEL_1_DART\n66\n1\n70\n1\n"));
         assert_eq!(dxf.matches("0\nVERTEX\n8\nFRONT_PANEL_1_DART\n").count(), 4);
-        assert!(dxf.contains("10\n45.0000\n20\n50.0000\n"));
-        assert!(dxf.contains("10\n55.0000\n20\n50.0000\n"));
+        // y is negated: DXF's y axis points up.
+        assert!(dxf.contains("10\n45.0000\n20\n-50.0000\n"));
+        assert!(dxf.contains("10\n55.0000\n20\n-50.0000\n"));
     }
 
     #[test]

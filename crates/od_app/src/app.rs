@@ -686,6 +686,17 @@ impl OpenDesignApp {
                     files.save_as(s);
                 }
                 ui.separator();
+                ui.menu_button("Import", |ui| {
+                    if ui
+                        .button("Patterns from DXF (AAMA)…")
+                        .on_hover_text("Add the pieces in a DXF file to this document")
+                        .clicked()
+                    {
+                        if let Some(err) = crate::import::import_dxf_dialog(s) {
+                            files.error = Some(err);
+                        }
+                    }
+                });
                 ui.menu_button("Export", |ui| {
                     ui.add_enabled_ui(crate::export::garment_mesh(s).is_some(), |ui| {
                         if ui
@@ -971,6 +982,11 @@ impl eframe::App for OpenDesignApp {
         // While a dialog is up, the document must not change underneath it.
         if !self.files.is_blocking() {
             self.files.handle_dropped(&mut self.session, &ctx);
+            if let Some(path) = crate::import::dropped_dxf(&ctx) {
+                if let Err(err) = crate::import::import_dxf(&mut self.session, &path) {
+                    self.files.error = Some(err);
+                }
+            }
             self.handle_shortcuts(&ctx);
         }
 
@@ -3128,5 +3144,57 @@ mod tests {
         press(&mut h, Modifiers::COMMAND, Key::Z);
         let p = h.state().session.doc.pattern(left).unwrap();
         assert_eq!(p.outline.len(), 4);
+    }
+
+    // ---- Import (CLO3D gap Phase 5) ----
+
+    #[test]
+    fn dropping_a_dxf_adds_its_pieces_beside_the_others_as_one_step() {
+        let dir = temp_dir("dxf_drop");
+        let path = dir.join("pieces.dxf");
+        let mut source = Document::new("source");
+        for (name, x) in [("Front", 0.0), ("Back", 200.0)] {
+            let outline =
+                od_core::geometry::rectangle(Vec2::new(x, 0.0), Vec2::new(x + 120.0, 300.0));
+            AddPattern::new(name, outline).apply(&mut source);
+        }
+        od_core::dxf::export(&source, &path).unwrap();
+
+        let mut h = harness();
+        click(&mut h, "+ Sleeve");
+        let sleeve_right = h.state().session.doc.patterns[0].bounds().unwrap().1.x;
+        h.input_mut()
+            .dropped_files
+            .push(std::sync::Arc::new(DroppedPath(path)));
+        h.run();
+        let s = &h.state().session;
+        assert_eq!(s.doc.patterns.len(), 3);
+        assert_eq!(s.doc.patterns[1].name, "Front");
+        assert_eq!(s.doc.patterns[2].name, "Back");
+        let front = s.doc.patterns[1].bounds().unwrap();
+        assert!(front.0.x > sleeve_right, "placed beside the sleeve");
+        assert!((front.1.x - front.0.x - 120.0).abs() < 0.01);
+        assert_eq!(s.selection.len(), 2, "the imported pieces are selected");
+        assert_eq!(s.history.undo_label().as_deref(), Some("Import pieces.dxf"));
+        assert!(s.history.is_dirty());
+        press(&mut h, Modifiers::COMMAND, Key::Z);
+        assert_eq!(pattern_count(&h), 1, "one undo removes the whole import");
+    }
+
+    #[test]
+    fn a_bad_dxf_shows_an_error_and_the_menu_offers_import() {
+        let path = temp_dir("dxf_bad").join("broken.dxf");
+        std::fs::write(&path, "this is not a dxf").unwrap();
+        let mut h = harness();
+        h.input_mut()
+            .dropped_files
+            .push(std::sync::Arc::new(DroppedPath(path)));
+        h.run();
+        h.get_by_label("Something went wrong");
+        assert_eq!(pattern_count(&h), 0);
+        click(&mut h, "OK");
+        click(&mut h, "File");
+        click(&mut h, "Import ⏵");
+        h.get_by_label("Patterns from DXF (AAMA)…");
     }
 }
