@@ -265,3 +265,134 @@ fn saving_a_view_under_an_existing_name_replaces_it() {
     assert_eq!(s.doc.camera_views[0].yaw, s.viewport.camera.yaw);
     assert_eq!(s.history.undo_label().as_deref(), Some("Update view Side"));
 }
+
+// ---- Preferences ----
+
+use crate::prefs::{restore as restore_preferences, Preferences};
+
+/// In-memory stand-in for eframe's on-disk storage.
+#[derive(Default)]
+struct MemStorage(std::collections::HashMap<String, String>);
+
+impl eframe::Storage for MemStorage {
+    fn get_string(&self, key: &str) -> Option<String> {
+        self.0.get(key).cloned()
+    }
+    fn set_string(&mut self, key: &str, value: String) {
+        self.0.insert(key.to_owned(), value);
+    }
+    fn remove_string(&mut self, key: &str) {
+        self.0.remove(key);
+    }
+    fn flush(&mut self) {}
+}
+
+#[test]
+fn preferences_open_from_the_edit_menu_and_restore_defaults() {
+    let mut h = harness();
+    click(&mut h, "Edit");
+    click(&mut h, "Preferences…");
+    for label in [
+        "Grid size",
+        "Seam allowance",
+        "Particle distance",
+        "Tolerance",
+        "Theme",
+    ] {
+        assert!(h.query_by_label(label).is_some(), "{label}");
+    }
+    let s = &mut h.state_mut().session;
+    s.canvas.grid_mm = 25.0;
+    s.defaults.seam_allowance = 15.0;
+    s.seam_check.enabled = false;
+    h.run();
+    click(&mut h, "Restore defaults");
+    let s = &h.state().session;
+    assert_eq!(Preferences::capture(s), Preferences::default());
+}
+
+#[test]
+fn preferences_are_remembered_between_sessions() {
+    let mut h = harness();
+    let s = &mut h.state_mut().session;
+    s.canvas.grid_mm = 5.0;
+    s.canvas.snap.points = false;
+    s.defaults.seam_allowance = 12.5;
+    s.defaults.particle_distance = 15.0;
+    s.seam_check.percent = 1.5;
+    let saved = Preferences::capture(s);
+    let mut storage = MemStorage::default();
+    eframe::App::save(h.state_mut(), &mut storage);
+
+    let mut next = harness();
+    restore_preferences(Some(&storage)).apply(&mut next.state_mut().session);
+    assert_eq!(Preferences::capture(&next.state().session), saved);
+    // Nothing saved, or something unreadable: the defaults.
+    assert_eq!(restore_preferences(None), Preferences::default());
+    eframe::Storage::set_string(&mut storage, crate::prefs::PREFS_KEY, "nonsense".into());
+    assert_eq!(restore_preferences(Some(&storage)), Preferences::default());
+}
+
+#[test]
+fn new_pieces_get_the_preferred_seam_allowance_and_grid() {
+    let mut h = harness();
+    let s = &mut h.state_mut().session;
+    s.defaults.seam_allowance = 6.0;
+    s.add_pattern("Patch", rectangle(Vec2::ZERO, Vec2::new(50.0, 50.0)));
+    assert_eq!(s.doc.patterns[0].seam_allowance, 6.0);
+    s.canvas.grid_mm = 25.0;
+    assert_eq!(s.canvas.grid_step() % 25.0, 0.0);
+}
+
+// ---- Screenshots ----
+
+/// Screenshots of align in Properties, groups in Objects and the
+/// Preferences window, written to `$OD_SHOTS` (default: a temporary
+/// folder). Needs a wgpu adapter; a software one (lavapipe) is enough.
+/// The 3D tab (and its Saved views menu) is left out, as in
+/// `app::tests::screenshots_of_darts_pleats_and_linked_copies`.
+#[test]
+#[ignore = "writes screenshots; run with --ignored"]
+fn screenshots_of_the_workspace_tools() {
+    let dir = std::env::var_os("OD_SHOTS")
+        .map_or_else(|| std::env::temp_dir().join("od_shots"), Into::into);
+    std::fs::create_dir_all(&dir).unwrap();
+    let shot = |h: &mut Harness<'_, OpenDesignApp>, name: &str| {
+        h.run();
+        let image = h.render().expect("a wgpu adapter to render with");
+        image.save(dir.join(name)).unwrap();
+    };
+    let mut h = Harness::builder()
+        .with_size(egui::vec2(1440.0, 880.0))
+        .wgpu()
+        .build_eframe(|cc| OpenDesignApp::new(cc));
+    let dock = &mut h.state_mut().dock;
+    if let Some(found) = dock.find_tab(&Tab::Viewport3D) {
+        dock.remove_tab(found);
+    }
+    h.run();
+    let ids = three_pieces(&mut h);
+    press(&mut h, Modifiers::COMMAND, Key::A);
+    press(&mut h, Modifiers::NONE, Key::F);
+    show_tab(&mut h, Tab::Properties);
+    shot(&mut h, "align-before.png");
+    click(&mut h, "Align top");
+    click(&mut h, "Distribute across");
+    shot(&mut h, "align-after.png");
+
+    show_tab(&mut h, Tab::Objects);
+    h.state_mut().session.selection.set_all([ids[0], ids[2]]);
+    h.run();
+    click(&mut h, "Group selected");
+    press(&mut h, Modifiers::COMMAND, Key::A);
+    click(&mut h, "Group selected");
+    click(&mut h, "Group 1 (2)");
+    h.get_by_label("Group 2 (3)").click_secondary();
+    shot(&mut h, "groups.png");
+    h.key_press(Key::Escape);
+    h.run();
+
+    click(&mut h, "Edit");
+    click(&mut h, "Preferences…");
+    shot(&mut h, "preferences.png");
+}

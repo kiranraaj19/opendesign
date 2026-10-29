@@ -8,7 +8,6 @@ use od_core::{
     PatternValue, PointKind, RemoveDart, RemoveInternalLine, RenamePattern, SetDart, SetFabric,
     SetFold, SetGrading, SetOutline, SetParticleDistance, SetPatternValue, PARTICLE_DISTANCE_RANGE,
 };
-use od_sim::cloth::DEFAULT_PARTICLE_DISTANCE;
 
 use crate::app::{Session, Tool};
 
@@ -589,7 +588,7 @@ fn simulation_section(ui: &mut egui::Ui, s: &mut Session, id: PatternId) {
     let Some(own) = s.doc.pattern(id).map(|p| p.particle_distance) else {
         return;
     };
-    let current = own.unwrap_or(DEFAULT_PARTICLE_DISTANCE);
+    let current = own.unwrap_or(s.defaults.particle_distance);
     ui.add_space(8.0);
     ui.label("Simulation");
     ui.horizontal(|ui| {

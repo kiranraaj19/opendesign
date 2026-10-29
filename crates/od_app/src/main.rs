@@ -7,6 +7,7 @@ mod files;
 mod i18n;
 mod panels;
 mod pdf;
+mod prefs;
 mod selection;
 mod theme;
 

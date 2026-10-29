@@ -635,7 +635,10 @@ fn new_drape(s: &Session) -> od_sim::drape::Drape {
         &s.doc,
         &placements(s),
         Some(avatar),
-        &od_sim::cloth::ClothConfig::default(),
+        &od_sim::cloth::ClothConfig {
+            particle_distance: s.defaults.particle_distance,
+            ..Default::default()
+        },
     );
     drape.colliders = avatar_colliders(&s.viewport.avatar);
     drape.set_cloth_collision(s.viewport.cloth_collision);
@@ -1504,6 +1507,7 @@ mod tests {
             preview_size: Document::default().size_chart.base,
             hovered: None,
             hover_next: None,
+            defaults: Default::default(),
         }
     }
 
