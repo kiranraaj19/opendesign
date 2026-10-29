@@ -643,7 +643,10 @@ fn new_drape(s: &Session) -> od_sim::drape::Drape {
         &s.doc,
         &placements(s),
         Some(avatar),
-        &od_sim::cloth::ClothConfig::default(),
+        &od_sim::cloth::ClothConfig {
+            particle_distance: s.defaults.particle_distance,
+            ..Default::default()
+        },
     );
     drape.colliders = avatar_colliders(&s.viewport.avatar);
     drape.set_cloth_collision(s.viewport.cloth_collision);
@@ -996,6 +999,9 @@ fn view_buttons(ui: &mut egui::Ui, s: &mut Session) -> Option<ViewAction> {
     {
         action = Some(ViewAction::Frame);
     }
+    ui.menu_button("Saved views", |ui| super::views::menu(ui, s))
+        .response
+        .on_hover_text("Save the camera under a name, or go back to a saved one");
     ui.separator();
     ui.menu_button("Show in 3D", |ui| {
         let show = &mut s.viewport.show;
@@ -1511,6 +1517,7 @@ mod tests {
             hovered: None,
             hover_next: None,
             fabrics: Default::default(),
+            defaults: Default::default(),
         }
     }
 

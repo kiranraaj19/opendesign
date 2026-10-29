@@ -8,6 +8,7 @@ use crate::app::Session;
 pub fn ui(ui: &mut egui::Ui, s: &mut Session) {
     egui::ScrollArea::vertical().show(ui, |ui| {
         patterns(ui, s);
+        super::groups::section(ui, s);
         seams_and_tacks(ui, s);
     });
 }

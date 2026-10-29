@@ -62,6 +62,9 @@ without this step.
 | Drape | Drape button above the 3D view; Pin and Strain toggles while draping; Cloth collision keeps pieces from passing through each other |
 | Particle distance | Properties -> Simulation: spacing of a piece's simulation particles (default 20 mm; smaller is finer and slower) |
 | Select / move | Select tool (`V`), click or drag a pattern; `Shift`/`Ctrl`+click adds or removes, drag a box from empty space to select what it touches, `Ctrl+A` selects all, `Esc` clears. Moves, flips and deletes act on every selected piece |
+| Align, distribute | Select several pieces: Properties → Align (or right-click → Align) lines up their left, right, top or bottom edges or their centres; Distribute across/down leaves equal gaps (3 or more pieces, the outer two stay put). Locked pieces stay where they are |
+| Groups | Objects tab → Group selected names the selected pieces as a group, saved with the project; click the group to select its pieces again (`Shift` adds), right-click it to rename, set it to the selection or ungroup |
+| Saved camera views | Saved views above the 3D view: type a name and Save view to keep the current camera with the project; click a saved view to go back to it |
 | Hide, lock | Objects tab (next to Library): Show and Lock per piece, plus every seam and tack. Hidden pieces leave both views and the drape; locked pieces can't be moved or edited |
 | Right-click menu | Right-click a piece in either view: cut, copy, paste, hide, lock, rotate, flip, zoom to, delete |
 | Zoom to selection | `F`, in both views; the piece under the pointer is outlined in both |
@@ -78,8 +81,10 @@ without this step.
 | Avatar size | Avatar size button in the 3D view: height, chest, waist, hip |
 | Rearrange panels | Drag a tab to another panel edge |
 | Reset panels, theme | View menu |
+| Task modes | View → Workspace → Pattern (wide 2D window) or Simulation (wide 3D view); View → Reset layout goes back |
+| Preferences | Edit → Preferences…: grid size, snapping, seam allowance and particle distance for new pieces, sewing-length check and tolerance, theme |
 
-Panel layout and theme are remembered between sessions (eframe stores them in
+Panel layout, preferences and theme are remembered between sessions (eframe stores them in
 `%APPDATA%\OpenDesign\data\app.ron` on Windows). View → Reset layout restores
 the default arrangement.
 

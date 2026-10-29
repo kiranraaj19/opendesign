@@ -216,6 +216,8 @@ pub struct Session {
     pub hover_next: Option<PatternId>,
     /// Fabric files saved or loaded, listed in the Library.
     pub fabrics: crate::fabric_shelf::FabricShelf,
+    /// Seam allowance and particle distance new work gets (Preferences).
+    pub defaults: crate::prefs::Defaults,
 }
 
 /// How far each paste lands from the last, in mm on both axes.
@@ -228,13 +230,18 @@ impl Session {
 
     /// Add a straight-edged pattern and select it.
     pub fn add_pattern(&mut self, name: impl Into<String>, outline: Vec<Vec2>) {
-        self.execute(AddPattern::new(name, outline));
-        self.selection.set(self.doc.patterns.last().map(|p| p.id));
+        self.add_outline(
+            name,
+            outline.into_iter().map(OutlinePoint::corner).collect(),
+        );
     }
 
     /// Add a pattern with corner and curve points and select it.
+    /// It gets the seam allowance set in Preferences.
     pub fn add_outline(&mut self, name: impl Into<String>, outline: Vec<OutlinePoint>) {
-        self.execute(AddPattern::with_outline(name, outline));
+        let mut pattern = od_core::Pattern::new(PatternId(0), name, outline);
+        pattern.seam_allowance = self.defaults.seam_allowance;
+        self.execute(AddPattern::from_pattern(pattern));
         self.selection.set(self.doc.patterns.last().map(|p| p.id));
     }
 
@@ -401,6 +408,14 @@ impl Session {
         });
     }
 
+    /// Line up the selected patterns (see [`od_core::Align`]) as one undo
+    /// step. Locked ones count but stay put.
+    pub fn align_selected(&mut self, how: od_core::Align) {
+        if let Some(batch) = od_core::align::align(&self.doc, self.selection.ids(), how) {
+            self.execute(batch);
+        }
+    }
+
     /// Copy the selected patterns, optionally mirrored, and select the
     /// copies.
     pub fn duplicate_selected(&mut self, mirror: Option<Axis>) {
@@ -537,6 +552,7 @@ pub struct OpenDesignApp {
     session: Session,
     files: FileState,
     show_about: bool,
+    show_prefs: bool,
     locale: Locale,
     autosave: AutoSave,
 }
@@ -544,7 +560,7 @@ pub struct OpenDesignApp {
 impl OpenDesignApp {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
         theme::install(&cc.egui_ctx);
-        Self {
+        let mut app = Self {
             dock: restore_layout(cc.storage),
             session: Session {
                 doc: Document::default(),
@@ -563,6 +579,7 @@ impl OpenDesignApp {
                 hovered: None,
                 hover_next: None,
                 fabrics: crate::fabric_shelf::FabricShelf::restore(cc.storage),
+                defaults: Default::default(),
             },
             files: FileState::with_recent(
                 cc.storage
@@ -570,6 +587,7 @@ impl OpenDesignApp {
                     .unwrap_or_default(),
             ),
             show_about: false,
+            show_prefs: false,
             locale: cc
                 .storage
                 .and_then(|s| eframe::get_value(s, LOCALE_KEY))
@@ -579,7 +597,9 @@ impl OpenDesignApp {
                 autosave.check();
                 autosave
             },
-        }
+        };
+        crate::prefs::restore(cc.storage).apply(&mut app.session);
+        app
     }
 
     fn handle_shortcuts(&mut self, ctx: &egui::Context) {
@@ -869,6 +889,14 @@ impl OpenDesignApp {
                 {
                     s.delete_selected();
                 }
+                ui.separator();
+                if ui
+                    .button("Preferences…")
+                    .on_hover_text("Grid, snapping, defaults for new pieces, sewing check, theme")
+                    .clicked()
+                {
+                    self.show_prefs = true;
+                }
             });
             ui.menu_button(tr(TKey::MenuView), |ui| {
                 ui.checkbox(&mut s.canvas.snap.grid, "Snap to grid");
@@ -891,6 +919,13 @@ impl OpenDesignApp {
                 if ui.button("Reset layout").clicked() {
                     self.dock = default_layout();
                 }
+                ui.menu_button("Workspace", |ui| {
+                    for mode in crate::layouts::TaskMode::ALL {
+                        if ui.button(mode.label()).on_hover_text(mode.tip()).clicked() {
+                            self.dock = mode.layout();
+                        }
+                    }
+                });
                 ui.separator();
                 egui::widgets::global_theme_preference_buttons(ui);
                 ui.separator();
@@ -1050,6 +1085,13 @@ impl eframe::App for OpenDesignApp {
                 ui.label(format!("Version {}", env!("CARGO_PKG_VERSION")));
             });
 
+        egui::Window::new("Preferences")
+            .open(&mut self.show_prefs)
+            .default_pos(egui::pos2(ctx.content_rect().center().x - 170.0, 120.0))
+            .collapsible(false)
+            .resizable(false)
+            .show(&ctx, |ui| crate::prefs::ui(ui, &mut self.session));
+
         self.files.dialogs(&mut self.session, &ctx);
         self.autosave
             .dialog(&mut self.session, &mut self.files, &ctx);
@@ -1065,6 +1107,8 @@ impl eframe::App for OpenDesignApp {
         eframe::set_value(storage, LOCALE_KEY, &self.locale);
         let fabrics = self.session.fabrics.paths();
         eframe::set_value(storage, crate::fabric_shelf::FABRICS_KEY, &fabrics);
+        let prefs = crate::prefs::Preferences::capture(&self.session);
+        eframe::set_value(storage, crate::prefs::PREFS_KEY, &prefs);
     }
 }
 
@@ -1127,6 +1171,10 @@ fn restore_layout(storage: Option<&dyn eframe::Storage>) -> DockState<Tab> {
         .filter(|dock| Tab::ALL.iter().all(|tab| dock.find_tab(tab).is_some()))
         .unwrap_or_else(default_layout)
 }
+
+#[cfg(test)]
+#[path = "app_workspace_tests.rs"]
+mod workspace_tests;
 
 /// Drive the real app headlessly: clicks and keys go through egui exactly as
 /// they would from a mouse and keyboard, no window or GPU needed.

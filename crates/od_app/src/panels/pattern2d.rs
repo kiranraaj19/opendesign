@@ -25,6 +25,9 @@ const PICK_PX: f32 = 8.0;
 /// How close to snap to an existing point, in screen pixels.
 const SNAP_PX: f32 = 10.0;
 
+/// Finest grid spacing, in mm, unless Preferences say otherwise.
+pub const DEFAULT_GRID_MM: f32 = 10.0;
+
 /// What the 2D cursor snaps to while drafting.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Snap {
@@ -54,6 +57,8 @@ pub struct Canvas2D {
     /// Where the canvas was drawn last frame.
     rect: Rect,
     pub snap: Snap,
+    /// Finest grid spacing, in mm (see [`Canvas2D::grid_step`]).
+    pub grid_mm: f32,
     /// Points placed so far by the pen or internal-line tool.
     draft: Vec<OutlinePoint>,
     /// The tool that placed `draft`; switching tools drops the draft.
@@ -195,6 +200,7 @@ impl Default for Canvas2D {
             drag: None,
             rect: Rect::NOTHING,
             snap: Snap::default(),
+            grid_mm: DEFAULT_GRID_MM,
             draft: Vec::new(),
             draft_tool: Tool::Select,
             draft_owner: None,
@@ -398,7 +404,7 @@ impl Canvas2D {
 
     /// Spacing of the finest grid lines drawn, which is also the snap step.
     pub fn grid_step(&self) -> f32 {
-        let mut step_mm = 10.0;
+        let mut step_mm = self.grid_mm.max(0.1);
         while step_mm * self.zoom < 12.0 {
             step_mm *= 5.0;
         }
