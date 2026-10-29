@@ -12,6 +12,7 @@ pub mod edit;
 pub mod geometry;
 pub mod history;
 pub mod link;
+pub mod measure;
 pub mod piece;
 #[cfg(feature = "python-plugins")]
 pub mod plugin;
@@ -37,5 +38,9 @@ pub use document::{
 pub use geometry::Vec2;
 pub use history::History;
 pub use link::{LinkedCopy, Unlink};
+pub use measure::{
+    AddMeasurement, MeasureKind, Measurement, MeasurementId, OutlineSpot, RemoveMeasurement,
+    RenameMeasurement,
+};
 pub use piece::{CutPattern, MergePatterns};
 pub use seam::Side;
