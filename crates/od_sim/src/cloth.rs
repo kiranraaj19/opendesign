@@ -425,6 +425,10 @@ pub fn build(
         }
         pattern_ranges.push((*id, offset..particles.len()));
 
+        // How stiff each constraint is depends on which way it runs
+        // across the weave, measured on the flat piece against its grain.
+        let grain = pattern.grain_direction();
+        let span = |p: u32, q: u32| mesh.vertices[q as usize].pos - mesh.vertices[p as usize].pos;
         for &[a, b, c] in &mesh.faces {
             for (local_a, local_b) in [(a, b), (b, c), (c, a)] {
                 let (ga, gb) = (offset + local_a as usize, offset + local_b as usize);
@@ -435,7 +439,9 @@ pub fn build(
                         key.0,
                         key.1,
                         rest_length,
-                        pattern.fabric.stretch_compliance,
+                        pattern
+                            .fabric
+                            .stretch_compliance_at(span(local_a, local_b), grain),
                     ));
                 }
             }
@@ -460,13 +466,14 @@ pub fn build(
         for ((x, y), (p, q)) in bending_quads(&mesh.faces) {
             let (ga, gb) = (offset + p as usize, offset + q as usize);
             let mut rest_length = world[p as usize].distance(world[q as usize]);
-            let mut compliance = pattern.fabric.bending_compliance;
+            let mut compliance = pattern.fabric.bending_compliance_at(span(p, q), grain);
             let mm = flat(x).distance(flat(y));
             if let Some((a, b, fold)) = crossed(p, q).filter(|_| mm > 1e-6) {
                 let scale = world[x as usize].distance(world[y as usize]) / mm;
                 rest_length = folded_distance(a, b, flat(p), flat(q), fold.angle) * scale;
                 let s = fold.strength.clamp(0.0, 1.0);
-                compliance += (pattern.fabric.stretch_compliance - compliance) * s;
+                let stiff = pattern.fabric.stretch_compliance_at(span(p, q), grain);
+                compliance += (stiff - compliance) * s;
             }
             bending.push(DistanceConstraint::new(
                 ga.min(gb),
@@ -1098,6 +1105,64 @@ mod tests {
         );
         assert!(denim.structural[0].compliance < silk.structural[0].compliance);
         assert!(denim.bending[0].compliance < silk.bending[0].compliance);
+    }
+
+    #[test]
+    fn a_strip_stiff_along_its_warp_stretches_less_pulled_along_the_grain() {
+        use od_core::document::Fabric;
+        // How much longer a hanging strip gets with its warp at `grain`
+        // degrees to its length.
+        let stretch = |grain: f32| {
+            let mut doc = Document::new("test");
+            let mut strip = rectangle(1, "strip", 40.0, 200.0);
+            strip.grain_angle = grain;
+            strip.fabric = Fabric {
+                mass_per_area: 2.0,
+                stretch_compliance: 1e-6,
+                weft_stretch_compliance: 0.05,
+                shear_compliance: 0.05,
+                ..Fabric::cotton()
+            };
+            doc.patterns.push(strip);
+            let placements = placements_for(&doc);
+            let scene = build(&doc, &placements, None, &ClothConfig::default());
+            let mesh = &scene.pattern_meshes[0].1;
+            let near = |p: Vec2| {
+                (0..mesh.vertices.len())
+                    .min_by(|&a, &b| {
+                        mesh.vertices[a]
+                            .pos
+                            .distance(p)
+                            .total_cmp(&mesh.vertices[b].pos.distance(p))
+                    })
+                    .unwrap()
+            };
+            let (top, bottom) = (near(Vec2::new(20.0, 0.0)), near(Vec2::new(20.0, 200.0)));
+            let mut world = World::new(scene.particles.clone());
+            world.distance_constraints = scene.structural.clone();
+            // Hold the top edge and pull down the strip's length.
+            for (v, p) in mesh.vertices.iter().zip(&mut world.particles) {
+                if v.pos.y < 1e-3 {
+                    p.inv_mass = 0.0;
+                }
+            }
+            let at = |world: &World, i: usize| world.particles[i].position;
+            let start = at(&world, top).distance(at(&world, bottom));
+            world.gravity = (at(&world, bottom) - at(&world, top)).normalize() * 9.81;
+            for _ in 0..300 {
+                world.step(1.0 / 60.0, 8, &[]);
+            }
+            at(&world, top).distance(at(&world, bottom)) / start
+        };
+        let along = stretch(0.0);
+        let across = stretch(90.0);
+        assert!(along < 1.03, "pulled along the stiff warp: {along}");
+        // Across the grain it gives at least twice as much (about 6% here
+        // against 2%: the bias edges still let it give a little along).
+        assert!(
+            across - 1.0 > 2.0 * (along - 1.0) && across > along + 0.03,
+            "{along} along vs {across} across"
+        );
     }
 
     #[test]

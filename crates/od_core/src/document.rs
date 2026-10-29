@@ -344,18 +344,32 @@ pub enum FabricTexture {
 /// Every [`Pattern`] has one (see [`Pattern::fabric`]); [`od_sim`] reads the
 /// physical fields to set particle mass and constraint compliance, and
 /// `od_render`/`od_app` read `color`/`texture` to shade it in the 3D view.
+///
+/// Woven cloth behaves differently along its threads: the warp runs along
+/// the pattern's grainline ([`Pattern::grain_angle`]), the weft across it,
+/// and pulling on the bias (diagonally) shears the weave. So stretching
+/// and bending are set per direction; see [`Fabric::stretch_compliance_at`]
+/// for how a constraint at any angle mixes them.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(from = "crate::fabric::FabricFields")]
 pub struct Fabric {
     pub name: String,
     /// Mass of one square metre of fabric, in kg.
     pub mass_per_area: f32,
     /// XPBD compliance (inverse stiffness, m/N) of the constraints that
-    /// resist stretching. Lower is stiffer.
+    /// resist stretching along the warp (the grainline). Lower is stiffer.
     pub stretch_compliance: f32,
-    /// XPBD compliance of the constraints that resist folding. Real cloth
-    /// bends far more easily than it stretches, so this is normally much
-    /// higher (softer) than `stretch_compliance`.
+    /// Like `stretch_compliance`, across the grain (along the weft).
+    pub weft_stretch_compliance: f32,
+    /// Compliance against shearing the weave, for pulls on the bias.
+    pub shear_compliance: f32,
+    /// XPBD compliance of the constraints that resist folding the warp
+    /// threads (bending along the grainline). Real cloth bends far more
+    /// easily than it stretches, so this is normally much higher (softer)
+    /// than `stretch_compliance`.
     pub bending_compliance: f32,
+    /// Like `bending_compliance`, for folding the weft threads.
+    pub weft_bending_compliance: f32,
     /// Coefficient of friction against other surfaces, 0..1. Not yet read
     /// by `od_sim`'s collision (reserved for a future pass).
     pub friction: f32,
@@ -370,7 +384,10 @@ impl Fabric {
             name: "Cotton".into(),
             mass_per_area: 0.15,
             stretch_compliance: 1e-7,
+            weft_stretch_compliance: 2e-7,
+            shear_compliance: 5e-7,
             bending_compliance: 1e-5,
+            weft_bending_compliance: 1.5e-5,
             friction: 0.3,
             color: [235, 230, 210],
             texture: FabricTexture::Plain,
@@ -382,7 +399,10 @@ impl Fabric {
             name: "Silk".into(),
             mass_per_area: 0.05,
             stretch_compliance: 4e-7,
+            weft_stretch_compliance: 6e-7,
+            shear_compliance: 2e-6,
             bending_compliance: 8e-5,
+            weft_bending_compliance: 1e-4,
             friction: 0.1,
             color: [232, 226, 236],
             texture: FabricTexture::Flat,
@@ -394,7 +414,10 @@ impl Fabric {
             name: "Denim".into(),
             mass_per_area: 0.40,
             stretch_compliance: 2e-8,
+            weft_stretch_compliance: 4e-8,
+            shear_compliance: 1e-7,
             bending_compliance: 2e-6,
+            weft_bending_compliance: 3e-6,
             friction: 0.5,
             color: [68, 88, 128],
             texture: FabricTexture::Twill,
