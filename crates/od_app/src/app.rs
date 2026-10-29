@@ -1081,6 +1081,9 @@ fn restore_layout(storage: Option<&dyn eframe::Storage>) -> DockState<Tab> {
 /// Drive the real app headlessly: clicks and keys go through egui exactly as
 /// they would from a mouse and keyboard, no window or GPU needed.
 #[cfg(test)]
+mod fabric_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use egui_kittest::{

@@ -47,7 +47,12 @@ fn material_for_fabric(fabric: &od_core::Fabric) -> Material {
     use od_render::material::{plain_weave, twill_weave};
     let [r, g, b] = fabric.color;
     let base = linear([r, g, b, 255]);
-    let id = fabric_texture_id(&fabric.name);
+    // The texture is drawn in the fabric's colour and weave, so a recoloured
+    // fabric (edited, or another colourway) needs its own texture.
+    let id = fabric_texture_id(&format!(
+        "{}/{:?}/{:?}",
+        fabric.name, fabric.color, fabric.texture
+    ));
     match fabric.texture {
         FabricTexture::Flat => Material::flat(base),
         FabricTexture::Plain => {
