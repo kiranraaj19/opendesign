@@ -886,6 +886,13 @@ impl OpenDesignApp {
                 if ui.button("Reset layout").clicked() {
                     self.dock = default_layout();
                 }
+                ui.menu_button("Workspace", |ui| {
+                    for mode in crate::layouts::TaskMode::ALL {
+                        if ui.button(mode.label()).on_hover_text(mode.tip()).clicked() {
+                            self.dock = mode.layout();
+                        }
+                    }
+                });
                 ui.separator();
                 egui::widgets::global_theme_preference_buttons(ui);
                 ui.separator();

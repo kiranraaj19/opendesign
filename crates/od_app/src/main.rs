@@ -5,6 +5,7 @@ mod app;
 mod export;
 mod files;
 mod i18n;
+mod layouts;
 mod panels;
 mod pdf;
 mod prefs;

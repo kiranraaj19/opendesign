@@ -396,3 +396,27 @@ fn screenshots_of_the_workspace_tools() {
     click(&mut h, "Preferences…");
     shot(&mut h, "preferences.png");
 }
+
+// ---- Task modes ----
+
+#[test]
+fn workspace_modes_rearrange_the_panels_and_reset_restores_them() {
+    let mut h = harness();
+    let width = |h: &Harness<'_, OpenDesignApp>, label: &str| h.get_by_label(label).rect().width();
+    let (flat, solid) = (width(&h, "2D pattern canvas"), width(&h, "3D garment view"));
+    assert!((flat - solid).abs() < 40.0, "side by side to start with");
+
+    click(&mut h, "View");
+    click(&mut h, "Workspace \u{23f5}");
+    click(&mut h, "Pattern");
+    assert!(width(&h, "2D pattern canvas") > 2.0 * width(&h, "3D garment view"));
+
+    click(&mut h, "View");
+    click(&mut h, "Workspace \u{23f5}");
+    click(&mut h, "Simulation");
+    assert!(width(&h, "3D garment view") > 2.0 * width(&h, "2D pattern canvas"));
+
+    click(&mut h, "View");
+    click(&mut h, "Reset layout");
+    assert!((width(&h, "2D pattern canvas") - flat).abs() < 1.0);
+}
