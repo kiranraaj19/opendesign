@@ -1127,6 +1127,9 @@ pub struct Document {
     /// Named sets of pieces (see [`crate::workspace::Group`]).
     #[serde(default)]
     pub groups: Vec<crate::workspace::Group>,
+    /// Saved 3D camera views.
+    #[serde(default)]
+    pub camera_views: Vec<crate::workspace::CameraView>,
     next_id: u64,
     next_sewing_id: u64,
     next_tack_id: u64,
@@ -1147,6 +1150,7 @@ impl Document {
             tacks: Vec::new(),
             size_chart: SizeChart::default(),
             groups: Vec::new(),
+            camera_views: Vec::new(),
             next_id: 1,
             next_sewing_id: 1,
             next_tack_id: 1,

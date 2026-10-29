@@ -1,5 +1,5 @@
-//! Named sets of pieces (groups), kept in the document so they are saved
-//! with the project.
+//! Named sets of pieces (groups) and saved 3D camera views, both kept in
+//! the document so they are saved with the project.
 
 use serde::{Deserialize, Serialize};
 
@@ -33,6 +33,17 @@ impl Group {
             .copied()
             .filter(|&id| doc.pattern(id).is_some())
     }
+}
+
+/// A 3D camera position saved under a name: an orbit about `target`
+/// (world metres, Y up), as `od_render::camera::OrbitCamera` keeps it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CameraView {
+    pub name: String,
+    pub target: [f32; 3],
+    pub yaw: f32,
+    pub pitch: f32,
+    pub distance: f32,
 }
 
 /// The first of "`stem` 1", "`stem` 2", ... not in `taken`.
@@ -71,6 +82,36 @@ impl Command for SetGroups {
 
     fn undo(&mut self, doc: &mut Document) {
         std::mem::swap(&mut doc.groups, &mut self.groups);
+    }
+}
+
+/// Replace the document's saved camera views with `views`, like
+/// [`SetGroups`].
+pub struct SetCameraViews {
+    label: String,
+    views: Vec<CameraView>,
+}
+
+impl SetCameraViews {
+    pub fn new(label: impl Into<String>, views: Vec<CameraView>) -> Self {
+        Self {
+            label: label.into(),
+            views,
+        }
+    }
+}
+
+impl Command for SetCameraViews {
+    fn label(&self) -> String {
+        self.label.clone()
+    }
+
+    fn apply(&mut self, doc: &mut Document) {
+        std::mem::swap(&mut doc.camera_views, &mut self.views);
+    }
+
+    fn undo(&mut self, doc: &mut Document) {
+        std::mem::swap(&mut doc.camera_views, &mut self.views);
     }
 }
 
@@ -142,6 +183,36 @@ mod tests {
         let loaded = project::from_json(&json.to_string()).unwrap();
         assert!(loaded.groups.is_empty());
         assert_eq!(loaded.patterns, doc.patterns);
+    }
+
+    #[test]
+    fn views_are_saved_with_exact_undo_and_old_files_load_without() {
+        let (mut doc, mut history, _) = two_patterns();
+        let views = vec![CameraView {
+            name: "Close up".into(),
+            target: [0.0, 1.2, 0.1],
+            yaw: 0.5,
+            pitch: -0.2,
+            distance: 1.5,
+        }];
+        let before = doc.clone();
+        history.execute(
+            &mut doc,
+            Box::new(SetCameraViews::new("Save view", views.clone())),
+        );
+        assert_eq!(doc.camera_views, views);
+        let loaded = project::from_json(&project::to_json(&doc)).unwrap();
+        assert_eq!(loaded, doc);
+        history.undo(&mut doc);
+        assert_eq!(doc, before);
+
+        let mut json: serde_json::Value = serde_json::from_str(&project::to_json(&doc)).unwrap();
+        json["document"]
+            .as_object_mut()
+            .unwrap()
+            .remove("camera_views");
+        let loaded = project::from_json(&json.to_string()).unwrap();
+        assert!(loaded.camera_views.is_empty());
     }
 
     #[test]

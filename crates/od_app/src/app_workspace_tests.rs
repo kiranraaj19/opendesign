@@ -211,3 +211,57 @@ fn the_group_menu_renames_refills_and_ungroups() {
     assert!(h.state().session.doc.groups.is_empty());
     assert_eq!(h.state().session.doc.patterns.len(), 3, "the pieces stay");
 }
+
+// ---- Saved camera views ----
+
+#[test]
+fn a_saved_view_brings_the_camera_back_and_is_saved_with_the_project() {
+    let mut h = harness();
+    click(&mut h, "Top");
+    let top = h.state().session.viewport.camera;
+    click(&mut h, "Saved views");
+    assert!(h.query_by_label("No saved views yet.").is_some());
+    let field = text_field(&h, "View 1");
+    field.focus();
+    field.type_text(" from above");
+    h.run();
+    click(&mut h, "Save view");
+    let s = &h.state().session;
+    assert_eq!(s.doc.camera_views.len(), 1);
+    assert_eq!(s.doc.camera_views[0].name, "View 1 from above");
+    assert_eq!(last_step(&h), "Save view View 1 from above");
+    assert!(s.history.is_dirty(), "a saved view is part of the project");
+
+    // Look from the front, then jump back.
+    h.key_press(Key::Escape);
+    h.run();
+    click(&mut h, "Front");
+    assert_ne!(h.state().session.viewport.camera, top);
+    click(&mut h, "Saved views");
+    click(&mut h, "View 1 from above");
+    assert_eq!(h.state().session.viewport.camera, top);
+
+    // It round-trips through a project file.
+    let json = od_core::project::to_json(&h.state().session.doc);
+    let loaded = od_core::project::from_json(&json).unwrap();
+    assert_eq!(loaded.camera_views, h.state().session.doc.camera_views);
+
+    // Deleting it is one undo step.
+    click(&mut h, "Saved views");
+    click(&mut h, "Delete");
+    assert!(h.state().session.doc.camera_views.is_empty());
+    press(&mut h, Modifiers::COMMAND, Key::Z);
+    assert_eq!(h.state().session.doc.camera_views.len(), 1);
+}
+
+#[test]
+fn saving_a_view_under_an_existing_name_replaces_it() {
+    let mut h = harness();
+    let s = &mut h.state_mut().session;
+    crate::panels::views::save(s, "Side");
+    s.viewport.camera.orbit(0.7, 0.0);
+    crate::panels::views::save(s, "Side");
+    assert_eq!(s.doc.camera_views.len(), 1);
+    assert_eq!(s.doc.camera_views[0].yaw, s.viewport.camera.yaw);
+    assert_eq!(s.history.undo_label().as_deref(), Some("Update view Side"));
+}

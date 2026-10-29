@@ -988,6 +988,9 @@ fn view_buttons(ui: &mut egui::Ui, s: &mut Session) -> Option<ViewAction> {
     {
         action = Some(ViewAction::Frame);
     }
+    ui.menu_button("Saved views", |ui| super::views::menu(ui, s))
+        .response
+        .on_hover_text("Save the camera under a name, or go back to a saved one");
     ui.separator();
     ui.menu_button("Show in 3D", |ui| {
         let show = &mut s.viewport.show;
