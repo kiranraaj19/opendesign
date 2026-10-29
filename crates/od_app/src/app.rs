@@ -703,6 +703,18 @@ impl OpenDesignApp {
                             files.error = Some(err);
                         }
                     }
+                    if ui
+                        .button("Garment model for reference (OBJ, glTF)…")
+                        .on_hover_text(
+                            "Show a finished garment see-through in the 3D view, to compare the drape with. It isn't simulated or saved.",
+                        )
+                        .clicked()
+                    {
+                        if let Some(err) = crate::import::import_reference_dialog(s) {
+                            files.error = Some(err);
+                        }
+                    }
+                    crate::import::reference_menu(ui, s);
                 });
                 ui.menu_button("Export", |ui| {
                     ui.add_enabled_ui(crate::export::garment_mesh(s).is_some(), |ui| {
@@ -3337,6 +3349,41 @@ mod tests {
         assert!(h.state().session.doc.patterns.is_empty());
         assert!(recovery::find(&dir).is_none());
         assert!(h.query_by_label("Recover unsaved work?").is_none());
+    }
+
+    #[test]
+    fn a_garment_model_is_shown_for_reference_and_can_be_removed() {
+        let dir = temp_dir("reference_obj");
+        let path = dir.join("shirt.obj");
+        // A triangle in centimetres at chest height.
+        std::fs::write(&path, "v 0 120 0\nv 40 120 0\nv 0 150 10\nf 1 2 3\n").unwrap();
+        let mut h = harness();
+        crate::import::import_reference(&mut h.state_mut().session, &path).unwrap();
+        h.run();
+        {
+            let s = &h.state().session;
+            let r = s.viewport.reference.as_ref().unwrap();
+            assert!(r.shown);
+            let b = r.mesh.bounds().unwrap();
+            assert!((b.min.y - 1.2).abs() < 1e-4, "kept in place, in metres");
+            assert!(!s.history.is_dirty(), "not part of the document");
+        }
+        click(&mut h, "File");
+        click(&mut h, "Import ⏵");
+        click(&mut h, "Show shirt.obj");
+        assert!(!h.state().session.viewport.reference.as_ref().unwrap().shown);
+        if h.query_by_label("Remove reference garment").is_none() {
+            // The click closed the menu.
+            click(&mut h, "File");
+            click(&mut h, "Import ⏵");
+        }
+        click(&mut h, "Remove reference garment");
+        assert!(h.state().session.viewport.reference.is_none());
+
+        let bad = dir.join("broken.obj");
+        std::fs::write(&bad, "v 0 0 0\n").unwrap();
+        let err = crate::import::import_reference(&mut h.state_mut().session, &bad);
+        assert!(err.unwrap_err().contains("no triangles"));
     }
 
     /// Like the darts and pleats screenshots above, for Phase 5: pieces

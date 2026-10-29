@@ -214,6 +214,8 @@ pub struct Viewport3D {
     /// Showing the avatar's arrangement points, to click one and place the
     /// selected patterns there.
     pub arranging: bool,
+    /// An imported garment model drawn for reference, not simulated.
+    pub reference: Option<crate::import::Reference>,
 }
 
 /// Things the 3D view can hide, to see the garment more clearly.
@@ -275,6 +277,7 @@ impl Viewport3D {
             gizmo: None,
             arranging: false,
             frame_selection: false,
+            reference: None,
         }
     }
 
@@ -1235,7 +1238,7 @@ fn paint(ui: &mut egui::Ui, rect: Rect, s: &Session, placed: &[PlacedPattern<Pat
                     .map(|pat| material_for_fabric(&pat.fabric))
             })
             .collect();
-        let frame = view::compose_frame(FrameInput {
+        let mut frame = view::compose_frame(FrameInput {
             camera: &v.camera,
             aspect: aspect(rect),
             encode_srgb: !targets.color.is_srgb(),
@@ -1252,6 +1255,7 @@ fn paint(ui: &mut egui::Ui, rect: Rect, s: &Session, placed: &[PlacedPattern<Pat
             pattern_materials: Some(&materials),
             display: v.display,
         });
+        crate::import::draw_reference(&mut frame, v.reference.as_ref(), color(pal.accent));
         painter.add(egui_wgpu::Callback::new_paint_callback(
             rect,
             SceneCallback { frame },
@@ -2186,6 +2190,48 @@ mod tests {
             export_turntable_frames(&headless, &dir, 1, size, true),
             Err(NO_GPU.to_string())
         );
+    }
+
+    /// A reference garment drawn see-through over the avatar, for a look
+    /// (Phase 5 of the CLO3D gap work).
+    #[test]
+    #[ignore = "writes a screenshot; run with --ignored"]
+    fn screenshot_of_a_reference_garment() {
+        let Some(renderer) = WindowLikeRenderer::new() else {
+            eprintln!("no GPU adapter; skipping");
+            return;
+        };
+        let rs = renderer.rs.clone();
+        let mut h = harness_with(Harness::builder().renderer(renderer));
+        h.state_mut().viewport = Viewport3D::new(Some(&rs));
+        // A tube around the torso, like a simple top.
+        let segments = 32;
+        let mut mesh = Mesh::default();
+        for i in 0..segments {
+            let a = i as f32 / segments as f32 * std::f32::consts::TAU;
+            let (sin, cos) = a.sin_cos();
+            for y in [0.95, 1.4] {
+                mesh.positions
+                    .push(glam::Vec3::new(0.2 * sin, y, 0.16 * cos));
+                mesh.normals.push(glam::Vec3::new(sin, 0.0, cos));
+            }
+            let (j, k) = (2 * i, 2 * ((i + 1) % segments));
+            mesh.indices.extend([j, k, j + 1, j + 1, k, k + 1]);
+        }
+        h.state_mut().viewport.reference = Some(crate::import::Reference {
+            name: "top.obj".into(),
+            mesh,
+            shown: true,
+        });
+        h.run();
+        h.run();
+        let image = h.render().expect("render");
+        let dir = std::env::var_os("OD_SHOTS")
+            .map_or_else(|| std::env::temp_dir().join("od_shots"), Into::into);
+        std::fs::create_dir_all(&dir).unwrap();
+        image
+            .save(Path::new(&dir).join("reference-garment.png"))
+            .unwrap();
     }
 
     /// The whole app on a real (often software) GPU: the avatar is drawn,
