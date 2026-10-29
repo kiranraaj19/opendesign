@@ -58,11 +58,12 @@ pub enum Tool {
     Tack,
     Dart,
     Pleat,
+    Measure,
 }
 
 impl Tool {
     /// Toolbar order, with button label, shortcut key and tooltip.
-    const BUTTONS: [(Tool, &'static str, Key, &'static str); 12] = [
+    const BUTTONS: [(Tool, &'static str, Key, &'static str); 13] = [
         (
             Tool::Select,
             "Select",
@@ -135,6 +136,12 @@ impl Tool {
             Key::Q,
             "Drag along a pattern where the first pleat folds; the rest step to the right (Q)",
         ),
+        (
+            Tool::Measure,
+            "Measure",
+            Key::M,
+            "Click two outline points to measure between them; Shift+click to measure along the outline (M)",
+        ),
     ];
 
     pub fn name(self) -> &'static str {
@@ -151,6 +158,7 @@ impl Tool {
             Tool::Tack => "Tack",
             Tool::Dart => "Dart",
             Tool::Pleat => "Pleat",
+            Tool::Measure => "Measure",
         }
     }
 }
@@ -855,6 +863,13 @@ impl OpenDesignApp {
                     });
                 });
                 ui.separator();
+                ui.checkbox(&mut s.canvas.measure.all_sizes, "Show all graded sizes")
+                    .on_hover_text("Draw every graded size faintly around the size being previewed");
+                if ui.button("Measurement chart").clicked() {
+                    s.canvas.measure.chart_open = true;
+                    ui.close();
+                }
+                ui.separator();
                 if ui.button("Reset layout").clicked() {
                     self.dock = default_layout();
                 }
@@ -1006,6 +1021,7 @@ impl eframe::App for OpenDesignApp {
                 ui.label(format!("Version {}", env!("CARGO_PKG_VERSION")));
             });
 
+        panels::measure2d::chart_window(&ctx, &mut self.session);
         self.files.dialogs(&mut self.session, &ctx);
         self.files.update_title(&self.session, &ctx);
     }
@@ -1077,6 +1093,10 @@ fn restore_layout(storage: Option<&dyn eframe::Storage>) -> DockState<Tab> {
         .filter(|dock| Tab::ALL.iter().all(|tab| dock.find_tab(tab).is_some()))
         .unwrap_or_else(default_layout)
 }
+
+#[cfg(test)]
+#[path = "measure_tests.rs"]
+mod measure_tests;
 
 /// Drive the real app headlessly: clicks and keys go through egui exactly as
 /// they would from a mouse and keyboard, no window or GPU needed.

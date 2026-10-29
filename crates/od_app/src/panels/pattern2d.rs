@@ -73,7 +73,7 @@ pub struct Canvas2D {
     /// by the time it is released.
     sew_drag_start: Option<Vec2>,
     /// Unsnapped pointer position, for hover highlights and readouts.
-    hover: Option<Vec2>,
+    pub(crate) hover: Option<Vec2>,
     /// Fit the selected patterns in view on the next frame.
     pub frame_selection: bool,
     /// Pan to this pattern on the next frame if it is out of view, e.g.
@@ -85,6 +85,8 @@ pub struct Canvas2D {
     /// How far an outline dart reaches into the piece, in mm.
     pub dart_depth: f32,
     pub pleat: PleatSettings,
+    /// The Measure tool, size overlay and measurement chart.
+    pub measure: crate::panels::measure2d::Measure2D,
 }
 
 /// What the Pleat tool lays out.
@@ -208,6 +210,7 @@ impl Default for Canvas2D {
             dart_width: 30.0,
             dart_depth: 80.0,
             pleat: PleatSettings::default(),
+            measure: Default::default(),
         }
     }
 }
@@ -282,7 +285,7 @@ impl Canvas2D {
     }
 
     /// Snap an outline parameter onto a corner point within reach.
-    fn snap_param(&self, pattern: &Pattern, t: f32) -> f32 {
+    pub(crate) fn snap_param(&self, pattern: &Pattern, t: f32) -> f32 {
         if !self.snap.points {
             return t;
         }
@@ -382,11 +385,11 @@ impl Canvas2D {
         })
     }
 
-    fn to_screen(&self, rect: Rect, p: Vec2) -> Pos2 {
+    pub(crate) fn to_screen(&self, rect: Rect, p: Vec2) -> Pos2 {
         rect.center() + self.pan + Px::new(p.x, p.y) * self.zoom
     }
 
-    fn to_doc(&self, rect: Rect, p: Pos2) -> Vec2 {
+    pub(crate) fn to_doc(&self, rect: Rect, p: Pos2) -> Vec2 {
         let v = (p - rect.center() - self.pan) / self.zoom;
         Vec2::new(v.x, v.y)
     }
@@ -473,7 +476,12 @@ impl Canvas2D {
 
     /// The pattern whose outline passes nearest `p` (within reach),
     /// preferring the selected one, with its flattened outline.
-    fn edge_at(&self, doc: &Document, selection: Option<PatternId>, p: Vec2) -> Option<EdgeHit> {
+    pub(crate) fn edge_at(
+        &self,
+        doc: &Document,
+        selection: Option<PatternId>,
+        p: Vec2,
+    ) -> Option<EdgeHit> {
         let reach = self.px(PICK_PX);
         let order = selection.into_iter().chain(
             doc.patterns
@@ -513,12 +521,12 @@ impl Canvas2D {
     }
 }
 
-struct EdgeHit {
-    id: PatternId,
+pub(crate) struct EdgeHit {
+    pub id: PatternId,
     gap: f32,
-    pos: Vec2,
+    pub pos: Vec2,
     /// Outline parameter (see [`od_core::document::FlatPoint`]).
-    param: f32,
+    pub param: f32,
 }
 
 pub fn ui(ui: &mut egui::Ui, s: &mut Session) {
@@ -579,11 +587,13 @@ pub fn ui(ui: &mut egui::Ui, s: &mut Session) {
         Tool::Tack => handle_tack(ui, &response, rect, s, typing),
         Tool::Dart => handle_dart(&response, rect, s),
         Tool::Pleat => handle_pleat(&response, rect, s),
+        Tool::Measure => crate::panels::measure2d::handle(ui, &response, rect, s, typing),
     }
 
     // Background and grid.
     painter.rect_filled(rect, 0.0, pal.canvas_bg);
     draw_grid(&painter, rect, &s.canvas, pal);
+    crate::panels::measure2d::draw_sizes(&painter, rect, s, pal);
 
     // Previewing a graded size only changes what's drawn: editing always
     // acts on the base pattern, so every tool keeps working off real
@@ -604,6 +614,7 @@ pub fn ui(ui: &mut egui::Ui, s: &mut Session) {
     }
     draw_sewing_lines(&painter, rect, s, pal);
     draw_overlays(&painter, rect, s, pal);
+    crate::panels::measure2d::draw(&painter, rect, s, pal);
 
     let hint = match s.tool {
         Tool::Select => {
@@ -634,6 +645,9 @@ pub fn ui(ui: &mut egui::Ui, s: &mut Session) {
         }
         Tool::Trim => {
             "Click to place a button (Shift+click: snap) · click a trim to remove it"
+        }
+        Tool::Measure => {
+            "Click two outline points to measure between them (Shift: along the outline) · Esc cancels"
         }
         Tool::Sew => match &s.canvas.sew_pending {
             Some(SewBuild::Edges { active, .. }) => {

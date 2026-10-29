@@ -66,6 +66,7 @@ pub fn ui(ui: &mut egui::Ui, s: &mut Session) {
     ui.add_space(8.0);
     bom_section(ui, s);
     tool_section(ui, s);
+    crate::panels::measure2d::section(ui, s);
 
     if let Some(id) = s.selected_tack.filter(|&id| s.doc.tack(id).is_some()) {
         ui.add_space(8.0);

@@ -235,21 +235,25 @@ impl Command for RemoveMeasurement {
 
 pub struct RenameMeasurement {
     id: MeasurementId,
+    /// The new name, swapped with the old one on apply and undo.
     name: String,
+    label: String,
 }
 
 impl RenameMeasurement {
     pub fn new(id: MeasurementId, name: impl Into<String>) -> Self {
+        let name = name.into();
         Self {
             id,
-            name: name.into(),
+            label: format!("Rename to {name}"),
+            name,
         }
     }
 }
 
 impl Command for RenameMeasurement {
     fn label(&self) -> String {
-        format!("Rename to {}", self.name)
+        self.label.clone()
     }
 
     // Swapping makes apply and undo the same operation.
@@ -414,6 +418,7 @@ mod tests {
         let added = doc.clone();
         history.execute(&mut doc, Box::new(RenameMeasurement::new(first, "Hem")));
         assert_eq!(doc.measurement(first).unwrap().name, "Hem");
+        assert_eq!(history.undo_label().as_deref(), Some("Rename to Hem"));
         history.execute(&mut doc, Box::new(RemoveMeasurement::new(first)));
         assert_eq!(doc.measurements.len(), 1);
         history.undo(&mut doc);
