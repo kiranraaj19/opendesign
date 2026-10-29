@@ -62,6 +62,13 @@ without this step.
 | Drape | Drape button above the 3D view; Pin and Strain toggles while draping; Cloth collision keeps pieces from passing through each other |
 | Particle distance | Properties -> Simulation: spacing of a piece's simulation particles (default 20 mm; smaller is finer and slower) |
 | Select / move | Select tool (`V`), click or drag a pattern; `Shift`/`Ctrl`+click adds or removes, drag a box from empty space to select what it touches, `Ctrl+A` selects all, `Esc` clears. Moves, flips and deletes act on every selected piece |
+| Import DXF patterns | File → Import → Patterns from DXF (AAMA)…, or drop a `.dxf` on the window: outlines, seam allowance, grainline, notches, internal and fold lines, darts. One undo removes the import |
+| Recover unsaved work | Unsaved changes are written to a recovery file every minute (never over your own file); after a crash, the next start offers to restore them |
+| Reference garment | File → Import → Garment model for reference (OBJ, glTF): drawn see-through in the 3D view, not simulated |
+| Fabric editor | Properties → Edit fabric: weight, stretch along and across the grain and on the bias, bending each way, friction, colour, weave. Save or load a fabric file (`.odfab`); loaded fabrics are listed in Library → Fabrics |
+| Colourways | With nothing selected, Properties → Colourways: save the pieces' fabric colours under a name and switch between colourways |
+| Measure | Measure tool (`M`): click two outline points for a straight measurement (`Shift` for one along the outline), named in Properties. View → Measurement chart lists them at every size (Copy as CSV); View → Show all graded sizes draws every size |
+| Measure the body | Measure body above the 3D view: Circumference at a clicked height, or Tape along the avatar's surface between clicks |
 | Align, distribute | Select several pieces: Properties → Align (or right-click → Align) lines up their left, right, top or bottom edges or their centres; Distribute across/down leaves equal gaps (3 or more pieces, the outer two stay put). Locked pieces stay where they are |
 | Groups | Objects tab → Group selected names the selected pieces as a group, saved with the project; click the group to select its pieces again (`Shift` adds), right-click it to rename, set it to the selection or ungroup |
 | Saved camera views | Saved views above the 3D view: type a name and Save view to keep the current camera with the project; click a saved view to go back to it |
@@ -91,7 +98,7 @@ the default arrangement.
 ### Project files
 
 Projects are saved as `.odproj`: versioned JSON
-(`{"format": "opendesign-project", "version": 12, "document": {...}}`).
+(`{"format": "opendesign-project", "version": 13, "document": {...}}`).
 Older versions are upgraded when opened.
 Saves go through a temporary file and a rename, so a crash mid-save never
 leaves a half-written project. The title bar shows `*` and the status bar
