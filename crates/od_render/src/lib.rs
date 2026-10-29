@@ -11,6 +11,7 @@ pub mod export;
 pub mod gpu;
 pub mod import;
 pub mod material;
+pub mod measure;
 pub mod mesh;
 pub mod pattern;
 pub mod pick;
