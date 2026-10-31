@@ -11,6 +11,7 @@ pub mod camera;
 pub mod export;
 pub mod gpu;
 pub mod import;
+pub mod light;
 pub mod material;
 pub mod measure;
 pub mod mesh;

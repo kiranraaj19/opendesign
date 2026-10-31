@@ -9,7 +9,9 @@ use crate::material::Material;
 use crate::mesh::{Aabb, Mesh};
 use crate::pattern::{pattern_mesh, Placement, RingLayout};
 use crate::pick::{closest_hit, Ray};
-use crate::scene::{blob_shadow, floor_grid, AvatarDraw, Color, Frame, Globals, GridColors};
+use crate::scene::{
+    blob_shadow, cyclorama, floor_grid, AvatarDraw, Color, Frame, Globals, GridColors,
+};
 
 pub struct Theme {
     pub avatar: Color,
@@ -98,7 +100,35 @@ pub struct Display {
     /// Leave out each piece's outline, as for a finished render, where
     /// the seams should read as cloth rather than as drawn lines.
     pub hide_outlines: bool,
+    pub backdrop: Backdrop,
 }
+
+/// What the scene stands on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Backdrop {
+    /// The floor grid, as in the editor.
+    #[default]
+    Grid,
+    /// A photo studio's seamless sweep, floor curving up into a wall
+    /// behind the subject.
+    Studio,
+    /// Nothing but the contact shadow, over the background colour.
+    None,
+}
+
+impl Backdrop {
+    pub fn parse(name: &str) -> Option<Self> {
+        match name {
+            "grid" => Some(Backdrop::Grid),
+            "studio" => Some(Backdrop::Studio),
+            "none" => Some(Backdrop::None),
+            _ => None,
+        }
+    }
+}
+
+/// The studio sweep's colour, a light neutral grey (linear).
+pub const STUDIO_BACKDROP: Color = [0.42, 0.42, 0.42, 1.0];
 
 /// How solid see-through surfaces are.
 const AVATAR_SEE_THROUGH: f32 = 0.25;
@@ -182,8 +212,15 @@ pub fn compose_frame<K: PartialEq>(input: FrameInput<'_, K>) -> Frame {
             frame.add_outline(&p.outline, p.normal, line);
         }
     }
-    frame.lines.extend(floor_grid(2.0, 0.1, 5, &theme.grid));
     let b = input.avatar_bounds;
+    match input.display.backdrop {
+        Backdrop::Grid => frame.lines.extend(floor_grid(2.0, 0.1, 5, &theme.grid)),
+        Backdrop::Studio => {
+            let floor = Vec3::new(b.center().x, 0.0, b.center().z);
+            frame.add_surface(&cyclorama(floor, input.camera.back()), STUDIO_BACKDROP);
+        }
+        Backdrop::None => {}
+    }
     let size = b.size();
     frame.shadow = blob_shadow(
         Vec2::new(b.center().x, b.center().z),
@@ -500,6 +537,7 @@ mod tests {
             cloth: Style::Wireframe,
             mesh_edges: false,
             hide_outlines: false,
+            backdrop: Backdrop::Grid,
         });
         assert!(wire.avatar.is_none() && wire.surfaces.is_empty());
         assert!(wire.lines.len() > solid.lines.len() + avatar.indices.len() / 2);
@@ -509,6 +547,7 @@ mod tests {
             cloth: Style::SeeThrough,
             mesh_edges: false,
             hide_outlines: false,
+            backdrop: Backdrop::Grid,
         });
         assert!(clear.avatar.is_none() && clear.surfaces.is_empty());
         assert!(clear.translucent.iter().all(|v| v.color[3] < 1.0));

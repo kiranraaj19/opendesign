@@ -8,6 +8,7 @@ use bytemuck::{Pod, Zeroable};
 use glam::{Vec2, Vec3};
 
 use crate::camera::OrbitCamera;
+use crate::light::Lighting;
 use crate::material::Material;
 use crate::mesh::Mesh;
 
@@ -63,6 +64,17 @@ pub struct Globals {
     /// and `scene.wgsl`); `0.0` (the default) for the live viewport's
     /// ordinary two-light rig.
     pub params: [f32; 4],
+    /// Image-based lighting, unused while `ibl.x` is 0 (the live
+    /// viewport): spherical-harmonic coefficients of the diffuse light
+    /// (see [`crate::light::Ibl::sh`]), rgb in xyz.
+    pub sh: [[f32; 4]; 9],
+    /// The light rig's frame: xy = the camera's horizontal right (world x,
+    /// z), zw = its horizontal back, towards the camera.
+    pub rig: [f32; 4],
+    /// x: environment strength, 0 for the hemisphere ambient instead.
+    /// y: the last reflection mip level. z: surface roughness for
+    /// reflections.
+    pub ibl: [f32; 4],
 }
 
 impl Globals {
@@ -82,9 +94,42 @@ impl Globals {
             ground: [0.10, 0.09, 0.09, 0.0],
             eye: camera.eye().extend(1.0).to_array(),
             params: [f32::from(u8::from(encode_srgb)), 0.0, 0.0, 0.0],
+            sh: [[0.0; 4]; 9],
+            rig: [1.0, 0.0, 0.0, 1.0],
+            ibl: [0.0; 4],
         }
     }
+
+    /// Light with an environment and a key light instead of the two-light
+    /// rig, for a final render. The rig turns with the camera: the
+    /// environment's front faces the camera whichever way it looks.
+    pub fn apply_lighting(&mut self, camera: &OrbitCamera, lighting: &Lighting) {
+        let (right, _) = camera.basis();
+        let right = Vec3::new(right.x, 0.0, right.z)
+            .try_normalize()
+            .unwrap_or(Vec3::X);
+        let back = right.cross(Vec3::Y);
+        let k = lighting.key;
+        let key = (right * k.x + Vec3::Y * k.y + back * k.z).normalize_or(Vec3::Y);
+        self.key = key.extend(lighting.key_intensity).to_array();
+        self.fill[3] = 0.0;
+        for (out, c) in self.sh.iter_mut().zip(&lighting.ibl.sh) {
+            *out = c.extend(0.0).to_array();
+        }
+        self.rig = [right.x, right.z, back.x, back.z];
+        let last_level = lighting.ibl.levels.len().saturating_sub(1) as f32;
+        self.ibl = [
+            lighting.environment_intensity,
+            last_level,
+            FABRIC_ROUGHNESS,
+            0.0,
+        ];
+    }
 }
+
+/// How rough surfaces are for environment reflections until materials
+/// carry their own roughness: matte, like most woven fabric.
+const FABRIC_ROUGHNESS: f32 = 0.7;
 
 /// sRGB byte to linear light.
 pub fn srgb_to_linear(c: u8) -> f32 {
@@ -272,6 +317,53 @@ fn planar_basis(normal: Vec3) -> (Vec3, Vec3) {
     (right, up)
 }
 
+/// A photo studio's seamless sweep around `floor` (a point on the floor
+/// under the subject): floor running towards the camera, curving up into
+/// a wall behind the subject. `towards_camera` is turned flat, so the wall
+/// stands behind the subject from any side; normals face the subject.
+pub fn cyclorama(floor: Vec3, towards_camera: Vec3) -> Mesh {
+    const FRONT: f32 = 8.0;
+    const BEHIND: f32 = 2.5;
+    const RADIUS: f32 = 1.2;
+    const HEIGHT: f32 = 7.0;
+    const HALF_WIDTH: f32 = 9.0;
+    const BEND: usize = 16;
+    let back = Vec3::new(towards_camera.x, 0.0, towards_camera.z)
+        .try_normalize()
+        .unwrap_or(Vec3::Z);
+    let side = Vec3::Y.cross(back);
+    // The profile as (distance towards the camera, height, normal).
+    let mut profile = vec![(FRONT, 0.0, Vec2::Y), (RADIUS - BEHIND, 0.0, Vec2::Y)];
+    for i in 1..BEND {
+        let a = i as f32 / BEND as f32 * std::f32::consts::FRAC_PI_2;
+        let normal = Vec2::new(a.sin(), a.cos());
+        let centre = Vec2::new(RADIUS - BEHIND, RADIUS);
+        let p = centre - normal * RADIUS;
+        profile.push((p.x, p.y, normal));
+    }
+    profile.push((-BEHIND, RADIUS, Vec2::X));
+    profile.push((-BEHIND, HEIGHT, Vec2::X));
+
+    let mut mesh = Mesh::default();
+    for &(along, up, normal) in &profile {
+        for s in [-HALF_WIDTH, HALF_WIDTH] {
+            mesh.positions
+                .push(floor + back * along + Vec3::Y * up + side * s);
+            mesh.normals.push(back * normal.x + Vec3::Y * normal.y);
+        }
+    }
+    for i in 0..profile.len() as u32 - 1 {
+        let (a, b, c, d) = (i * 2, i * 2 + 1, i * 2 + 2, i * 2 + 3);
+        for [p, q, r] in [[a, b, d], [a, d, c]] {
+            let [pp, pq, pr] = [p, q, r].map(|v| mesh.positions[v as usize]);
+            let facing = (pq - pp).cross(pr - pp).dot(mesh.normals[p as usize]);
+            mesh.indices
+                .extend(if facing >= 0.0 { [p, q, r] } else { [p, r, q] });
+        }
+    }
+    mesh
+}
+
 pub struct GridColors {
     pub minor: Color,
     pub major: Color,
@@ -377,6 +469,25 @@ mod tests {
             grid.iter().filter(|v| v.color == colors.major).count(),
             8 * 4
         );
+    }
+
+    #[test]
+    fn cyclorama_faces_the_subject_and_stands_behind_it() {
+        let towards_camera = Vec3::new(1.0, 0.4, 1.0);
+        let sweep = cyclorama(Vec3::new(0.2, 0.0, -0.1), towards_camera);
+        for [a, b, c] in sweep.triangles() {
+            let n = (b - a).cross(c - a).normalize();
+            let to_subject = Vec3::new(0.2, 1.0, -0.1) - (a + b + c) / 3.0;
+            assert!(n.dot(to_subject) > 0.0, "a triangle faces away");
+        }
+        let bounds = sweep.bounds().unwrap();
+        assert!(bounds.min.y.abs() < 1e-6 && bounds.max.y > 5.0);
+        // The wall is on the far side from the camera.
+        let back = Vec3::new(1.0, 0.0, 1.0).normalize();
+        let wall = sweep.positions.iter().filter(|p| p.y > 2.0);
+        assert!(wall
+            .into_iter()
+            .all(|p| (*p - Vec3::new(0.2, 0.0, -0.1)).dot(back) < -2.0));
     }
 
     #[test]

@@ -9,6 +9,9 @@ struct Globals {
     ground: vec4<f32>,
     eye: vec4<f32>,
     params: vec4<f32>,  // x: encode to sRGB, y: "final render" quality
+    sh: array<vec4<f32>, 9>,
+    rig: vec4<f32>,
+    ibl: vec4<f32>,     // x: environment strength, y: last mip, z: roughness
 };
 
 @group(0) @binding(0) var<uniform> g: Globals;
@@ -18,6 +21,51 @@ struct Globals {
 // (see od_render::gpu::Renderer), so sampling it is a no-op.
 @group(1) @binding(0) var diffuse_tex: texture_2d<f32>;
 @group(1) @binding(1) var diffuse_samp: sampler;
+
+// The environment for image-based lighting, an equirect image whose mip
+// levels are prefiltered for rougher and rougher reflections (see
+// od_render::light). A black pixel while the live viewport has none.
+@group(2) @binding(0) var env_tex: texture_2d<f32>;
+@group(2) @binding(1) var env_samp: sampler;
+
+const PI: f32 = 3.14159265;
+
+// A world direction in the light rig's frame (x right, y up, z towards the
+// camera), which turns with the camera.
+fn to_rig(d: vec3<f32>) -> vec3<f32> {
+    return vec3<f32>(d.x * g.rig.x + d.z * g.rig.y, d.y, d.x * g.rig.z + d.z * g.rig.w);
+}
+
+// Must match od_render::light::uv.
+fn env_uv(d: vec3<f32>) -> vec2<f32> {
+    return vec2<f32>(atan2(d.x, d.z) / (2.0 * PI) + 0.5, acos(clamp(d.y, -1.0, 1.0)) / PI);
+}
+
+// Diffuse light / pi towards rig-frame normal n; the basis must match
+// od_render::light::sh_basis.
+fn irradiance(n: vec3<f32>) -> vec3<f32> {
+    var e = g.sh[0].rgb * 0.282095;
+    e += g.sh[1].rgb * (0.488603 * n.y);
+    e += g.sh[2].rgb * (0.488603 * n.z);
+    e += g.sh[3].rgb * (0.488603 * n.x);
+    e += g.sh[4].rgb * (1.092548 * n.x * n.y);
+    e += g.sh[5].rgb * (1.092548 * n.y * n.z);
+    e += g.sh[6].rgb * (0.315392 * (3.0 * n.z * n.z - 1.0));
+    e += g.sh[7].rgb * (1.092548 * n.x * n.z);
+    e += g.sh[8].rgb * (0.546274 * (n.x * n.x - n.y * n.y));
+    return max(e, vec3<f32>(0.0));
+}
+
+// Karis' analytic fit of the split-sum environment BRDF, in place of a
+// lookup texture: how much of the prefiltered reflection reaches the eye.
+fn env_brdf(f0: f32, roughness: f32, nv: f32) -> f32 {
+    let c0 = vec4<f32>(-1.0, -0.0275, -0.572, 0.022);
+    let c1 = vec4<f32>(1.0, 0.0425, 1.04, -0.04);
+    let r = roughness * c0 + c1;
+    let a004 = min(r.x * r.x, exp2(-9.28 * nv)) * r.x + r.y;
+    let ab = vec2<f32>(-1.04, 1.04) * a004 + r.zw;
+    return f0 * ab.x + ab.y;
+}
 
 fn encode(c: vec3<f32>) -> vec3<f32> {
     if g.params.x < 0.5 {
@@ -77,11 +125,23 @@ fn fs_lit(i: LitOut) -> @location(0) vec4<f32> {
     // on surfaces turned away from the camera (no real occluder geometry,
     // just a view-angle fade).
     let quality = step(0.5, g.params.y);
-    let rim_dir = normalize(-(g.key.xyz + g.fill.xyz));
-    let rim = max(dot(n, rim_dir), 0.0) * 0.3 * quality;
     let ao = mix(1.0, 0.8 + 0.2 * max(dot(n, view), 0.0), quality);
 
-    let rgb = base_color.rgb * (ambient * ao + vec3<f32>(key + fill + rim)) + vec3<f32>(spec);
+    // With an environment (g.ibl.x > 0, final renders only), it replaces
+    // the sky/ground ambient and the rim light, and adds soft reflections
+    // of the studio's light sources.
+    let lit_env = g.ibl.x > 0.0;
+    let rim_dir = normalize(-(g.key.xyz + g.fill.xyz));
+    let rim = max(dot(n, rim_dir), 0.0) * 0.3 * quality * select(1.0, 0.0, lit_env);
+    let env_diffuse = irradiance(to_rig(n)) * g.ibl.x;
+    let roughness = g.ibl.z;
+    let nv = max(dot(n, view), 1e-3);
+    let reflected = to_rig(reflect(-view, n));
+    let env_spec = textureSampleLevel(env_tex, env_samp, env_uv(reflected), roughness * g.ibl.y).rgb
+        * env_brdf(0.04, roughness, nv) * g.ibl.x;
+    let diffuse_light = select(ambient, env_diffuse, lit_env) * ao + vec3<f32>(key + fill + rim);
+
+    let rgb = base_color.rgb * diffuse_light + vec3<f32>(spec) + env_spec * ao;
     return vec4<f32>(encode(rgb), base_color.a);
 }
 

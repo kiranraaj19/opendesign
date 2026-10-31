@@ -6,6 +6,7 @@ use std::collections::HashMap;
 
 use wgpu::util::DeviceExt;
 
+use crate::light::Ibl;
 use crate::scene::{FlatVertex, Frame, Globals, LitVertex};
 
 pub const SHADER: &str = include_str!("scene.wgsl");
@@ -47,6 +48,11 @@ pub struct Renderer {
     /// This frame's textured draws, rebuilt in [`Self::prepare`] (their
     /// geometry can change every frame, e.g. while draping).
     textured: Vec<TexturedBatch>,
+    environment_layout: wgpu::BindGroupLayout,
+    environment_sampler: wgpu::Sampler,
+    /// Group 2: the image-based-lighting environment, and the
+    /// [`Ibl::id`] it came from (`None`: a black pixel, unused).
+    environment: (Option<u64>, wgpu::BindGroup),
 }
 
 struct TexturedBatch {
@@ -183,9 +189,52 @@ impl Renderer {
             1,
             &[255, 255, 255, 255],
         );
+        let environment_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("od_environment"),
+                entries: &[
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            multisampled: false,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 1,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                        count: None,
+                    },
+                ],
+            });
+        // Equirect: wraps round horizontally, stops at the poles.
+        let environment_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("od_environment"),
+            address_mode_u: wgpu::AddressMode::Repeat,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            mipmap_filter: wgpu::MipmapFilterMode::Linear,
+            ..Default::default()
+        });
+        let environment = make_environment_bind_group(
+            device,
+            queue,
+            &environment_layout,
+            &environment_sampler,
+            &[(1, 1, vec![half::f16::ZERO; 4])],
+        );
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("od_scene"),
-            bind_group_layouts: &[Some(&layout), Some(&texture_layout)],
+            bind_group_layouts: &[
+                Some(&layout),
+                Some(&texture_layout),
+                Some(&environment_layout),
+            ],
             immediate_size: 0,
         });
 
@@ -265,7 +314,7 @@ impl Renderer {
             shadow: pipeline("od_shadow", Kind::Shadow),
             globals,
             bind_group,
-            encode_srgb: !targets.color.is_srgb(),
+            encode_srgb: !targets.color.is_srgb() && targets.color != HDR_FORMAT,
             avatar: None,
             surfaces: Growable::new("od_surfaces", U::VERTEX),
             surface_indices: Growable::new("od_surface_indices", U::INDEX),
@@ -278,7 +327,38 @@ impl Renderer {
             default_texture,
             texture_cache: HashMap::new(),
             textured: Vec::new(),
+            environment_layout,
+            environment_sampler,
+            environment: (None, environment),
         }
+    }
+
+    /// Upload `ibl`'s environment for [`Globals::apply_lighting`] to use,
+    /// unless it's the one already uploaded.
+    pub fn set_lighting(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, ibl: &Ibl) {
+        if self.environment.0 == Some(ibl.id) {
+            return;
+        }
+        let levels: Vec<_> = ibl
+            .levels
+            .iter()
+            .map(|level| {
+                let texels = level
+                    .texels
+                    .iter()
+                    .flat_map(|[r, g, b]| [*r, *g, *b, 1.0].map(half::f16::from_f32))
+                    .collect();
+                (level.width, level.height, texels)
+            })
+            .collect();
+        let group = make_environment_bind_group(
+            device,
+            queue,
+            &self.environment_layout,
+            &self.environment_sampler,
+            &levels,
+        );
+        self.environment = (Some(ibl.id), group);
     }
 
     /// Whether colours must be sRGB-encoded in the shader, for
@@ -372,6 +452,7 @@ impl Renderer {
     pub fn paint(&self, pass: &mut wgpu::RenderPass<'_>) {
         pass.set_bind_group(0, &self.bind_group, &[]);
         pass.set_bind_group(1, &self.default_texture, &[]);
+        pass.set_bind_group(2, &self.environment.1, &[]);
 
         pass.set_pipeline(&self.lit);
         if let Some((_, avatar)) = &self.avatar {
@@ -423,6 +504,10 @@ impl Renderer {
     }
 }
 
+/// Colour format of a final render before tone mapping: floating point,
+/// so light brighter than white keeps its detail.
+pub const HDR_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
+
 /// Draw `frame` into an offscreen image and read it back as RGBA8 rows,
 /// for tests and snapshots. `targets.color` must be a 4-byte RGBA format.
 pub fn render_to_rgba(
@@ -431,9 +516,36 @@ pub fn render_to_rgba(
     renderer: &mut Renderer,
     targets: Targets,
     frame: &Frame,
-    [width, height]: [u32; 2],
+    size: [u32; 2],
     clear: wgpu::Color,
 ) -> Vec<u8> {
+    let mut encoder = device.create_command_encoder(&Default::default());
+    let image = draw_offscreen(
+        device,
+        queue,
+        &mut encoder,
+        renderer,
+        targets,
+        frame,
+        size,
+        clear,
+    );
+    read_rgba8(device, queue, encoder, &image)
+}
+
+/// Record drawing `frame` into a new single-sampled `targets.color`
+/// texture (resolving multisampling), and return it.
+#[allow(clippy::too_many_arguments)]
+pub fn draw_offscreen(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    encoder: &mut wgpu::CommandEncoder,
+    renderer: &mut Renderer,
+    targets: Targets,
+    frame: &Frame,
+    [width, height]: [u32; 2],
+    clear: wgpu::Color,
+) -> wgpu::Texture {
     let texture = |format, samples, usage| {
         device.create_texture(&wgpu::TextureDescriptor {
             label: Some("od_offscreen"),
@@ -452,14 +564,17 @@ pub fn render_to_rgba(
     };
     use wgpu::TextureUsages as U;
     let samples = targets.samples.max(1);
-    let resolved = texture(targets.color, 1, U::RENDER_ATTACHMENT | U::COPY_SRC);
+    let resolved = texture(
+        targets.color,
+        1,
+        U::RENDER_ATTACHMENT | U::COPY_SRC | U::TEXTURE_BINDING,
+    );
     let multisampled = (samples > 1).then(|| texture(targets.color, samples, U::RENDER_ATTACHMENT));
     let depth = targets
         .depth
         .map(|format| texture(format, samples, U::RENDER_ATTACHMENT));
 
     renderer.prepare(device, queue, frame);
-    let mut encoder = device.create_command_encoder(&Default::default());
     {
         let resolved_view = resolved.create_view(&Default::default());
         let ms_view = multisampled
@@ -493,7 +608,18 @@ pub fn render_to_rgba(
         });
         renderer.paint(&mut pass);
     }
+    resolved
+}
 
+/// Submit `encoder` with a copy of `image` (4 bytes a texel) appended, and
+/// read the texels back as tightly packed rows.
+pub fn read_rgba8(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    mut encoder: wgpu::CommandEncoder,
+    image: &wgpu::Texture,
+) -> Vec<u8> {
+    let (width, height) = (image.width(), image.height());
     // Rows are padded to the copy alignment.
     let row = width * 4;
     let padded =
@@ -505,7 +631,7 @@ pub fn render_to_rgba(
         mapped_at_creation: false,
     });
     encoder.copy_texture_to_buffer(
-        resolved.as_image_copy(),
+        image.as_image_copy(),
         wgpu::TexelCopyBufferInfo {
             buffer: &readback,
             layout: wgpu::TexelCopyBufferLayout {
@@ -530,6 +656,69 @@ pub fn render_to_rgba(
         .flat_map(|r| &r[..row as usize])
         .copied()
         .collect()
+}
+
+/// Upload an environment's mip levels (width, height, RGBA16F texels,
+/// largest first) and wrap them in a bind group matching group 2 in
+/// `scene.wgsl`.
+fn make_environment_bind_group(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    layout: &wgpu::BindGroupLayout,
+    sampler: &wgpu::Sampler,
+    levels: &[(u32, u32, Vec<half::f16>)],
+) -> wgpu::BindGroup {
+    let (width, height, _) = levels[0];
+    let texture = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("od_environment"),
+        size: wgpu::Extent3d {
+            width,
+            height,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: levels.len() as u32,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: HDR_FORMAT,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+        view_formats: &[],
+    });
+    for (mip, (w, h, texels)) in levels.iter().enumerate() {
+        queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &texture,
+                mip_level: mip as u32,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            bytemuck::cast_slice(texels),
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(8 * w),
+                rows_per_image: Some(*h),
+            },
+            wgpu::Extent3d {
+                width: *w,
+                height: *h,
+                depth_or_array_layers: 1,
+            },
+        );
+    }
+    let view = texture.create_view(&Default::default());
+    device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("od_environment"),
+        layout,
+        entries: &[
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: wgpu::BindingResource::TextureView(&view),
+            },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: wgpu::BindingResource::Sampler(sampler),
+            },
+        ],
+    })
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -637,7 +826,18 @@ mod tests {
         let names: Vec<_> = members.iter().map(|m| m.name.clone().unwrap()).collect();
         assert_eq!(
             names,
-            ["view_proj", "key", "fill", "sky", "ground", "eye", "params"]
+            [
+                "view_proj",
+                "key",
+                "fill",
+                "sky",
+                "ground",
+                "eye",
+                "params",
+                "sh",
+                "rig",
+                "ibl"
+            ]
         );
     }
 
