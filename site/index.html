@@ -1,0 +1,163 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>OpenDesign</title>
+  <meta name="description" content="Open-source 3D garment design: draft flat patterns, sew them, and drape them on an avatar. Free, written in Rust, and ready to work with Claude.">
+  <meta property="og:title" content="OpenDesign">
+  <meta property="og:description" content="Garments drafted in two dimensions, sewn, and draped in three. Free and open source.">
+  <meta property="og:image" content="img/dress.png">
+  <meta name="theme-color" content="#000000">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' fill='%23000'/%3E%3Cpath d='M20 14 L32 22 L44 14 L54 24 L46 30 L46 52 L18 52 L18 30 L10 24 Z' fill='none' stroke='%23d4d4d8' stroke-width='2.5' stroke-linejoin='round'/%3E%3C/svg%3E">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:ital,wght@0,300;0,400;1,300;1,400&family=Inter:wght@300;400;500&family=JetBrains+Mono:wght@400&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header class="nav">
+    <a class="mark" href="#top" aria-label="OpenDesign, back to top">OpenDesign</a>
+    <nav aria-label="Sections">
+      <a href="#process">Process</a>
+      <a href="#craft">Craft</a>
+      <a href="#claude">Claude</a>
+      <a href="#download">Download</a>
+      <a href="https://github.com/kiranraaj19/opendesign" class="nav-gh">GitHub</a>
+    </nav>
+  </header>
+
+  <main id="top">
+    <section class="hero">
+      <div class="hero-text">
+        <p class="eyebrow">Open-source 3D garment design</p>
+        <h1 class="silver">Open<br>Design</h1>
+        <p class="lede">Garments drafted in two dimensions, sewn, and draped in three.</p>
+        <div class="actions">
+          <a class="btn btn-solid" href="https://github.com/kiranraaj19/opendesign/releases/latest">Download 0.4</a>
+          <a class="btn" href="https://github.com/kiranraaj19/opendesign">Source on GitHub</a>
+        </div>
+      </div>
+      <figure class="hero-figure">
+        <div class="crop" style="--zoom:1.55"><img src="img/dress.png" alt="A white silk dress draped on the female avatar, seen from the front and a little to one side." width="1200" height="1600"></div>
+        <figcaption>Dress, silk. Drafted, sewn and draped through OpenDesign's MCP server.</figcaption>
+      </figure>
+    </section>
+
+    <section class="statement reveal">
+      <p>Free, written in Rust, and built around the cut, the seam and the fall of cloth.</p>
+    </section>
+
+    <section id="process" class="process">
+      <header class="section-head reveal">
+        <span class="index">I</span>
+        <h2>Draft. Sew. Drape.</h2>
+      </header>
+      <div class="triptych">
+        <figure class="reveal">
+          <div class="crop sheet" style="--zoom:1.9"><img src="img/dress-pattern.png" alt="The dress's flat pattern pieces: front, back and two sleeves." width="1600" height="900" loading="lazy"></div>
+          <figcaption><span>01</span> Draft flat pieces in millimetres: corners, curves, darts, pleats and fold lines.</figcaption>
+        </figure>
+        <figure class="reveal">
+          <div class="crop" style="--zoom:1.5"><img src="img/tshirt.png" alt="A silver long-sleeved T-shirt draped on the avatar." width="1200" height="1600" loading="lazy"></div>
+          <figcaption><span>02</span> Sew edge to edge: seams, zippers, buttons, binding and piping.</figcaption>
+        </figure>
+        <figure class="reveal">
+          <div class="crop" style="--zoom:1.5"><img src="img/skirt.png" alt="A graphite skirt draped on the avatar." width="1200" height="1600" loading="lazy"></div>
+          <figcaption><span>03</span> Drape on a sized, posable avatar with a cloth simulation that knows the grain.</figcaption>
+        </figure>
+      </div>
+    </section>
+
+    <section id="craft" class="craft">
+      <header class="section-head reveal">
+        <span class="index">II</span>
+        <h2>The craft, in full.</h2>
+      </header>
+      <ol class="features">
+        <li class="reveal"><h3>Pattern drafting</h3><p>Pen and point editing, curves, snapping with live lengths and angles, seam allowance, notches, grainlines, rounded corners and exact edge lengths.</p></li>
+        <li class="reveal"><h3>Darts, pleats, folds</h3><p>Outline and diamond darts, knife and box pleats tacked at the top, valley and mountain folds. Cut a piece in two, merge two into one, keep mirrored halves linked.</p></li>
+        <li class="reveal"><h3>Sewing and details</h3><p>Seams in any direction, one to many, checked for length. Tacks, zippers that open and close, buttons fastened through buttonholes, binding, piping and puckered seams.</p></li>
+        <li class="reveal"><h3>Cloth that behaves</h3><p>An XPBD simulation with avatar and cloth collision. Fabrics stretch and bend differently along the grain, across it and on the bias.</p></li>
+        <li class="reveal"><h3>A body to dress</h3><p>Female, male and kid avatars sized by height, chest, waist and hip. Pose them, play BVH motion, and drape through the change.</p></li>
+        <li class="reveal"><h3>Measure and grade</h3><p>Named measurements, a chart across every size, graded sizes drawn over each other, and a tape and circumference on the body.</p></li>
+        <li class="reveal"><h3>In and out</h3><p>DXF-AAMA patterns in and out, OBJ and glTF garments, PDF pattern sheets, turntable renders, auto-save and recovery.</p></li>
+        <li class="reveal"><h3>Nothing lost</h3><p>Every change is a command with exact undo. Projects are plain versioned JSON that open in any later version.</p></li>
+      </ol>
+    </section>
+
+    <section id="claude" class="claude">
+      <header class="section-head reveal">
+        <span class="index">III</span>
+        <h2>Design with Claude.</h2>
+      </header>
+      <div class="claude-grid">
+        <div class="reveal">
+          <p class="lede-small">OpenDesign ships with an MCP server. Connect it to Claude and describe what you want: it drafts the pieces, sews them, dresses the avatar, drapes the garment and looks at the result, then refines it.</p>
+          <blockquote>â€œMake a white silk dress with short sleeves, drape it, and show me the front and back.â€</blockquote>
+          <pre><code><span class="dim"># Claude Code</span>
+claude mcp add opendesign -- /path/to/opendesign-mcp</code></pre>
+        </div>
+        <ul class="tools reveal" aria-label="The server's tools">
+          <li>create_garment</li><li>add_pattern</li><li>edit</li><li>sew</li>
+          <li>arrange</li><li>set_avatar</li><li>drape</li><li>render</li>
+          <li>get_document</li><li>get_pattern</li><li>export</li><li>save_project</li>
+        </ul>
+      </div>
+    </section>
+
+    <section class="gallery">
+      <figure class="wide reveal">
+        <div class="crop wide-crop" style="--zoom:1.35"><img src="img/avatar.png" alt="The female avatar standing in a T-pose." width="1600" height="1100" loading="lazy"></div>
+        <figcaption>The avatar, posed. Every joint bends, spreads and twists; the cloth follows.</figcaption>
+      </figure>
+      <div class="pair">
+        <figure class="reveal"><div class="crop" style="--zoom:1.45"><img src="img/tshirt-front.png" alt="The silver T-shirt from the front." width="1200" height="1600" loading="lazy"></div></figure>
+        <figure class="reveal"><div class="crop" style="--zoom:1.45"><img src="img/skirt-front.png" alt="The graphite skirt from the front." width="1200" height="1600" loading="lazy"></div></figure>
+      </div>
+    </section>
+
+    <section id="download" class="download">
+      <header class="section-head reveal">
+        <span class="index">IV</span>
+        <h2>Take it.</h2>
+      </header>
+      <div class="download-grid reveal">
+        <a class="platform" href="https://github.com/kiranraaj19/opendesign/releases/latest">
+          <span class="platform-name">Windows</span>
+          <span class="platform-file">x86_64 Â· zip</span>
+        </a>
+        <a class="platform" href="https://github.com/kiranraaj19/opendesign/releases/latest">
+          <span class="platform-name">Linux</span>
+          <span class="platform-file">x86_64 Â· tar.gz</span>
+        </a>
+        <div class="platform source">
+          <span class="platform-name">From source</span>
+          <pre><code>cargo run --release -p od_app</code></pre>
+        </div>
+      </div>
+      <p class="fine reveal">Each download holds the app and the MCP server. Builds aren't code-signed yet, so Windows asks once before running.</p>
+    </section>
+  </main>
+
+  <footer class="footer">
+    <span class="mark">OpenDesign</span>
+    <span>MIT or Apache-2.0</span>
+    <a href="https://github.com/kiranraaj19/opendesign">github.com/kiranraaj19/opendesign</a>
+  </footer>
+
+  <script>
+    // Fade sections in as they scroll into view (skipped for reduced motion,
+    // and everything stays visible if scripts don't run).
+    if (!matchMedia('(prefers-reduced-motion: reduce)').matches && 'IntersectionObserver' in window) {
+      document.documentElement.classList.add('motion');
+      const seen = new IntersectionObserver((entries) => {
+        for (const e of entries) {
+          if (e.isIntersecting) { e.target.classList.add('shown'); seen.unobserve(e.target); }
+        }
+      }, { rootMargin: '0px 0px -8% 0px' });
+      document.querySelectorAll('.reveal').forEach((el) => seen.observe(el));
+    }
+  </script>
+</body>
+</html>
