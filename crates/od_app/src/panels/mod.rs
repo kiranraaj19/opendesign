@@ -2,6 +2,8 @@
 
 pub mod colourways;
 pub mod context;
+pub mod details;
+pub mod details3d;
 pub mod fabric_editor;
 pub mod gizmo;
 pub mod groups;

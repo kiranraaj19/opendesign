@@ -1,0 +1,463 @@
+//! UI tests for garment details: the Zipper tool, zippers in Properties
+//! and over the 3D view.
+
+use egui::{Key, Modifiers};
+use egui_kittest::{kittest::Queryable, Harness};
+use od_core::{PatternId, SetZipper, Vec2, Zipper};
+use od_sim::details::EdgeKind;
+
+use super::{OpenDesignApp, Tool};
+use crate::panels::details3d;
+
+fn harness() -> Harness<'static, OpenDesignApp> {
+    let mut h = Harness::builder()
+        .with_size(egui::vec2(1440.0, 880.0))
+        .build_eframe(|cc| OpenDesignApp::new(cc));
+    h.run();
+    h
+}
+
+fn press(h: &mut Harness<'_, OpenDesignApp>, mods: Modifiers, key: Key) {
+    h.key_press_modifiers(mods, key);
+    h.run();
+}
+
+fn click(h: &mut Harness<'_, OpenDesignApp>, label: &str) {
+    h.get_by_label(label).click();
+    h.run();
+}
+
+/// Press and release the primary button at doc point (`x`, `y`) mm.
+fn click_mm(h: &mut Harness<'_, OpenDesignApp>, x: f32, y: f32) {
+    let pos = h.state().session.canvas.screen_pos(Vec2::new(x, y));
+    h.hover_at(pos);
+    h.run();
+    for pressed in [true, false] {
+        h.event(egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: Modifiers::NONE,
+        });
+        h.run();
+    }
+}
+
+fn last_step(h: &Harness<'_, OpenDesignApp>) -> String {
+    h.state().session.history.undo_label().unwrap_or_default()
+}
+
+/// Two 100 × 300 pieces side by side, 50 mm apart.
+fn two_pieces(h: &mut Harness<'_, OpenDesignApp>) -> [PatternId; 2] {
+    let s = &mut h.state_mut().session;
+    s.add_pattern(
+        "Left",
+        od_core::geometry::rectangle(Vec2::ZERO, Vec2::new(100.0, 300.0)),
+    );
+    s.add_pattern(
+        "Right",
+        od_core::geometry::rectangle(Vec2::new(150.0, 0.0), Vec2::new(250.0, 300.0)),
+    );
+    s.selection.clear();
+    let ids = [s.doc.patterns[0].id, s.doc.patterns[1].id];
+    h.run();
+    ids
+}
+
+/// Zip Left's right edge to Right's left edge with the Zipper tool.
+fn zip_side_seam(h: &mut Harness<'_, OpenDesignApp>) {
+    press(h, Modifiers::NONE, Key::Z);
+    assert_eq!(h.state().session.tool, Tool::Zipper);
+    click_mm(h, 100.0, 40.0);
+    assert!(h.state().session.canvas.details.zipper_first.is_some());
+    click_mm(h, 150.0, 40.0);
+}
+
+#[test]
+fn the_zipper_tool_zips_two_edges_and_opens_and_closes_the_zipper() {
+    let mut h = harness();
+    let [left, right] = two_pieces(&mut h);
+    zip_side_seam(&mut h);
+    let doc = h.state().session.doc.clone();
+    assert_eq!(doc.sewing_lines.len(), 1);
+    let line = &doc.sewing_lines[0];
+    assert_eq!(line.details.zipper, Some(Zipper::default()));
+    assert_eq!((line.a[0].pattern, line.b[0].pattern), (left, right));
+    // Picked near the top of both, so they zip untwisted.
+    assert_eq!(line.a[0].forward, !line.b[0].forward);
+    assert_eq!(last_step(&h), "Add zipper");
+    assert_eq!(h.state().session.selected_seam, Some(line.id));
+
+    // Clicking the zipper opens it; again closes it.
+    click_mm(&mut h, 150.0, 200.0);
+    assert!(!h.state().session.doc.sewing_lines[0].holds_closed());
+    assert_eq!(last_step(&h), "Open zipper");
+    click_mm(&mut h, 100.0, 200.0);
+    assert!(h.state().session.doc.sewing_lines[0].holds_closed());
+    assert_eq!(last_step(&h), "Close zipper");
+
+    // Esc drops a half-placed zipper.
+    click_mm(&mut h, 50.0, 0.0);
+    assert!(h.state().session.canvas.details.zipper_first.is_some());
+    press(&mut h, Modifiers::NONE, Key::Escape);
+    assert!(h.state().session.canvas.details.zipper_first.is_none());
+
+    press(&mut h, Modifiers::COMMAND, Key::Z);
+    press(&mut h, Modifiers::COMMAND, Key::Z);
+    press(&mut h, Modifiers::COMMAND, Key::Z);
+    assert!(h.state().session.doc.sewing_lines.is_empty());
+}
+
+#[test]
+fn a_seams_zipper_is_set_in_properties() {
+    let mut h = harness();
+    two_pieces(&mut h);
+    {
+        let s = &mut h.state_mut().session;
+        let a = s.doc.patterns[0].shorter_edge(1.0, 2.0);
+        let b = s.doc.patterns[1].shorter_edge(3.0, 4.0).reversed();
+        s.execute(od_core::AddSewingLine::new(vec![a], vec![b]));
+        s.selected_seam = Some(s.doc.sewing_lines[0].id);
+    }
+    h.run();
+    click(&mut h, "Make zipper");
+    assert!(h.state().session.doc.sewing_lines[0].is_zipper());
+    click(&mut h, "Closed");
+    assert!(!h.state().session.doc.sewing_lines[0].holds_closed());
+    assert_eq!(last_step(&h), "Open zipper");
+    click(&mut h, "Plain seam");
+    assert!(!h.state().session.doc.sewing_lines[0].is_zipper());
+    assert_eq!(
+        h.state().session.doc.sewing_lines.len(),
+        1,
+        "the seam stays"
+    );
+}
+
+#[test]
+fn zippers_are_drawn_over_the_3d_view_and_open_while_draping() {
+    let mut h = harness();
+    two_pieces(&mut h);
+    zip_side_seam(&mut h);
+    h.state_mut().session.tool = Tool::Select;
+    h.run();
+    let pal = crate::theme::palette(true);
+    let flat = details3d::overlays(&h.state().session, pal);
+    assert_eq!(flat.len(), 2, "one line per side");
+    assert!(flat.iter().all(|o| !o.dashed && o.points.len() >= 2));
+
+    // A drape built as the Drape button builds one, not stepped.
+    {
+        let s = &mut h.state_mut().session;
+        let placements = crate::panels::viewport3d::placements(s);
+        let drape = od_sim::drape::Drape::new(
+            &s.doc,
+            &placements,
+            Some(s.viewport.avatar.mesh()),
+            &Default::default(),
+        );
+        s.viewport.drape = Some(drape);
+    }
+    h.run();
+    let closed = |h: &Harness<'_, OpenDesignApp>| {
+        let s = &h.state().session;
+        let drape = s.viewport.drape.as_ref().unwrap();
+        drape
+            .edge_detail_positions()
+            .iter()
+            .map(|(kind, _)| matches!(kind, EdgeKind::Zipper { closed: true, .. }))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(closed(&h), [true, true]);
+
+    // Opening it in the document opens it in the running drape.
+    {
+        let s = &mut h.state_mut().session;
+        let id = s.doc.sewing_lines[0].id;
+        let open = Zipper {
+            closed: false,
+            ..Zipper::default()
+        };
+        s.execute(SetZipper::new(id, Some(open)));
+    }
+    h.run();
+    assert_eq!(closed(&h), [false, false]);
+    let draped = details3d::overlays(&h.state().session, pal);
+    assert!(draped.iter().all(|o| o.dashed));
+}
+
+/// A button on Left at (80, 40) and a buttonhole placed with the
+/// Buttonhole tool on Right at (180, 40).
+fn button_and_hole(h: &mut Harness<'_, OpenDesignApp>) -> [PatternId; 2] {
+    let [left, right] = two_pieces(h);
+    h.state_mut().session.execute(od_core::AddTrim::new(
+        left,
+        od_core::TrimKind::Button,
+        Vec2::new(80.0, 40.0),
+    ));
+    h.run();
+    press(h, Modifiers::NONE, Key::H);
+    assert_eq!(h.state().session.tool, Tool::Buttonhole);
+    click_mm(h, 180.0, 40.0);
+    [left, right]
+}
+
+#[test]
+fn the_buttonhole_tool_places_holes_and_fastens_buttons_into_them() {
+    use od_core::details::fastenings;
+    use od_core::TrimKind;
+    let mut h = harness();
+    let [left, right] = button_and_hole(&mut h);
+    let trims = h.state().session.doc.pattern(right).unwrap().trims.clone();
+    assert_eq!(trims.len(), 1);
+    assert_eq!(trims[0].kind, TrimKind::Buttonhole);
+    assert_eq!(last_step(&h), "Add buttonhole");
+
+    // Button, then hole: fastened by a tack between them.
+    click_mm(&mut h, 80.0, 40.0);
+    assert!(h.state().session.canvas.details.button_start.is_some());
+    click_mm(&mut h, 180.0, 40.0);
+    let found = fastenings(&h.state().session.doc);
+    assert_eq!(found.len(), 1);
+    assert_eq!((found[0].button, found[0].hole), ((left, 0), (right, 0)));
+    assert_eq!(last_step(&h), "Fasten button");
+
+    // Clicking the fastened button unfastens it.
+    click_mm(&mut h, 80.0, 40.0);
+    assert!(fastenings(&h.state().session.doc).is_empty());
+    assert_eq!(last_step(&h), "Unfasten button");
+
+    // Fastened again, removing the hole takes the fastening with it, in
+    // one step.
+    click_mm(&mut h, 80.0, 40.0);
+    click_mm(&mut h, 180.0, 40.0);
+    click_mm(&mut h, 180.0, 40.0);
+    let s = &h.state().session;
+    assert!(s.doc.pattern(right).unwrap().trims.is_empty());
+    assert!(s.doc.tacks.is_empty());
+    assert_eq!(last_step(&h), "Remove buttonhole");
+    press(&mut h, Modifiers::COMMAND, Key::Z);
+    assert_eq!(fastenings(&h.state().session.doc).len(), 1);
+}
+
+#[test]
+fn buttonholes_are_placed_at_the_tools_angle() {
+    let mut h = harness();
+    let [_, right] = two_pieces(&mut h);
+    press(&mut h, Modifiers::NONE, Key::H);
+    click(&mut h, "Upright");
+    click_mm(&mut h, 200.0, 100.0);
+    let hole = h.state().session.doc.pattern(right).unwrap().trims[0];
+    assert_eq!(hole.angle, 90.0);
+}
+
+#[test]
+fn the_binding_tool_binds_and_unbinds_an_edge() {
+    use od_core::{Binding, BindingKind};
+    let mut h = harness();
+    let [left, _] = two_pieces(&mut h);
+    press(&mut h, Modifiers::NONE, Key::G);
+    assert_eq!(h.state().session.tool, Tool::Binding);
+    click(&mut h, "Piping");
+    // Left's top edge.
+    click_mm(&mut h, 50.0, 0.0);
+    let bindings = h
+        .state()
+        .session
+        .doc
+        .pattern(left)
+        .unwrap()
+        .bindings
+        .clone();
+    assert_eq!(
+        bindings,
+        [Binding {
+            kind: BindingKind::Piping,
+            start: 0.0,
+            end: 1.0,
+            width: Binding::DEFAULT_WIDTH,
+        }]
+    );
+    assert_eq!(last_step(&h), "Add piping");
+    let pal = crate::theme::palette(true);
+    assert_eq!(details3d::overlays(&h.state().session, pal).len(), 1);
+
+    // Clicking the bound edge again takes it off.
+    click_mm(&mut h, 50.0, 0.0);
+    assert!(h
+        .state()
+        .session
+        .doc
+        .pattern(left)
+        .unwrap()
+        .bindings
+        .is_empty());
+    assert_eq!(last_step(&h), "Remove binding");
+}
+
+#[test]
+fn a_pieces_bindings_are_edited_in_properties() {
+    use od_core::{AddBinding, Binding, BindingKind};
+    let mut h = harness();
+    let [left, _] = two_pieces(&mut h);
+    {
+        let s = &mut h.state_mut().session;
+        s.execute(AddBinding::new(
+            left,
+            Binding {
+                kind: BindingKind::Binding,
+                start: 2.0,
+                end: 3.0,
+                width: 8.0,
+            },
+        ));
+        s.selection.set(Some(left));
+    }
+    h.run();
+    h.get_by_label("100 mm long");
+    click(&mut h, "Piping");
+    let b = h.state().session.doc.pattern(left).unwrap().bindings[0];
+    assert_eq!(b.kind, BindingKind::Piping);
+    assert_eq!(last_step(&h), "Edit binding");
+    click(&mut h, "Remove binding 1");
+    assert!(h
+        .state()
+        .session
+        .doc
+        .pattern(left)
+        .unwrap()
+        .bindings
+        .is_empty());
+}
+
+#[test]
+fn a_seam_is_puckered_in_properties() {
+    use od_core::Pucker;
+    let mut h = harness();
+    two_pieces(&mut h);
+    {
+        let s = &mut h.state_mut().session;
+        let a = s.doc.patterns[0].shorter_edge(1.0, 2.0);
+        // Gathered into the top two thirds of Right's left edge.
+        let b = s.doc.patterns[1].shorter_edge(3.4, 4.0).reversed();
+        s.execute(od_core::AddSewingLine::new(vec![a], vec![b]));
+        s.selected_seam = Some(s.doc.sewing_lines[0].id);
+    }
+    h.run();
+    let flagged = |h: &Harness<'_, OpenDesignApp>| {
+        let s = &h.state().session;
+        s.seam_check.flags(&s.doc, &s.doc.sewing_lines[0])
+    };
+    assert!(flagged(&h), "100 mm longer on one side");
+    click(&mut h, "Pucker");
+    let line = &h.state().session.doc.sewing_lines[0];
+    assert_eq!(line.details.pucker, Some(Pucker::default()));
+    assert_eq!(last_step(&h), "Pucker seam");
+    assert!(!flagged(&h), "eased on purpose");
+    click(&mut h, "Pucker");
+    assert_eq!(h.state().session.doc.sewing_lines[0].details.pucker, None);
+    assert_eq!(last_step(&h), "Sew seam flat");
+}
+
+/// Screenshots of the garment details for a look by eye, written to
+/// `$OD_SHOTS` (default: a temporary folder). Needs a wgpu adapter; a
+/// software one (lavapipe) is enough.
+#[test]
+#[ignore = "writes screenshots; run with --ignored"]
+fn screenshots_of_garment_details() {
+    let dir = std::env::var_os("OD_SHOTS")
+        .map_or_else(|| std::env::temp_dir().join("od_shots"), Into::into);
+    std::fs::create_dir_all(&dir).unwrap();
+    let shot = |h: &mut Harness<'_, OpenDesignApp>, name: &str| {
+        h.run();
+        let image = h.render().expect("a wgpu adapter to render with");
+        image.save(dir.join(name)).unwrap();
+    };
+    let mut h = Harness::builder()
+        .with_size(egui::vec2(1440.0, 880.0))
+        .wgpu()
+        .build_eframe(|cc| OpenDesignApp::new(cc));
+    // The 3D view draws with a depth buffer the test renderer's pass
+    // doesn't have; these shots are of the 2D window and Properties.
+    let dock = &mut h.state_mut().dock;
+    if let Some(found) = dock.find_tab(&super::Tab::Viewport3D) {
+        dock.remove_tab(found);
+    }
+    h.run();
+    two_pieces(&mut h);
+    h.state_mut().session.canvas.snap.grid = false;
+    press(&mut h, Modifiers::COMMAND, Key::A);
+    press(&mut h, Modifiers::NONE, Key::F);
+    h.state_mut().session.selection.clear();
+    h.run();
+
+    // A zipper between the two pieces, selected, with its Properties.
+    zip_side_seam(&mut h);
+    shot(&mut h, "zipper.png");
+    click_mm(&mut h, 100.0, 200.0);
+    shot(&mut h, "zipper-open.png");
+
+    // Buttons fastened into buttonholes, and one being fastened.
+    let [left, right] = [
+        h.state().session.doc.patterns[0].id,
+        h.state().session.doc.patterns[1].id,
+    ];
+    for y in [60.0, 120.0] {
+        h.state_mut().session.execute(od_core::AddTrim::new(
+            left,
+            od_core::TrimKind::Button,
+            Vec2::new(80.0, y),
+        ));
+    }
+    h.run();
+    press(&mut h, Modifiers::NONE, Key::H);
+    for y in [60.0, 120.0] {
+        click_mm(&mut h, 180.0, y);
+    }
+    click_mm(&mut h, 80.0, 60.0);
+    click_mm(&mut h, 180.0, 60.0);
+    click_mm(&mut h, 80.0, 120.0);
+    let hover = h.state().session.canvas.screen_pos(Vec2::new(170.0, 140.0));
+    h.hover_at(hover);
+    h.state_mut().session.selection.set(Some(right));
+    shot(&mut h, "buttonholes.png");
+
+    // Binding along Left's top and bottom, piping along Right's top and
+    // outer side, and Left's bindings in Properties.
+    press(&mut h, Modifiers::NONE, Key::Escape);
+    press(&mut h, Modifiers::NONE, Key::G);
+    click_mm(&mut h, 50.0, 0.0);
+    click_mm(&mut h, 50.0, 300.0);
+    h.state_mut().session.canvas.details.binding_kind = od_core::BindingKind::Piping;
+    h.state_mut().session.canvas.details.binding_width = 5.0;
+    click_mm(&mut h, 200.0, 0.0);
+    click_mm(&mut h, 250.0, 150.0);
+    h.state_mut().session.selected_seam = None;
+    h.state_mut().session.tool = Tool::Select;
+    h.state_mut().session.selection.set(Some(left));
+    shot(&mut h, "binding.png");
+
+    // A third piece whose long side is puckered into Right's outer side.
+    {
+        let s = &mut h.state_mut().session;
+        s.add_pattern(
+            "Ruffle",
+            od_core::geometry::rectangle(Vec2::new(300.0, 0.0), Vec2::new(360.0, 400.0)),
+        );
+        let ruffle = s.doc.patterns.len() - 1;
+        let a = s.doc.patterns[ruffle].shorter_edge(3.0, 4.0).reversed();
+        let b = s.doc.patterns[1].shorter_edge(1.0, 2.0);
+        s.execute(od_core::AddSewingLine::new(vec![b], vec![a]));
+        let id = s.doc.sewing_lines.last().unwrap().id;
+        s.execute(od_core::SetPucker::new(
+            id,
+            Some(od_core::Pucker::default()),
+        ));
+        s.selected_seam = Some(id);
+    }
+    press(&mut h, Modifiers::COMMAND, Key::A);
+    press(&mut h, Modifiers::NONE, Key::F);
+    h.state_mut().session.selection.clear();
+    shot(&mut h, "pucker.png");
+    eprintln!("screenshots in {}", dir.display());
+}

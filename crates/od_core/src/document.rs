@@ -168,14 +168,20 @@ pub enum TrimKind {
     #[default]
     Button,
     Snap,
+    /// A slit a button is pushed through (see [`crate::details`]).
+    Buttonhole,
 }
 
-/// A point trim (button, snap) placed on a pattern's outline or interior,
-/// in the pattern's own mm coordinates.
+/// A point trim (button, snap, buttonhole) placed on a pattern's outline
+/// or interior, in the pattern's own mm coordinates.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct Trim {
     pub kind: TrimKind,
     pub pos: Vec2,
+    /// Which way a buttonhole's slit runs, in degrees clockwise on screen
+    /// from the pattern's x axis. It turns and flips with the pattern.
+    #[serde(default)]
+    pub angle: f32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
@@ -207,6 +213,9 @@ pub struct SewingLine {
     pub id: SewingLineId,
     pub a: Vec<SeamEdge>,
     pub b: Vec<SeamEdge>,
+    /// What else the seam is: a zipper, say (see [`crate::details`]).
+    #[serde(default, skip_serializing_if = "crate::details::SeamDetails::is_plain")]
+    pub details: crate::details::SeamDetails,
 }
 
 /// How much two sewn edges may differ in length, as a fraction of the
@@ -610,6 +619,9 @@ pub struct Pattern {
     pub arrangement: Option<Arrangement>,
     /// Set for a linked copy of another pattern (symmetric editing).
     pub link: Option<Link>,
+    /// Binding and piping along stretches of the outline.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub bindings: Vec<crate::details::Binding>,
 }
 
 /// What makes a pattern a linked copy of another: its outline and
@@ -719,6 +731,7 @@ impl Pattern {
             locked: false,
             arrangement: None,
             link: None,
+            bindings: Vec::new(),
         }
     }
 
@@ -779,6 +792,10 @@ impl Pattern {
         }
         for trim in &mut self.trims {
             trim.pos = axis.reflect(trim.pos, about);
+            trim.angle = match axis {
+                Axis::Vertical => normalize_degrees(180.0 - trim.angle),
+                Axis::Horizontal => normalize_degrees(-trim.angle),
+            };
         }
         for dart in &mut self.darts {
             dart.map(|p| axis.reflect(p, about));
@@ -805,6 +822,7 @@ impl Pattern {
         }
         for trim in &mut self.trims {
             trim.pos = turn(trim.pos);
+            trim.angle = normalize_degrees(trim.angle + degrees);
         }
         for dart in &mut self.darts {
             dart.map(turn);
@@ -833,7 +851,7 @@ impl Pattern {
             line.points.iter_mut().for_each(|p| *p = f(*p));
         }
         for trim in &mut self.trims {
-            trim.pos = f(trim.pos);
+            trim.map(&f);
         }
         for dart in &mut self.darts {
             dart.map(&f);
@@ -1419,6 +1437,7 @@ mod tests {
         p.trims.push(Trim {
             kind: TrimKind::Button,
             pos: Vec2::new(30.0, 10.0),
+            angle: 0.0,
         });
         p.mirror(Axis::Vertical, 0.0);
         assert_eq!(p.outline[1].pos, Vec2::new(-100.0, 0.0));
@@ -1533,6 +1552,7 @@ mod tests {
             id: SewingLineId(1),
             a: vec![edge(PatternId(1), 0.0, 1.0)],
             b: vec![edge(PatternId(2), 0.0, 1.0)],
+            details: Default::default(),
         };
         assert_eq!(seam.length_mismatch(&doc), Some(0.0));
         assert!(!seam.is_length_mismatched(&doc));
@@ -1547,6 +1567,7 @@ mod tests {
             id: SewingLineId(1),
             a: vec![edge(PatternId(1), 1.0, 2.0)],
             b: vec![edge(PatternId(2), 0.0, 1.0)],
+            details: Default::default(),
         };
         assert_eq!(seam.length_mismatch(&doc), Some(-30.0));
         assert!(seam.is_length_mismatched(&doc));
@@ -1559,6 +1580,7 @@ mod tests {
             id: SewingLineId(1),
             a: vec![edge(PatternId(1), 0.0, 1.0)],
             b: vec![edge(PatternId(99), 0.0, 1.0)],
+            details: Default::default(),
         };
         assert_eq!(seam.length_mismatch(&doc), None);
         assert!(!seam.is_length_mismatched(&doc));
@@ -1643,6 +1665,7 @@ mod tests {
             id: SewingLineId(1),
             a: vec![edge(PatternId(1), 0.0, 1.0)],
             b: vec![edge(PatternId(2), 0.0, 1.0), edge(PatternId(2), 2.0, 3.0)],
+            details: Default::default(),
         };
         assert_eq!(seam.length_mismatch(&doc), Some(0.0));
         assert!(!seam.is_length_mismatched(&doc));

@@ -8,6 +8,7 @@
 
 pub mod cloth;
 pub mod collision;
+pub mod details;
 pub mod drape;
 pub mod mesh;
 pub mod mesher;

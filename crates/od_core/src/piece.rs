@@ -319,6 +319,7 @@ fn cut(doc: &mut Document, id: PatternId, line: usize, sew: bool) -> Option<Stat
         topstitches: Vec::new(),
         trims: Vec::new(),
         grading: Grading::default(),
+        bindings: Vec::new(),
         ..p.clone()
     };
     let mut a = Pattern {
@@ -455,6 +456,7 @@ fn cut(doc: &mut Document, id: PatternId, line: usize, sew: bool) -> Option<Stat
                 end: n(&b),
                 forward: false,
             }],
+            details: Default::default(),
         });
     }
 
@@ -586,6 +588,7 @@ fn merge(doc: &mut Document, seam: SewingLineId) -> Option<State> {
         grading,
         ..pa.clone()
     };
+    merged.bindings = crate::details::bindings_by_position(&pa, &merged);
     merged
         .internal_lines
         .extend(tb.internal_lines.iter().cloned());
@@ -689,6 +692,7 @@ mod tests {
             .push(crate::document::Trim {
                 kind: crate::document::TrimKind::Button,
                 pos: Vec2::new(100.0, 80.0),
+                angle: 0.0,
             });
         let other = add_rect(
             &mut doc,
@@ -879,6 +883,7 @@ mod tests {
             .push(crate::document::Trim {
                 kind: crate::document::TrimKind::Button,
                 pos: Vec2::new(310.0, 10.0),
+                angle: 0.0,
             });
         // Left's right side sewn top-down to Right's right side top-down:
         // laid along each other sewing start on start, Right would cover

@@ -60,11 +60,14 @@ pub enum Tool {
     Dart,
     Pleat,
     Measure,
+    Zipper,
+    Buttonhole,
+    Binding,
 }
 
 impl Tool {
     /// Toolbar order, with button label, shortcut key and tooltip.
-    const BUTTONS: [(Tool, &'static str, Key, &'static str); 13] = [
+    const BUTTONS: [(Tool, &'static str, Key, &'static str); 16] = [
         (
             Tool::Select,
             "Select",
@@ -143,6 +146,24 @@ impl Tool {
             Key::M,
             "Click two outline points to measure between them; Shift+click to measure along the outline (M)",
         ),
+        (
+            Tool::Zipper,
+            "Zipper",
+            Key::Z,
+            "Click two edges to sew a zipper between them; click a zipper to open or close it (Z)",
+        ),
+        (
+            Tool::Buttonhole,
+            "Buttonhole",
+            Key::H,
+            "Click to place a buttonhole; click a button, then a buttonhole, to fasten them (H)",
+        ),
+        (
+            Tool::Binding,
+            "Binding",
+            Key::G,
+            "Click an edge to bind it (binding or piping); click a bound edge to unbind it (G)",
+        ),
     ];
 
     pub fn name(self) -> &'static str {
@@ -160,6 +181,9 @@ impl Tool {
             Tool::Dart => "Dart",
             Tool::Pleat => "Pleat",
             Tool::Measure => "Measure",
+            Tool::Zipper => "Zipper",
+            Tool::Buttonhole => "Buttonhole",
+            Tool::Binding => "Binding",
         }
     }
 }
@@ -182,9 +206,11 @@ impl Default for SeamCheck {
 }
 
 impl SeamCheck {
-    /// Should `line` be flagged?
+    /// Should `line` be flagged? A puckered seam is eased on purpose.
     pub fn flags(&self, doc: &Document, line: &SewingLine) -> bool {
-        self.enabled && line.is_mismatched_by(doc, self.percent / 100.0)
+        self.enabled
+            && line.details.pucker.is_none()
+            && line.is_mismatched_by(doc, self.percent / 100.0)
     }
 
     /// Seams to flag, in document order.
@@ -1195,6 +1221,10 @@ mod workspace_tests;
 #[cfg(test)]
 #[path = "measure_tests.rs"]
 mod measure_tests;
+
+#[cfg(test)]
+#[path = "details_tests.rs"]
+mod details_tests;
 
 /// Drive the real app headlessly: clicks and keys go through egui exactly as
 /// they would from a mouse and keyboard, no window or GPU needed.

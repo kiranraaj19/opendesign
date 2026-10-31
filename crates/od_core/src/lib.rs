@@ -8,6 +8,7 @@ pub mod bom;
 pub mod clipboard;
 pub mod colourway;
 pub mod command;
+pub mod details;
 pub mod document;
 pub mod dxf;
 pub mod dxf_import;
@@ -36,6 +37,9 @@ pub use command::{
     RenamePattern, RotatePattern, SetArrangement, SetDart, SetFabric, SetFold, SetGrading,
     SetOutline, SetParticleDistance, SetPatternFlag, SetPatternValue, SetPointKind, SetSeamEdge,
     PARTICLE_DISTANCE_RANGE,
+};
+pub use details::{
+    AddBinding, Binding, BindingKind, Pucker, SeamDetails, SetBinding, SetPucker, SetZipper, Zipper,
 };
 pub use document::{
     Arrangement, Axis, Dart, Document, Fabric, FabricTexture, Fold, Grading, InternalLine, Link,

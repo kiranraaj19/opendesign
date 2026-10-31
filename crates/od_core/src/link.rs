@@ -43,6 +43,7 @@ pub fn sync(doc: &mut Document) {
         copy.darts = source.darts.clone();
         copy.topstitches = source.topstitches.clone();
         copy.trims = source.trims.clone();
+        copy.bindings = source.bindings.clone();
         copy.notches = source.notches.clone();
         copy.fabric = source.fabric.clone();
         copy.seam_allowance = source.seam_allowance;
@@ -61,7 +62,7 @@ pub fn sync(doc: &mut Document) {
             line.points.iter_mut().for_each(|p| *p = f(*p));
         }
         for trim in &mut copy.trims {
-            trim.pos = f(trim.pos);
+            trim.map(f);
         }
         for dart in &mut copy.darts {
             dart.start = f(dart.start);

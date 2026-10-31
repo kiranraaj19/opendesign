@@ -6,7 +6,7 @@
 use std::ops::Range;
 
 use glam::Vec3;
-use od_core::document::{Document, PatternId, Tack, TrimKind};
+use od_core::document::{Document, PatternId, SewingLine, SewingLineId, Tack, TrimKind};
 use od_core::geometry::Vec2;
 use od_render::mesh::Mesh;
 use od_render::pattern::Placement;
@@ -14,6 +14,7 @@ use od_render::view::PlacedPattern;
 
 use crate::cloth::{self, ClothConfig};
 use crate::collision::{closest_on_triangle, Collider};
+use crate::details::{EdgeKind, SceneDetails};
 use crate::mesh::draped_mesh;
 use crate::mesher::PatternMesh;
 use crate::self_collision::{SelfCollision, DEFAULT_THICKNESS};
@@ -32,6 +33,12 @@ pub struct Drape {
     structural_count: usize,
     trims: Vec<(TrimKind, SurfacePoint)>,
     topstitches: Vec<Vec<SurfacePoint>>,
+    /// Zipper tapes along the cloth's edges, to draw, and the zippers'
+    /// stitches.
+    details: SceneDetails,
+    /// `world.distance_constraints[zip_base..]` are the closed zippers'
+    /// stitches, rebuilt when one opens or closes.
+    zip_base: usize,
     /// The tacks the stitches in `world.surface_stitches` were built from,
     /// so a change to the document's tacks can be spotted and synced.
     tacks: Vec<Tack>,
@@ -70,7 +77,12 @@ impl Drape {
             .map(|(_, r)| r.end)
             .max()
             .unwrap_or(0);
-        let seam_particles = scene.stitches.iter().flat_map(|c| [c.a, c.b]).collect();
+        let seam_particles = scene
+            .stitches
+            .iter()
+            .chain(scene.details.zipper_stitches.iter().map(|(_, c)| c))
+            .flat_map(|c| [c.a, c.b])
+            .collect();
         let triangles = scene
             .pattern_ranges
             .iter()
@@ -85,6 +97,13 @@ impl Drape {
         world.distance_constraints = scene.structural;
         world.distance_constraints.extend(scene.bending);
         world.distance_constraints.extend(scene.stitches);
+        world
+            .distance_constraints
+            .extend(scene.details.constraints.iter().copied());
+        let zip_base = world.distance_constraints.len();
+        world
+            .distance_constraints
+            .extend(scene.details.closed_stitches());
         let (tack_indices, stitches) = scene.tacks.into_iter().unzip();
         world.surface_stitches = stitches;
         world.self_collision = Some(SelfCollision::new(triangles, Vec::new(), DEFAULT_THICKNESS));
@@ -96,6 +115,8 @@ impl Drape {
             structural_count,
             trims: scene.trims,
             topstitches: scene.topstitches,
+            details: scene.details,
+            zip_base,
             tacks: doc.tacks.clone(),
             tack_indices,
             anchor_start,
@@ -353,6 +374,59 @@ impl Drape {
             .collect()
     }
 
+    /// Open or close zippers to match the document's seams, without
+    /// restarting the simulation: an opened zipper lets go of its sides,
+    /// a closed one pulls them back together.
+    pub fn sync_zippers(&mut self, lines: &[SewingLine]) {
+        let built = |id: &SewingLineId| {
+            self.details
+                .zipper_stitches
+                .iter()
+                .any(|(seam, _)| seam == id)
+        };
+        let mut now: Vec<SewingLineId> = lines
+            .iter()
+            .filter(|l| l.details.zipper.is_some_and(|z| z.closed))
+            .map(|l| l.id)
+            .filter(built)
+            .collect();
+        let mut was = self.details.closed_zippers();
+        was.sort();
+        now.sort();
+        if was == now {
+            return;
+        }
+        self.details.set_closed(&now);
+        self.world.distance_constraints.truncate(self.zip_base);
+        let closed: Vec<_> = self.details.closed_stitches().collect();
+        self.world.distance_constraints.extend(closed);
+    }
+
+    /// Where each buttonhole's slit currently runs, end to end.
+    pub fn buttonhole_positions(&self) -> Vec<[Vec3; 2]> {
+        self.details
+            .holes
+            .iter()
+            .map(|ends| ends.map(|at| at.position(&self.world.particles)))
+            .collect()
+    }
+
+    /// Where each zipper tape currently runs, in order along its edge.
+    pub fn edge_detail_positions(&self) -> Vec<(EdgeKind, Vec<Vec3>)> {
+        self.details
+            .edges
+            .iter()
+            .map(|d| {
+                let points = d
+                    .particles
+                    .iter()
+                    .map(|&i| self.world.particles[i].position)
+                    .collect();
+                (d.kind, points)
+            })
+            .collect()
+    }
+
     /// How stretched the fabric is at each particle: the largest fraction
     /// by which any structural constraint touching it currently exceeds
     /// its rest length (`0.0` = relaxed or compressed, `0.5` = stretched
@@ -535,6 +609,7 @@ mod tests {
         panel.trims.push(Trim {
             kind: TrimKind::Snap,
             pos: Vec2::new(0.0, 0.0),
+            angle: 0.0,
         });
         panel.topstitches.push(Topstitch {
             points: vec![Vec2::new(0.0, 0.0), Vec2::new(200.0, 0.0)],
@@ -636,6 +711,7 @@ mod tests {
                 end: 4.0,
                 forward: true,
             }],
+            details: Default::default(),
         });
         let placements = placements_for(&doc, 1.5);
         let mut drape = Drape::new(&doc, &placements, None, &ClothConfig::default());
