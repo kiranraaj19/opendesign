@@ -7,7 +7,7 @@
   <meta name="description" content="Open-source 3D garment design: draft flat patterns, sew them, and drape them on an avatar. Free, written in Rust, and ready to work with Claude.">
   <meta property="og:title" content="OpenDesign">
   <meta property="og:description" content="Garments drafted in two dimensions, sewn, and draped in three. Free and open source.">
-  <meta property="og:image" content="img/dress.png">
+  <meta property="og:image" content="img/top.png">
   <meta name="theme-color" content="#000000">
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' fill='%23000'/%3E%3Cpath d='M20 14 L32 22 L44 14 L54 24 L46 30 L46 52 L18 52 L18 30 L10 24 Z' fill='none' stroke='%23d4d4d8' stroke-width='2.5' stroke-linejoin='round'/%3E%3C/svg%3E">
   <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -39,8 +39,8 @@
         </div>
       </div>
       <figure class="hero-figure">
-        <div class="crop" style="--zoom:1.55"><img src="img/dress.png" alt="A white silk dress draped on the female avatar, seen from the front and a little to one side." width="1200" height="1600"></div>
-        <figcaption>Dress, silk. Drafted, sewn and draped through OpenDesign's MCP server.</figcaption>
+        <div class="crop" style="--zoom:1.55"><img src="img/top.png" alt="A silver sleeveless cotton top draped on the male avatar, seen from the front and a little to one side." width="1200" height="1600"></div>
+        <figcaption>Sleeveless top, cotton. Drafted, sewn and draped through OpenDesign's MCP server.</figcaption>
       </figure>
     </section>
 
@@ -55,15 +55,15 @@
       </header>
       <div class="triptych">
         <figure class="reveal">
-          <div class="crop sheet" style="--zoom:1.9"><img src="img/dress-pattern.png" alt="The dress's flat pattern pieces: front, back and two sleeves." width="1600" height="900" loading="lazy"></div>
+          <div class="crop sheet" style="--zoom:1.9"><img src="img/top-pattern.png" alt="The top's two flat pattern pieces, front and back." width="1600" height="900" loading="lazy"></div>
           <figcaption><span>01</span> Draft flat pieces in millimetres: corners, curves, darts, pleats and fold lines.</figcaption>
         </figure>
         <figure class="reveal">
-          <div class="crop" style="--zoom:1.5"><img src="img/tshirt.png" alt="A silver long-sleeved T-shirt draped on the avatar." width="1200" height="1600" loading="lazy"></div>
+          <div class="crop" style="--zoom:1.5"><img src="img/skirt.png" alt="A graphite denim skirt draped on the female avatar." width="1200" height="1600" loading="lazy"></div>
           <figcaption><span>02</span> Sew edge to edge: seams, zippers, buttons, binding and piping.</figcaption>
         </figure>
         <figure class="reveal">
-          <div class="crop" style="--zoom:1.5"><img src="img/skirt.png" alt="A graphite skirt draped on the avatar." width="1200" height="1600" loading="lazy"></div>
+          <div class="crop" style="--zoom:1.5"><img src="img/top-front.png" alt="The silver top from the front." width="1200" height="1600" loading="lazy"></div>
           <figcaption><span>03</span> Drape on a sized, posable avatar with a cloth simulation that knows the grain.</figcaption>
         </figure>
       </div>
@@ -94,7 +94,7 @@
       <div class="claude-grid">
         <div class="reveal">
           <p class="lede-small">OpenDesign ships with an MCP server. Connect it to Claude and describe what you want: it drafts the pieces, sews them, dresses the avatar, drapes the garment and looks at the result, then refines it.</p>
-          <blockquote>â€œMake a white silk dress with short sleeves, drape it, and show me the front and back.â€</blockquote>
+          <blockquote>“Make a sleeveless top in silver cotton, drape it, and show me the front and back.”</blockquote>
           <pre><code><span class="dim"># Claude Code</span>
 claude mcp add opendesign -- /path/to/opendesign-mcp</code></pre>
         </div>
@@ -112,7 +112,7 @@ claude mcp add opendesign -- /path/to/opendesign-mcp</code></pre>
         <figcaption>The avatar, posed. Every joint bends, spreads and twists; the cloth follows.</figcaption>
       </figure>
       <div class="pair">
-        <figure class="reveal"><div class="crop" style="--zoom:1.45"><img src="img/tshirt-front.png" alt="The silver T-shirt from the front." width="1200" height="1600" loading="lazy"></div></figure>
+        <figure class="reveal"><div class="crop" style="--zoom:1.45"><img src="img/top-back.png" alt="The silver top from the back." width="1200" height="1600" loading="lazy"></div></figure>
         <figure class="reveal"><div class="crop" style="--zoom:1.45"><img src="img/skirt-front.png" alt="The graphite skirt from the front." width="1200" height="1600" loading="lazy"></div></figure>
       </div>
     </section>
@@ -125,11 +125,11 @@ claude mcp add opendesign -- /path/to/opendesign-mcp</code></pre>
       <div class="download-grid reveal">
         <a class="platform" href="https://github.com/kiranraaj19/opendesign/releases/latest">
           <span class="platform-name">Windows</span>
-          <span class="platform-file">x86_64 Â· zip</span>
+          <span class="platform-file">x86_64 · zip</span>
         </a>
         <a class="platform" href="https://github.com/kiranraaj19/opendesign/releases/latest">
           <span class="platform-name">Linux</span>
-          <span class="platform-file">x86_64 Â· tar.gz</span>
+          <span class="platform-file">x86_64 · tar.gz</span>
         </a>
         <div class="platform source">
           <span class="platform-name">From source</span>
