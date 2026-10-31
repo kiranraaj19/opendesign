@@ -2684,6 +2684,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "od_mcp"
+version = "0.3.0"
+dependencies = [
+ "image",
+ "od_core",
+ "od_render",
+ "od_sim",
+ "pollster 0.4.0",
+ "serde_json",
+]
+
+[[package]]
 name = "od_render"
 version = "0.3.0"
 dependencies = [

@@ -20,14 +20,15 @@ cd "$repo_root"
 
 target="${1:-}"
 bin_name="opendesign"
+mcp_name="opendesign-mcp"
 version="$(grep -m1 '^version' Cargo.toml | sed -E 's/version *= *"([^"]+)"/\1/')"
 
 if [[ -n "$target" ]]; then
-    cargo build --release --target "$target" -p od_app
+    cargo build --release --target "$target" -p od_app -p od_mcp
     bin_path="target/$target/release/$bin_name"
     archive_name="opendesign-${version}-${target}.tar.gz"
 else
-    cargo build --release -p od_app
+    cargo build --release -p od_app -p od_mcp
     bin_path="target/release/$bin_name"
     host="$(rustc -vV | sed -n 's/^host: //p')"
     archive_name="opendesign-${version}-${host}.tar.gz"
@@ -43,6 +44,8 @@ trap 'rm -rf "$stage_dir"' EXIT
 pkg_dir="$stage_dir/opendesign-${version}"
 mkdir -p "$pkg_dir"
 cp "$bin_path" "$pkg_dir/"
+# The MCP server, for driving OpenDesign from an AI assistant.
+cp "$(dirname "$bin_path")/$mcp_name" "$pkg_dir/"
 cp README.md "$pkg_dir/" 2>/dev/null || true
 cp LICENSE "$pkg_dir/" 2>/dev/null || true
 cp LICENSE-MIT "$pkg_dir/" 2>/dev/null || true

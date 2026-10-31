@@ -31,6 +31,51 @@ cargo run -p od_app
 With Visual Studio Build Tools installed, the default MSVC toolchain works
 without this step.
 
+## Design with Claude (MCP server)
+
+`opendesign-mcp` is a [Model Context Protocol](https://modelcontextprotocol.io)
+server, so an AI assistant such as Claude can design garments with
+OpenDesign: draft and edit pattern pieces, sew them, dress the avatar,
+drape the result with the real cloth simulation and look at renders of it.
+It works without the app's window, and saves ordinary `.odproj` projects
+that open in the app.
+
+Build it (it is in the release archives too):
+
+```bash
+cargo build --release -p od_mcp
+```
+
+Add it to Claude Code:
+
+```bash
+claude mcp add opendesign -- /path/to/opendesign-mcp
+```
+
+or to Claude Desktop's `claude_desktop_config.json`:
+
+```json
+{ "mcpServers": { "opendesign": { "command": "/path/to/opendesign-mcp" } } }
+```
+
+Then ask for something like "make a burgundy cotton T-shirt with long
+sleeves, drape it and show me the front and back".
+
+| Tool | What it does |
+|---|---|
+| `create_garment` | A T-shirt, dress or skirt drafted to the avatar's size, sewn, given a fabric and placed round the body |
+| `get_document`, `get_pattern` | The pieces, their numbered points and edge lengths, the seams and how well their sides match |
+| `add_pattern`, `edit` | Draft a piece from its outline; move, rotate, mirror, reshape, round corners, add darts, pleats, fold lines, buttons, fabrics… many operations per call |
+| `sew`, `arrange` | Sew edges together; place pieces round the body (sleeves and trouser legs start wrapped round the limb) |
+| `set_avatar` | Female, male or kid body, its measurements, and a pose |
+| `drape` | Run the cloth simulation; answers within 45 s and carries on from there on the next call |
+| `render` | A PNG of the garment from any side, as a strain heatmap, or as a flat pattern sheet |
+| `export`, `save_project`, `open_project`, `undo`, `redo` | OBJ/glTF of the drape, DXF of the patterns, projects |
+
+Renders need a GPU adapter; a software one (such as Mesa's llvmpipe) works.
+A drape of a T-shirt takes a minute or two on a CPU, over a few `drape`
+calls.
+
 ## Use
 
 | Action | How |
@@ -126,6 +171,8 @@ build. Code-signing the binary is the long-term fix for releases.
 crates/
   od_core/   Document model, commands, undo/redo history, 2D geometry,
              project file format (project.rs). No UI.
+  od_mcp/    MCP server for AI assistants (opendesign-mcp): stdio JSON-RPC,
+             tools in tools.rs, garment templates, offscreen renders.
   od_app/    egui + egui_dock desktop app.
     src/app.rs           Shell: menus, toolbar, status bar, dock layout, UI tests
     src/files.rs         Open/save, recent files, unsaved-changes prompt

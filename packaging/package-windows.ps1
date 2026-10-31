@@ -21,12 +21,12 @@ $cargoToml = Get-Content "Cargo.toml" -Raw
 $version = ([regex]::Match($cargoToml, '(?m)^version\s*=\s*"([^"]+)"')).Groups[1].Value
 
 if ($Target -ne "") {
-    cargo build --release --target $Target -p od_app
+    cargo build --release --target $Target -p od_app -p od_mcp
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
     $binPath = "target/$Target/release/$binName"
     $archiveName = "opendesign-$version-$Target.zip"
 } else {
-    cargo build --release -p od_app
+    cargo build --release -p od_app -p od_mcp
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
     $binPath = "target/release/$binName"
     $hostTriple = ((rustc -vV | Select-String "^host: (.+)$").Matches[0].Groups[1].Value)
@@ -42,6 +42,8 @@ $stageDir = Join-Path ([System.IO.Path]::GetTempPath()) ([System.Guid]::NewGuid(
 $pkgDir = Join-Path $stageDir "opendesign-$version"
 New-Item -ItemType Directory -Force -Path $pkgDir | Out-Null
 Copy-Item $binPath $pkgDir
+# The MCP server, for driving OpenDesign from an AI assistant.
+Copy-Item (Join-Path (Split-Path $binPath) "opendesign-mcp.exe") $pkgDir
 foreach ($f in @("README.md", "LICENSE", "LICENSE-MIT", "LICENSE-APACHE")) {
     if (Test-Path $f) { Copy-Item $f $pkgDir }
 }
