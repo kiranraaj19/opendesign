@@ -55,6 +55,19 @@ pub struct Drape {
     /// The particle being pulled by the mouse, held by a pin in
     /// `world.pins` that [`Self::move_grab`] moves.
     grabbed: Option<usize>,
+    /// `world.distance_constraints[seams]` are the seams' stitches.
+    seams: Range<usize>,
+    /// Seams being drawn closed gradually (see [`Self::sew_in`]).
+    sew_in: Option<SewIn>,
+}
+
+/// Seams closing over time: each stitch's gap when sewing started, how far
+/// through the closing it is, and the gravity held off meanwhile.
+struct SewIn {
+    gaps: Vec<f32>,
+    elapsed: f32,
+    duration: f32,
+    gravity: Vec3,
 }
 
 impl Drape {
@@ -96,7 +109,9 @@ impl Drape {
         let mut world = World::new(scene.particles);
         world.distance_constraints = scene.structural;
         world.distance_constraints.extend(scene.bending);
+        let seams_start = world.distance_constraints.len();
         world.distance_constraints.extend(scene.stitches);
+        let seams = seams_start..world.distance_constraints.len();
         world
             .distance_constraints
             .extend(scene.details.constraints.iter().copied());
@@ -123,6 +138,8 @@ impl Drape {
             stitch_compliance: config.stitch_compliance,
             seam_particles,
             grabbed: None,
+            seams,
+            sew_in: None,
         };
         drape.update_collision_skip();
         drape
@@ -168,10 +185,54 @@ impl Drape {
     }
 
     pub fn step(&mut self, dt: f32, substeps: u32) {
+        if let Some(sew) = &mut self.sew_in {
+            sew.elapsed += dt;
+            let left = (1.0 - sew.elapsed / sew.duration).max(0.0);
+            let stitches = &mut self.world.distance_constraints[self.seams.clone()];
+            for (c, gap) in stitches.iter_mut().zip(&sew.gaps) {
+                c.rest_length = gap * left;
+            }
+            if left == 0.0 {
+                self.world.gravity = sew.gravity;
+                self.sew_in = None;
+            }
+        }
         self.world.step(dt, substeps, &self.colliders);
     }
 
-    fn range_of(&self, pattern: PatternId) -> Option<Range<usize>> {
+    /// Close the seams over `seconds` instead of all at once: each stitch
+    /// starts at the gap it has to close and shrinks to nothing, so pieces
+    /// that start far apart are drawn together gently rather than snapping
+    /// shut fast enough to pass through the avatar. Gravity is held off
+    /// until they are closed, or the pieces would fall away first. Call
+    /// before stepping.
+    pub fn sew_in(&mut self, seconds: f32) {
+        let particles = &self.world.particles;
+        let gaps = self.world.distance_constraints[self.seams.clone()]
+            .iter()
+            .map(|c| particles[c.a].position.distance(particles[c.b].position))
+            .collect();
+        let gravity = match &self.sew_in {
+            Some(sew) => sew.gravity,
+            None => self.world.gravity,
+        };
+        self.world.gravity = Vec3::ZERO;
+        self.sew_in = Some(SewIn {
+            gaps,
+            elapsed: 0.0,
+            duration: seconds.max(1e-3),
+            gravity,
+        });
+    }
+
+    /// Whether seams are still being drawn closed (see [`Self::sew_in`]).
+    pub fn sewing_in(&self) -> bool {
+        self.sew_in.is_some()
+    }
+
+    /// Where `pattern`'s particles are in `world.particles`, e.g. to move
+    /// a piece into a starting shape before draping.
+    pub fn range_of(&self, pattern: PatternId) -> Option<Range<usize>> {
         self.pattern_ranges
             .iter()
             .find(|(id, _)| *id == pattern)
@@ -723,6 +784,35 @@ mod tests {
         for p in &placed {
             assert!(!p.mesh.positions.is_empty());
         }
+
+        // Sewn in over half a second instead: gravity waits, each stitch's
+        // length shrinks from its gap to nothing, and the seam still closes.
+        let mut drape = Drape::new(&doc, &placements, None, &ClothConfig::default());
+        let gap = |d: &Drape| {
+            d.world.distance_constraints[d.seams.clone()]
+                .iter()
+                .map(|c| {
+                    let p = &d.world.particles;
+                    p[c.a].position.distance(p[c.b].position)
+                })
+                .fold(0.0_f32, f32::max)
+        };
+        let start = gap(&drape);
+        assert!(start > 0.3, "the panels start apart: {start}");
+        drape.sew_in(0.5);
+        assert_eq!(drape.world.gravity, Vec3::ZERO);
+        for _ in 0..15 {
+            drape.step(1.0 / 60.0, 8);
+        }
+        assert!(drape.sewing_in());
+        let rest = drape.world.distance_constraints[drape.seams.start].rest_length;
+        assert!(rest > 0.0 && rest < start, "half way: {rest}");
+        for _ in 0..60 {
+            drape.step(1.0 / 60.0, 8);
+        }
+        assert!(!drape.sewing_in());
+        assert_eq!(drape.world.gravity.y, -9.81, "gravity back on");
+        assert!(gap(&drape) < 0.02, "sewn shut: {}", gap(&drape));
     }
 
     #[test]
