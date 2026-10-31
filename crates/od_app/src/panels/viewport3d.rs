@@ -682,6 +682,7 @@ fn sync_drape(s: &mut Session) {
     if resized || !drape.has_tacks(&s.doc.tacks) {
         drape.sync_tacks(&s.doc.tacks, Some(v.avatar.mesh()));
     }
+    drape.sync_zippers(&s.doc.sewing_lines);
 }
 
 /// Advance the simulation by this frame's time, if draping is running.
@@ -1291,11 +1292,14 @@ fn paint(ui: &mut egui::Ui, rect: Rect, s: &Session, placed: &[PlacedPattern<Pat
         ui.put(Rect::from_center_size(rect.center(), size), label);
     }
 
-    let threads = if v.show.seams {
+    let mut threads = if v.show.seams {
         overlays(s, pal)
     } else {
         Vec::new()
     };
+    if v.show.trims {
+        threads.extend(crate::panels::details3d::overlays(s, pal));
+    }
     for line in threads {
         let pts: Vec<Pos2> = line
             .points

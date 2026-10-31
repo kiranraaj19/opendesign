@@ -207,6 +207,9 @@ pub struct SewingLine {
     pub id: SewingLineId,
     pub a: Vec<SeamEdge>,
     pub b: Vec<SeamEdge>,
+    /// What else the seam is: a zipper, say (see [`crate::details`]).
+    #[serde(default, skip_serializing_if = "crate::details::SeamDetails::is_plain")]
+    pub details: crate::details::SeamDetails,
 }
 
 /// How much two sewn edges may differ in length, as a fraction of the
@@ -1533,6 +1536,7 @@ mod tests {
             id: SewingLineId(1),
             a: vec![edge(PatternId(1), 0.0, 1.0)],
             b: vec![edge(PatternId(2), 0.0, 1.0)],
+            details: Default::default(),
         };
         assert_eq!(seam.length_mismatch(&doc), Some(0.0));
         assert!(!seam.is_length_mismatched(&doc));
@@ -1547,6 +1551,7 @@ mod tests {
             id: SewingLineId(1),
             a: vec![edge(PatternId(1), 1.0, 2.0)],
             b: vec![edge(PatternId(2), 0.0, 1.0)],
+            details: Default::default(),
         };
         assert_eq!(seam.length_mismatch(&doc), Some(-30.0));
         assert!(seam.is_length_mismatched(&doc));
@@ -1559,6 +1564,7 @@ mod tests {
             id: SewingLineId(1),
             a: vec![edge(PatternId(1), 0.0, 1.0)],
             b: vec![edge(PatternId(99), 0.0, 1.0)],
+            details: Default::default(),
         };
         assert_eq!(seam.length_mismatch(&doc), None);
         assert!(!seam.is_length_mismatched(&doc));
@@ -1643,6 +1649,7 @@ mod tests {
             id: SewingLineId(1),
             a: vec![edge(PatternId(1), 0.0, 1.0)],
             b: vec![edge(PatternId(2), 0.0, 1.0), edge(PatternId(2), 2.0, 3.0)],
+            details: Default::default(),
         };
         assert_eq!(seam.length_mismatch(&doc), Some(0.0));
         assert!(!seam.is_length_mismatched(&doc));

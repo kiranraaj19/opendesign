@@ -8,6 +8,7 @@ pub mod bom;
 pub mod clipboard;
 pub mod colourway;
 pub mod command;
+pub mod details;
 pub mod document;
 pub mod dxf;
 pub mod dxf_import;
@@ -37,6 +38,7 @@ pub use command::{
     SetOutline, SetParticleDistance, SetPatternFlag, SetPatternValue, SetPointKind, SetSeamEdge,
     PARTICLE_DISTANCE_RANGE,
 };
+pub use details::{SeamDetails, SetZipper, Zipper};
 pub use document::{
     Arrangement, Axis, Dart, Document, Fabric, FabricTexture, Fold, Grading, InternalLine, Link,
     Notch, OutlinePoint, Pattern, PatternId, PointKind, SeamEdge, SewingLine, SewingLineId,

@@ -245,7 +245,7 @@ fn tool_section(ui: &mut egui::Ui, s: &mut Session) {
             ui.checkbox(&mut p.tack, "Tack the top")
                 .on_hover_text("Tack each pleat's folds together where the drag starts");
         }
-        _ => {}
+        _ => crate::panels::details::tool_section(ui, s),
     }
 }
 
@@ -993,6 +993,7 @@ fn seam_section(ui: &mut egui::Ui, s: &mut Session, id: od_core::SewingLineId) {
             s.selection.set(keep);
         }
     });
+    crate::panels::details::seam_section(ui, s, id);
 }
 
 /// A selected tack: what it holds to what.

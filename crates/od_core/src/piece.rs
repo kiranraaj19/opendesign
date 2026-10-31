@@ -455,6 +455,7 @@ fn cut(doc: &mut Document, id: PatternId, line: usize, sew: bool) -> Option<Stat
                 end: n(&b),
                 forward: false,
             }],
+            details: Default::default(),
         });
     }
 

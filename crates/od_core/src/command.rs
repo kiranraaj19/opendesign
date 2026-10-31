@@ -1364,13 +1364,25 @@ impl Command for DuplicatePattern {
 pub struct AddSewingLine {
     a: Vec<SeamEdge>,
     b: Vec<SeamEdge>,
+    details: crate::details::SeamDetails,
     /// Assigned on first apply so redo recreates the same id.
     id: Option<SewingLineId>,
 }
 
 impl AddSewingLine {
     pub fn new(a: Vec<SeamEdge>, b: Vec<SeamEdge>) -> Self {
-        Self { a, b, id: None }
+        Self {
+            a,
+            b,
+            details: Default::default(),
+            id: None,
+        }
+    }
+
+    /// Make the new seam a zipper.
+    pub fn zipped(mut self, zipper: crate::details::Zipper) -> Self {
+        self.details.zipper = Some(zipper);
+        self
     }
 
     /// Id of the created seam, available after the command has run.
@@ -1381,7 +1393,11 @@ impl AddSewingLine {
 
 impl Command for AddSewingLine {
     fn label(&self) -> String {
-        "Sew edges".into()
+        if self.details.zipper.is_some() {
+            "Add zipper".into()
+        } else {
+            "Sew edges".into()
+        }
     }
 
     fn apply(&mut self, doc: &mut Document) {
@@ -1390,6 +1406,7 @@ impl Command for AddSewingLine {
             id,
             a: self.a.clone(),
             b: self.b.clone(),
+            details: self.details,
         });
     }
 

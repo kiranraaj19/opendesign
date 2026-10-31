@@ -60,11 +60,12 @@ pub enum Tool {
     Dart,
     Pleat,
     Measure,
+    Zipper,
 }
 
 impl Tool {
     /// Toolbar order, with button label, shortcut key and tooltip.
-    const BUTTONS: [(Tool, &'static str, Key, &'static str); 13] = [
+    const BUTTONS: [(Tool, &'static str, Key, &'static str); 14] = [
         (
             Tool::Select,
             "Select",
@@ -143,6 +144,12 @@ impl Tool {
             Key::M,
             "Click two outline points to measure between them; Shift+click to measure along the outline (M)",
         ),
+        (
+            Tool::Zipper,
+            "Zipper",
+            Key::Z,
+            "Click two edges to sew a zipper between them; click a zipper to open or close it (Z)",
+        ),
     ];
 
     pub fn name(self) -> &'static str {
@@ -160,6 +167,7 @@ impl Tool {
             Tool::Dart => "Dart",
             Tool::Pleat => "Pleat",
             Tool::Measure => "Measure",
+            Tool::Zipper => "Zipper",
         }
     }
 }
@@ -1195,6 +1203,10 @@ mod workspace_tests;
 #[cfg(test)]
 #[path = "measure_tests.rs"]
 mod measure_tests;
+
+#[cfg(test)]
+#[path = "details_tests.rs"]
+mod details_tests;
 
 /// Drive the real app headlessly: clicks and keys go through egui exactly as
 /// they would from a mouse and keyboard, no window or GPU needed.

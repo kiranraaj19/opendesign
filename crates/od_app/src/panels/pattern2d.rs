@@ -92,6 +92,8 @@ pub struct Canvas2D {
     pub pleat: PleatSettings,
     /// The Measure tool, size overlay and measurement chart.
     pub measure: crate::panels::measure2d::Measure2D,
+    /// The garment detail tools (zippers).
+    pub details: crate::panels::details::Details2D,
 }
 
 /// What the Pleat tool lays out.
@@ -217,6 +219,7 @@ impl Default for Canvas2D {
             dart_depth: 80.0,
             pleat: PleatSettings::default(),
             measure: Default::default(),
+            details: Default::default(),
         }
     }
 }
@@ -270,7 +273,7 @@ impl Canvas2D {
     /// The corner-to-corner segment under `p` as an edge, sewn from
     /// whichever end is nearer, so picking two edges near matching ends
     /// sews them untwisted.
-    fn segment_edge(
+    pub(crate) fn segment_edge(
         &self,
         doc: &Document,
         selection: Option<PatternId>,
@@ -401,7 +404,7 @@ impl Canvas2D {
     }
 
     /// Screen pixels as millimetres at the current zoom.
-    fn px(&self, px: f32) -> f32 {
+    pub(crate) fn px(&self, px: f32) -> f32 {
         px / self.zoom
     }
 
@@ -594,6 +597,7 @@ pub fn ui(ui: &mut egui::Ui, s: &mut Session) {
         Tool::Dart => handle_dart(&response, rect, s),
         Tool::Pleat => handle_pleat(&response, rect, s),
         Tool::Measure => crate::panels::measure2d::handle(ui, &response, rect, s, typing),
+        Tool::Zipper => crate::panels::details::handle_zipper(ui, &response, rect, s),
     }
 
     // Background and grid.
@@ -619,6 +623,7 @@ pub fn ui(ui: &mut egui::Ui, s: &mut Session) {
         draw_pattern(&painter, rect, s, pattern, pal);
     }
     draw_sewing_lines(&painter, rect, s, pal);
+    crate::panels::details::draw(&painter, rect, s, pal);
     draw_overlays(&painter, rect, s, pal);
     crate::panels::measure2d::draw(&painter, rect, s, pal);
 
@@ -655,6 +660,7 @@ pub fn ui(ui: &mut egui::Ui, s: &mut Session) {
         Tool::Measure => {
             "Click two outline points to measure between them (Shift: along the outline) · Esc cancels"
         }
+        Tool::Zipper => crate::panels::details::hint(s),
         Tool::Sew => match &s.canvas.sew_pending {
             Some(SewBuild::Edges { active, .. }) => {
                 if *active == 0 {
