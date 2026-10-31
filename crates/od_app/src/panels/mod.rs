@@ -13,6 +13,7 @@ pub mod measure2d;
 pub mod measure3d;
 pub mod objects;
 pub mod pattern2d;
+pub mod pose;
 pub mod properties;
 pub mod viewport3d;
 pub mod views;

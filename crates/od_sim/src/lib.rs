@@ -12,5 +12,6 @@ pub mod details;
 pub mod drape;
 pub mod mesh;
 pub mod mesher;
+pub mod posing;
 pub mod self_collision;
 pub mod xpbd;

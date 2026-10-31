@@ -6,6 +6,7 @@
 
 pub mod arrange;
 pub mod avatar;
+pub mod bvh;
 pub mod camera;
 pub mod export;
 pub mod gpu;
@@ -17,6 +18,7 @@ pub mod pattern;
 pub mod pick;
 pub mod render;
 pub mod scene;
+pub mod skeleton;
 pub mod view;
 
 pub use glam;

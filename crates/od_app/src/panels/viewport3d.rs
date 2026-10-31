@@ -12,7 +12,7 @@ use eframe::egui_wgpu;
 use egui::{Color32, PointerButton, Pos2, Rect, Sense, UiBuilder};
 use od_core::{Pattern, PatternId, Side, TackPoint, TackTarget, TrimKind, Vec2};
 use od_render::arrange::ArrangementPoint;
-use od_render::avatar::{avatar_mesh, AvatarKind, Measurements};
+use od_render::avatar::{AvatarKind, Measurements};
 use od_render::camera::{ndc_from_pixel, OrbitCamera, ViewPreset};
 use od_render::glam;
 use od_render::gpu::{Renderer, Targets};
@@ -20,6 +20,7 @@ use od_render::material::Material;
 use od_render::mesh::{Aabb, Mesh};
 use od_render::pattern::{Placement, RingLayout};
 use od_render::scene::{linear, AvatarDraw, Frame, GridColors};
+use od_render::skeleton::Rig;
 use od_render::view::{self, Display, FrameInput, PlacedPattern, Style, Theme};
 use od_sim::collision::Collider;
 
@@ -28,6 +29,7 @@ use crate::panels::context;
 use crate::panels::gizmo::{self, GizmoDrag};
 use crate::panels::measure3d;
 use crate::panels::pattern2d;
+use crate::panels::pose;
 use crate::theme;
 
 /// Shown instead of the scene when there is no wgpu renderer.
@@ -95,6 +97,11 @@ pub struct Avatar {
     bounds: Aabb,
     /// Bumped on every change so the renderer re-uploads the mesh.
     pub generation: u64,
+    /// The skeleton of a preset body, which poses it (see
+    /// [`crate::panels::pose`]). Loaded avatars have none.
+    rig: Option<Arc<Rig>>,
+    /// Each bone's turn from the rest pose, as `rig` takes them.
+    rotations: Vec<glam::Quat>,
 }
 
 impl Avatar {
@@ -108,6 +115,8 @@ impl Avatar {
                 max: glam::Vec3::ZERO,
             },
             generation: 0,
+            rig: None,
+            rotations: Vec::new(),
         };
         avatar.rebuild();
         avatar
@@ -159,9 +168,37 @@ impl Avatar {
         Ok(())
     }
 
+    /// The skeleton posing this avatar, for a preset body.
+    pub fn rig(&self) -> Option<&Rig> {
+        self.rig.as_deref()
+    }
+
+    pub fn rotations(&self) -> &[glam::Quat] {
+        &self.rotations
+    }
+
+    /// Pose the body: one turn per bone of [`Self::rig`]. Kept through
+    /// resizing; ignored by loaded avatars.
+    pub fn set_rotations(&mut self, rotations: Vec<glam::Quat>) {
+        self.rotations = rotations;
+        if let Some(rig) = &self.rig {
+            let mesh = rig.skin(&self.rotations);
+            self.bounds = mesh.bounds().unwrap_or(self.bounds);
+            self.mesh = Arc::new(mesh);
+            self.generation += 1;
+        }
+    }
+
     fn rebuild(&mut self) {
+        self.rig = None;
         let mesh = match &self.source {
-            AvatarSource::Preset(kind) => avatar_mesh(*kind, self.measurements),
+            AvatarSource::Preset(kind) => {
+                // Posed the way it stood before the change.
+                let rig = Rig::avatar(*kind, self.measurements);
+                let mesh = rig.skin(&self.rotations);
+                self.rig = Some(Arc::new(rig));
+                mesh
+            }
             AvatarSource::File { mesh, .. } => {
                 let mut mesh = Mesh::clone(mesh);
                 let natural = mesh.bounds().map_or(1.0, |b| b.size().y);
@@ -224,6 +261,8 @@ pub struct Viewport3D {
     pub reference: Option<crate::import::Reference>,
     /// The circumference and tape tools (see [`measure3d`]).
     pub measure: measure3d::Measure3D,
+    /// The avatar's pose as shown, and the Pose panel (see [`pose`]).
+    pub posing: pose::Posing,
 }
 
 /// Things the 3D view can hide, to see the garment more clearly.
@@ -287,6 +326,7 @@ impl Viewport3D {
             frame_selection: false,
             reference: None,
             measure: Default::default(),
+            posing: Default::default(),
         }
     }
 
@@ -295,6 +335,13 @@ impl Viewport3D {
     /// falls back to [`NO_GPU`] under.
     pub fn has_gpu(&self) -> bool {
         self.render_device.is_some()
+    }
+
+    /// Forget the GPU renderer, so a screenshot test can draw this tab's
+    /// panels: the scene's paint callback doesn't fit kittest's pass.
+    #[cfg(test)]
+    pub fn drop_gpu(&mut self) {
+        self.gpu = None;
     }
 
     /// Ask for an avatar file and load it.
@@ -917,6 +964,7 @@ pub fn export_drape_frames(
 
 pub fn ui(ui: &mut egui::Ui, s: &mut Session) {
     let action = ui.horizontal_wrapped(|ui| view_buttons(ui, s)).inner;
+    pose::update(ui, s);
     step_drape(ui, s);
     let placed = current_placed_patterns(s);
     let (rect, response) = ui.allocate_exact_size(ui.available_size(), Sense::click_and_drag());
@@ -959,6 +1007,9 @@ pub fn ui(ui: &mut egui::Ui, s: &mut Session) {
     paint(ui, rect, s, &placed);
     if s.viewport.show_sizing {
         sizing_panel(ui, rect, s);
+    }
+    if s.viewport.posing.open {
+        pose::panel(ui, rect, s);
     }
 }
 
@@ -1042,6 +1093,8 @@ fn view_buttons(ui: &mut egui::Ui, s: &mut Session) -> Option<ViewAction> {
     .on_hover_text("Draw the avatar and cloth solid, as wireframe or see-through");
     ui.toggle_value(&mut s.viewport.show_sizing, "Avatar size")
         .on_hover_text("Height, chest, waist and hip of the avatar");
+    ui.toggle_value(&mut s.viewport.posing.open, "Pose")
+        .on_hover_text("Pose the avatar: built-in poses, joint angles and BVH motion");
     measure3d::buttons(ui, s);
     ui.separator();
     let label = if s.viewport.draping {

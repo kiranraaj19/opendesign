@@ -1226,6 +1226,10 @@ mod measure_tests;
 #[path = "details_tests.rs"]
 mod details_tests;
 
+#[cfg(test)]
+#[path = "pose_tests.rs"]
+mod pose_tests;
+
 /// Drive the real app headlessly: clicks and keys go through egui exactly as
 /// they would from a mouse and keyboard, no window or GPU needed.
 #[cfg(test)]
