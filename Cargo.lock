@@ -2657,7 +2657,7 @@ dependencies = [
 
 [[package]]
 name = "od_app"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "eframe",
  "egui",
@@ -2674,7 +2674,7 @@ dependencies = [
 
 [[package]]
 name = "od_core"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "earcutr",
  "kurbo",
@@ -2685,7 +2685,7 @@ dependencies = [
 
 [[package]]
 name = "od_render"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "bytemuck",
  "earcutr",
@@ -2700,7 +2700,7 @@ dependencies = [
 
 [[package]]
 name = "od_sim"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "glam",
  "od_core",
