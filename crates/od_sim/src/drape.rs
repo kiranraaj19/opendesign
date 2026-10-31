@@ -402,6 +402,15 @@ impl Drape {
         self.world.distance_constraints.extend(closed);
     }
 
+    /// Where each buttonhole's slit currently runs, end to end.
+    pub fn buttonhole_positions(&self) -> Vec<[Vec3; 2]> {
+        self.details
+            .holes
+            .iter()
+            .map(|ends| ends.map(|at| at.position(&self.world.particles)))
+            .collect()
+    }
+
     /// Where each zipper tape currently runs, in order along its edge.
     pub fn edge_detail_positions(&self) -> Vec<(EdgeKind, Vec<Vec3>)> {
         self.details
@@ -600,6 +609,7 @@ mod tests {
         panel.trims.push(Trim {
             kind: TrimKind::Snap,
             pos: Vec2::new(0.0, 0.0),
+            angle: 0.0,
         });
         panel.topstitches.push(Topstitch {
             points: vec![Vec2::new(0.0, 0.0), Vec2::new(200.0, 0.0)],

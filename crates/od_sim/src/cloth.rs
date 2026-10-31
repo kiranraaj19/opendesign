@@ -78,8 +78,8 @@ pub struct ClothScene {
     /// two points it holds together, the second either on the cloth or at
     /// a fixed anchor particle on the avatar.
     pub tacks: Vec<(usize, SurfaceStitch)>,
-    /// Zipper tapes: their constraints, and the edge particles to draw
-    /// them through.
+    /// Zipper tapes (their constraints, and the edge particles to draw
+    /// them through) and buttonhole slits.
     pub details: crate::details::SceneDetails,
 }
 
@@ -526,12 +526,17 @@ pub fn build(
 
     let mut trims = Vec::new();
     let mut topstitches = Vec::new();
+    let mut details = crate::details::SceneDetails::default();
     for id in &order {
         let layout = &layouts[id];
         let spacing = particle_distance(layout.pattern, config);
         for trim in &layout.pattern.trims {
             if let Some(at) = layout.surface_point(trim.pos) {
                 trims.push((trim.kind, at));
+            }
+            if trim.kind == TrimKind::Buttonhole {
+                let [a, b] = trim.slit().map(|p| layout.surface_point(p));
+                details.holes.extend(a.zip(b).map(|(a, b)| [a, b]));
             }
         }
         for line in &layout.pattern.topstitches {
@@ -545,7 +550,6 @@ pub fn build(
     }
 
     let mut stitch_pairs: BTreeSet<(usize, usize)> = BTreeSet::new();
-    let mut details = crate::details::SceneDetails::default();
     for seam in &doc.sewing_lines {
         let a_chain = side_chain(&layouts, &seam.a);
         let b_chain = side_chain(&layouts, &seam.b);
@@ -907,6 +911,7 @@ mod tests {
             kind: TrimKind::Button,
             // Near corner 1 (200.0, 0.0).
             pos: Vec2::new(195.0, 5.0),
+            angle: 0.0,
         });
         panel.topstitches.push(Topstitch {
             // Near corners 0 and 1.

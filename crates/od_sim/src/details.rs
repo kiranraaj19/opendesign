@@ -1,6 +1,7 @@
 //! Garment details in the simulation: a zipper's tapes, which stiffen
 //! and weigh down the edges they are sewn to, and (when it is open) leave
-//! its two sides unstitched.
+//! its two sides unstitched; and buttonhole slits, carried on the cloth
+//! for drawing. A fastened button needs nothing here: its tack holds it.
 //!
 //! A tape is extra constraints along a run of outline particles: stiff
 //! ones between neighbours, so the edge hardly stretches, and between
@@ -9,7 +10,7 @@
 use od_core::document::SewingLineId;
 use od_core::Zipper;
 
-use crate::xpbd::{DistanceConstraint, Particle};
+use crate::xpbd::{DistanceConstraint, Particle, SurfacePoint};
 
 /// How a strip sewn along an edge changes it.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -61,6 +62,8 @@ pub struct SceneDetails {
     /// Every zipper's stitches, open or closed, by seam: only a closed
     /// zipper's hold (see [`SceneDetails::closed_stitches`]).
     pub zipper_stitches: Vec<(SewingLineId, DistanceConstraint)>,
+    /// Each buttonhole's slit, as its two ends on the cloth.
+    pub holes: Vec<[SurfacePoint; 2]>,
 }
 
 impl SceneDetails {
@@ -309,6 +312,50 @@ mod tests {
         let zipper = bend(zipped(true));
         assert!(plain > 0.01, "the cloth bends: {plain}");
         assert!(zipper < plain * 0.8, "{zipper} vs {plain}");
+    }
+
+    #[test]
+    fn a_fastened_button_is_drawn_into_its_buttonhole() {
+        use crate::drape::Drape;
+        use od_core::details::Fasten;
+        use od_core::{AddTrim, Command, TackPoint, TrimKind};
+        let (mut doc, placements) = two_panels(SeamDetails::default());
+        doc.sewing_lines.clear();
+        let (button, hole) = (Vec2::new(120.0, 150.0), Vec2::new(30.0, 150.0));
+        AddTrim::new(PatternId(1), TrimKind::Button, button).apply(&mut doc);
+        AddTrim::new(PatternId(2), TrimKind::Buttonhole, hole)
+            .at_angle(90.0)
+            .apply(&mut doc);
+        Fasten::new(
+            TackPoint {
+                pattern: PatternId(1),
+                at: button,
+            },
+            TackPoint {
+                pattern: PatternId(2),
+                at: hole,
+            },
+        )
+        .apply(&mut doc);
+        let mut drape = Drape::new(&doc, &placements, None, &ClothConfig::default());
+        drape.world.gravity = glam::Vec3::ZERO;
+        let slits = drape.buttonhole_positions();
+        assert_eq!(slits.len(), 1);
+        let [from, to] = slits[0];
+        assert!((from.distance(to) - 0.018).abs() < 1e-4, "18 mm long");
+        assert!((from.x - to.x).abs() < 1e-4, "upright, at 90°");
+
+        let gap = |drape: &Drape| {
+            let button = drape.trim_positions()[0].1;
+            let [a, b] = drape.buttonhole_positions()[0];
+            button.distance((a + b) * 0.5)
+        };
+        let start = gap(&drape);
+        assert!((start - 0.06).abs() < 1e-3, "{start}");
+        for _ in 0..60 {
+            drape.step(1.0 / 60.0, 8);
+        }
+        assert!(gap(&drape) < 0.005, "{}", gap(&drape));
     }
 
     #[test]

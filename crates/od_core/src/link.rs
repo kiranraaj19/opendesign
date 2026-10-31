@@ -61,7 +61,7 @@ pub fn sync(doc: &mut Document) {
             line.points.iter_mut().for_each(|p| *p = f(*p));
         }
         for trim in &mut copy.trims {
-            trim.pos = f(trim.pos);
+            trim.map(f);
         }
         for dart in &mut copy.darts {
             dart.start = f(dart.start);

@@ -690,6 +690,7 @@ mod tests {
             .push(crate::document::Trim {
                 kind: crate::document::TrimKind::Button,
                 pos: Vec2::new(100.0, 80.0),
+                angle: 0.0,
             });
         let other = add_rect(
             &mut doc,
@@ -880,6 +881,7 @@ mod tests {
             .push(crate::document::Trim {
                 kind: crate::document::TrimKind::Button,
                 pos: Vec2::new(310.0, 10.0),
+                angle: 0.0,
             });
         // Left's right side sewn top-down to Right's right side top-down:
         // laid along each other sewing start on start, Right would cover

@@ -1,10 +1,13 @@
 //! Garment details in the 2D window and Properties: the Zipper tool, the
 //! zippers drawn along their seams (tape, teeth and slider), and the
-//! zipper settings of a selected seam.
+//! zipper settings of a selected seam; the Buttonhole tool, which places
+//! buttonholes and fastens buttons into them.
 
 use egui::{Align2, Color32, FontId, Key, Pos2, Rect, Shape, Stroke};
+use od_core::details::{fastenings, Fasten, Unfasten};
 use od_core::{
-    AddSewingLine, Pattern, SeamEdge, SetZipper, SewingLine, SewingLineId, Vec2, Zipper,
+    AddSewingLine, AddTrim, Batch, Command, Pattern, PatternId, RemoveTrim, SeamEdge, SetZipper,
+    SewingLine, SewingLineId, TackPoint, Trim, TrimKind, Vec2, Zipper,
 };
 
 use crate::app::{Session, Tool};
@@ -19,6 +22,10 @@ pub struct Details2D {
     drag_start: Option<Vec2>,
     /// Tape width of new zippers, in mm.
     pub tape_width: f32,
+    /// The button picked to fasten, waiting for its buttonhole.
+    pub button_start: Option<TackPoint>,
+    /// Which way new buttonholes' slits run (see [`Trim::angle`]).
+    pub hole_angle: f32,
 }
 
 impl Default for Details2D {
@@ -27,6 +34,8 @@ impl Default for Details2D {
             zipper_first: None,
             drag_start: None,
             tape_width: Zipper::DEFAULT_TAPE_WIDTH,
+            button_start: None,
+            hole_angle: 0.0,
         }
     }
 }
@@ -113,9 +122,111 @@ pub fn handle_zipper(ui: &egui::Ui, response: &egui::Response, rect: Rect, s: &m
     }
 }
 
+/// The topmost shown pattern with a trim of `kind` within reach of `p`:
+/// the pattern, the trim's index and where it is.
+fn trim_near(s: &Session, p: Vec2, kind: TrimKind) -> Option<(PatternId, usize, Vec2)> {
+    let reach = s.canvas.px(PICK_PX);
+    s.doc
+        .patterns
+        .iter()
+        .rev()
+        .filter(|pat| !pat.hidden)
+        .find_map(|pat| {
+            let i = pat
+                .trims
+                .iter()
+                .position(|t| t.kind == kind && t.pos.distance(p) <= reach)?;
+            Some((pat.id, i, pat.trims[i].pos))
+        })
+}
+
+/// The Buttonhole tool: a click inside a piece places a buttonhole, a
+/// click on one removes it (unfastening its button). A click on a button
+/// and then on a buttonhole fastens the button into it; a click on a
+/// fastened button unfastens it.
+pub fn handle_buttonhole(ui: &egui::Ui, response: &egui::Response, rect: Rect, s: &mut Session) {
+    let typing = ui.memory(|m| m.focused().is_some());
+    if !typing && ui.input(|i| i.key_pressed(Key::Escape)) {
+        s.canvas.details.button_start = None;
+    }
+    if !response.clicked() {
+        return;
+    }
+    let Some(screen) = response.interact_pointer_pos() else {
+        return;
+    };
+    let p = s.canvas.to_doc(rect, screen);
+    if let Some(button) = s.canvas.details.button_start.take() {
+        if let Some((pattern, _, at)) = trim_near(s, p, TrimKind::Buttonhole) {
+            s.execute(Fasten::new(button, TackPoint { pattern, at }));
+        }
+        return;
+    }
+    if let Some((pattern, index, at)) = trim_near(s, p, TrimKind::Button) {
+        s.selection.set(Some(pattern));
+        let fastened = fastenings(&s.doc)
+            .into_iter()
+            .find(|f| f.button == (pattern, index));
+        match fastened {
+            Some(f) => s.execute(Unfasten::new(f.tack)),
+            None => s.canvas.details.button_start = Some(TackPoint { pattern, at }),
+        }
+        return;
+    }
+    if let Some((pattern, index, _)) = trim_near(s, p, TrimKind::Buttonhole) {
+        s.selection.set(Some(pattern));
+        let mut steps: Vec<Box<dyn Command>> = fastenings(&s.doc)
+            .into_iter()
+            .filter(|f| f.hole == (pattern, index))
+            .map(|f| Box::new(Unfasten::new(f.tack)) as Box<dyn Command>)
+            .collect();
+        let (target, _) = s.edit_target(pattern);
+        steps.push(Box::new(RemoveTrim::new(target, index)));
+        s.execute(Batch::new("Remove buttonhole", steps));
+        return;
+    }
+    let Some(id) = s.doc.pattern_at(p) else {
+        return;
+    };
+    s.selection.set(Some(id));
+    let (target, link) = s.edit_target(id);
+    let mut angle = s.canvas.details.hole_angle;
+    let mut at = p;
+    if let Some(link) = link {
+        // Placed through a linked copy: on its source, turned to match.
+        let (sin, cos) = angle.to_radians().sin_cos();
+        let d = link.to_source(p + Vec2::new(cos, sin)) - link.to_source(p);
+        angle = d.y.atan2(d.x).to_degrees();
+        at = link.to_source(p);
+    }
+    s.execute(AddTrim::new(target, TrimKind::Buttonhole, at).at_angle(angle));
+}
+
+/// A buttonhole: its slit, with a bar across each end.
+pub fn draw_buttonhole(
+    painter: &egui::Painter,
+    trim: &Trim,
+    to_screen: &impl Fn(Vec2) -> Pos2,
+    color: Color32,
+) {
+    let [a, b] = trim.slit().map(to_screen);
+    painter.line_segment([a, b], Stroke::new(2.5, color));
+    let d = (b - a).normalized();
+    let bar = egui::vec2(-d.y, d.x) * 4.0;
+    for end in [a, b] {
+        painter.line_segment([end - bar, end + bar], Stroke::new(1.5, color));
+    }
+}
+
 /// What the detail tools say they do, at the top of the 2D window.
 pub fn hint(s: &Session) -> &'static str {
     match s.tool {
+        Tool::Buttonhole if s.canvas.details.button_start.is_some() => {
+            "Click the buttonhole to fasten the button into · Esc cancels"
+        }
+        Tool::Buttonhole => {
+            "Click to place a buttonhole · click a button, then a buttonhole, to fasten them · click a buttonhole or fastened button to undo it"
+        }
         Tool::Zipper if s.canvas.details.zipper_first.is_some() => {
             "Click or drag along the stretch it zips to · Esc cancels"
         }
@@ -185,6 +296,29 @@ pub fn draw(painter: &egui::Painter, rect: Rect, s: &Session, pal: &theme::Palet
     let to_screen = |p: Vec2| s.canvas.to_screen(rect, p);
     for line in s.doc.sewing_lines.iter().filter(|l| l.is_zipper()) {
         draw_zipper(painter, s, line, pal, &to_screen);
+    }
+    // A button over each buttonhole it is fastened into.
+    for f in fastenings(&s.doc) {
+        let hole = s
+            .doc
+            .pattern(f.hole.0)
+            .filter(|p| !p.hidden)
+            .and_then(|p| p.trims.get(f.hole.1));
+        if let Some(hole) = hole {
+            painter.circle_stroke(to_screen(hole.pos), 7.0, Stroke::new(1.5, pal.selected));
+        }
+    }
+    if let Some(start) = &s.canvas.details.button_start {
+        let from = to_screen(start.at);
+        painter.circle_stroke(from, 7.0, Stroke::new(2.0, pal.preview));
+        if let (Tool::Buttonhole, Some(hover)) = (s.tool, s.canvas.hover) {
+            painter.extend(Shape::dashed_line(
+                &[from, to_screen(hover)],
+                Stroke::new(1.5, pal.preview),
+                6.0,
+                4.0,
+            ));
+        }
     }
     if let Some(first) = &s.canvas.details.zipper_first {
         if let Some(pattern) = s.doc.pattern(first.pattern) {
@@ -265,6 +399,21 @@ fn draw_zipper(
 
 /// Settings for a detail tool in use, in Properties.
 pub fn tool_section(ui: &mut egui::Ui, s: &mut Session) {
+    if s.tool == Tool::Buttonhole {
+        ui.add_space(8.0);
+        ui.heading("Buttonhole tool");
+        let angle = &mut s.canvas.details.hole_angle;
+        ui.horizontal(|ui| {
+            ui.label("Slit");
+            ui.selectable_value(angle, 0.0, "Across");
+            ui.selectable_value(angle, 90.0, "Upright");
+            ui.add(
+                egui::DragValue::new(angle)
+                    .range(-180.0..=180.0)
+                    .suffix("°"),
+            );
+        });
+    }
     if s.tool == Tool::Zipper {
         ui.add_space(8.0);
         ui.heading("Zipper tool");

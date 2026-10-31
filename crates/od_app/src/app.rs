@@ -61,11 +61,12 @@ pub enum Tool {
     Pleat,
     Measure,
     Zipper,
+    Buttonhole,
 }
 
 impl Tool {
     /// Toolbar order, with button label, shortcut key and tooltip.
-    const BUTTONS: [(Tool, &'static str, Key, &'static str); 14] = [
+    const BUTTONS: [(Tool, &'static str, Key, &'static str); 15] = [
         (
             Tool::Select,
             "Select",
@@ -150,6 +151,12 @@ impl Tool {
             Key::Z,
             "Click two edges to sew a zipper between them; click a zipper to open or close it (Z)",
         ),
+        (
+            Tool::Buttonhole,
+            "Buttonhole",
+            Key::H,
+            "Click to place a buttonhole; click a button, then a buttonhole, to fasten them (H)",
+        ),
     ];
 
     pub fn name(self) -> &'static str {
@@ -168,6 +175,7 @@ impl Tool {
             Tool::Pleat => "Pleat",
             Tool::Measure => "Measure",
             Tool::Zipper => "Zipper",
+            Tool::Buttonhole => "Buttonhole",
         }
     }
 }

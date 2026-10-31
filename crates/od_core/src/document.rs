@@ -168,14 +168,20 @@ pub enum TrimKind {
     #[default]
     Button,
     Snap,
+    /// A slit a button is pushed through (see [`crate::details`]).
+    Buttonhole,
 }
 
-/// A point trim (button, snap) placed on a pattern's outline or interior,
-/// in the pattern's own mm coordinates.
+/// A point trim (button, snap, buttonhole) placed on a pattern's outline
+/// or interior, in the pattern's own mm coordinates.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct Trim {
     pub kind: TrimKind,
     pub pos: Vec2,
+    /// Which way a buttonhole's slit runs, in degrees clockwise on screen
+    /// from the pattern's x axis. It turns and flips with the pattern.
+    #[serde(default)]
+    pub angle: f32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
@@ -782,6 +788,10 @@ impl Pattern {
         }
         for trim in &mut self.trims {
             trim.pos = axis.reflect(trim.pos, about);
+            trim.angle = match axis {
+                Axis::Vertical => normalize_degrees(180.0 - trim.angle),
+                Axis::Horizontal => normalize_degrees(-trim.angle),
+            };
         }
         for dart in &mut self.darts {
             dart.map(|p| axis.reflect(p, about));
@@ -808,6 +818,7 @@ impl Pattern {
         }
         for trim in &mut self.trims {
             trim.pos = turn(trim.pos);
+            trim.angle = normalize_degrees(trim.angle + degrees);
         }
         for dart in &mut self.darts {
             dart.map(turn);
@@ -836,7 +847,7 @@ impl Pattern {
             line.points.iter_mut().for_each(|p| *p = f(*p));
         }
         for trim in &mut self.trims {
-            trim.pos = f(trim.pos);
+            trim.map(&f);
         }
         for dart in &mut self.darts {
             dart.map(&f);
@@ -1422,6 +1433,7 @@ mod tests {
         p.trims.push(Trim {
             kind: TrimKind::Button,
             pos: Vec2::new(30.0, 10.0),
+            angle: 0.0,
         });
         p.mirror(Axis::Vertical, 0.0);
         assert_eq!(p.outline[1].pos, Vec2::new(-100.0, 0.0));

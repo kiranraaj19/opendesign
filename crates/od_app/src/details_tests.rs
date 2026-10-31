@@ -186,6 +186,71 @@ fn zippers_are_drawn_over_the_3d_view_and_open_while_draping() {
     assert!(draped.iter().all(|o| o.dashed));
 }
 
+/// A button on Left at (80, 40) and a buttonhole placed with the
+/// Buttonhole tool on Right at (180, 40).
+fn button_and_hole(h: &mut Harness<'_, OpenDesignApp>) -> [PatternId; 2] {
+    let [left, right] = two_pieces(h);
+    h.state_mut().session.execute(od_core::AddTrim::new(
+        left,
+        od_core::TrimKind::Button,
+        Vec2::new(80.0, 40.0),
+    ));
+    h.run();
+    press(h, Modifiers::NONE, Key::H);
+    assert_eq!(h.state().session.tool, Tool::Buttonhole);
+    click_mm(h, 180.0, 40.0);
+    [left, right]
+}
+
+#[test]
+fn the_buttonhole_tool_places_holes_and_fastens_buttons_into_them() {
+    use od_core::details::fastenings;
+    use od_core::TrimKind;
+    let mut h = harness();
+    let [left, right] = button_and_hole(&mut h);
+    let trims = h.state().session.doc.pattern(right).unwrap().trims.clone();
+    assert_eq!(trims.len(), 1);
+    assert_eq!(trims[0].kind, TrimKind::Buttonhole);
+    assert_eq!(last_step(&h), "Add buttonhole");
+
+    // Button, then hole: fastened by a tack between them.
+    click_mm(&mut h, 80.0, 40.0);
+    assert!(h.state().session.canvas.details.button_start.is_some());
+    click_mm(&mut h, 180.0, 40.0);
+    let found = fastenings(&h.state().session.doc);
+    assert_eq!(found.len(), 1);
+    assert_eq!((found[0].button, found[0].hole), ((left, 0), (right, 0)));
+    assert_eq!(last_step(&h), "Fasten button");
+
+    // Clicking the fastened button unfastens it.
+    click_mm(&mut h, 80.0, 40.0);
+    assert!(fastenings(&h.state().session.doc).is_empty());
+    assert_eq!(last_step(&h), "Unfasten button");
+
+    // Fastened again, removing the hole takes the fastening with it, in
+    // one step.
+    click_mm(&mut h, 80.0, 40.0);
+    click_mm(&mut h, 180.0, 40.0);
+    click_mm(&mut h, 180.0, 40.0);
+    let s = &h.state().session;
+    assert!(s.doc.pattern(right).unwrap().trims.is_empty());
+    assert!(s.doc.tacks.is_empty());
+    assert_eq!(last_step(&h), "Remove buttonhole");
+    press(&mut h, Modifiers::COMMAND, Key::Z);
+    assert_eq!(fastenings(&h.state().session.doc).len(), 1);
+}
+
+#[test]
+fn buttonholes_are_placed_at_the_tools_angle() {
+    let mut h = harness();
+    let [_, right] = two_pieces(&mut h);
+    press(&mut h, Modifiers::NONE, Key::H);
+    click(&mut h, "Upright");
+    click_mm(&mut h, 200.0, 100.0);
+    let hole = h.state().session.doc.pattern(right).unwrap().trims[0];
+    assert_eq!(hole.angle, 90.0);
+}
+
 /// Screenshots of the garment details for a look by eye, written to
 /// `$OD_SHOTS` (default: a temporary folder). Needs a wgpu adapter; a
 /// software one (lavapipe) is enough.
@@ -223,5 +288,30 @@ fn screenshots_of_garment_details() {
     shot(&mut h, "zipper.png");
     click_mm(&mut h, 100.0, 200.0);
     shot(&mut h, "zipper-open.png");
+
+    // Buttons fastened into buttonholes, and one being fastened.
+    let [left, right] = [
+        h.state().session.doc.patterns[0].id,
+        h.state().session.doc.patterns[1].id,
+    ];
+    for y in [60.0, 120.0] {
+        h.state_mut().session.execute(od_core::AddTrim::new(
+            left,
+            od_core::TrimKind::Button,
+            Vec2::new(80.0, y),
+        ));
+    }
+    h.run();
+    press(&mut h, Modifiers::NONE, Key::H);
+    for y in [60.0, 120.0] {
+        click_mm(&mut h, 180.0, y);
+    }
+    click_mm(&mut h, 80.0, 60.0);
+    click_mm(&mut h, 180.0, 60.0);
+    click_mm(&mut h, 80.0, 120.0);
+    let hover = h.state().session.canvas.screen_pos(Vec2::new(170.0, 140.0));
+    h.hover_at(hover);
+    h.state_mut().session.selection.set(Some(right));
+    shot(&mut h, "buttonholes.png");
     eprintln!("screenshots in {}", dir.display());
 }

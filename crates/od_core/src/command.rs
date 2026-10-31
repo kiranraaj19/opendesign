@@ -1137,14 +1137,27 @@ impl AddTrim {
     pub fn new(id: PatternId, kind: TrimKind, pos: Vec2) -> Self {
         Self {
             id,
-            trim: Trim { kind, pos },
+            trim: Trim {
+                kind,
+                pos,
+                angle: 0.0,
+            },
         }
+    }
+
+    /// Turned `degrees` (a buttonhole's slit; see [`Trim::angle`]).
+    pub fn at_angle(mut self, degrees: f32) -> Self {
+        self.trim.angle = normalize_degrees(degrees);
+        self
     }
 }
 
 impl Command for AddTrim {
     fn label(&self) -> String {
-        "Add trim".into()
+        match self.trim.kind {
+            TrimKind::Buttonhole => "Add buttonhole".into(),
+            _ => "Add trim".into(),
+        }
     }
 
     fn apply(&mut self, doc: &mut Document) {
@@ -1765,6 +1778,7 @@ mod tests {
         p.trims.push(Trim {
             kind: TrimKind::Button,
             pos: Vec2::new(10.0, 25.0),
+            angle: 0.0,
         });
         let tack_at = TackPoint {
             pattern: id,
@@ -1946,7 +1960,8 @@ mod tests {
                     pat(d).trims,
                     [Trim {
                         kind: TrimKind::Button,
-                        pos: Vec2::new(20.0, 20.0)
+                        pos: Vec2::new(20.0, 20.0),
+                        angle: 0.0,
                     }]
                 );
             },

@@ -598,6 +598,7 @@ pub fn ui(ui: &mut egui::Ui, s: &mut Session) {
         Tool::Pleat => handle_pleat(&response, rect, s),
         Tool::Measure => crate::panels::measure2d::handle(ui, &response, rect, s, typing),
         Tool::Zipper => crate::panels::details::handle_zipper(ui, &response, rect, s),
+        Tool::Buttonhole => crate::panels::details::handle_buttonhole(ui, &response, rect, s),
     }
 
     // Background and grid.
@@ -660,7 +661,7 @@ pub fn ui(ui: &mut egui::Ui, s: &mut Session) {
         Tool::Measure => {
             "Click two outline points to measure between them (Shift: along the outline) · Esc cancels"
         }
-        Tool::Zipper => crate::panels::details::hint(s),
+        Tool::Zipper | Tool::Buttonhole => crate::panels::details::hint(s),
         Tool::Sew => match &s.canvas.sew_pending {
             Some(SewBuild::Edges { active, .. }) => {
                 if *active == 0 {
@@ -1702,6 +1703,9 @@ fn draw_pattern(
             }
             TrimKind::Snap => {
                 painter.circle_stroke(at, r, Stroke::new(1.5, pal.selected));
+            }
+            TrimKind::Buttonhole => {
+                crate::panels::details::draw_buttonhole(painter, trim, &to_screen, pal.selected);
             }
         }
     }

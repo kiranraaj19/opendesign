@@ -1382,6 +1382,8 @@ fn paint(ui: &mut egui::Ui, rect: Rect, s: &Session, placed: &[PlacedPattern<Pat
                     TrimKind::Snap => {
                         painter.circle_stroke(screen, 4.0, (1.5, pal.selected));
                     }
+                    // Drawn as its slit, with the other details.
+                    TrimKind::Buttonhole => {}
                 }
             }
         }

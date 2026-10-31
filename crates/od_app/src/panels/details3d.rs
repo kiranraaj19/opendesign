@@ -1,6 +1,7 @@
 //! Garment details over the 3D view: each zipper's two sides, on the
 //! flat pieces before draping and along the cloth while it drapes
-//! (dashed while the zipper is open).
+//! (dashed while the zipper is open), and buttonhole slits on the draped
+//! cloth (drawn, like the other trims, only while draping).
 
 use od_sim::details::EdgeKind;
 
@@ -13,6 +14,14 @@ use crate::theme;
 pub fn overlays(s: &Session, pal: &theme::Palette) -> Vec<Overlay> {
     let color = zipper_color(pal);
     if let Some(drape) = &s.viewport.drape {
+        let holes = drape
+            .buttonhole_positions()
+            .into_iter()
+            .map(|ends| Overlay {
+                points: ends.to_vec(),
+                color: pal.selected,
+                dashed: false,
+            });
         return drape
             .edge_detail_positions()
             .into_iter()
@@ -23,6 +32,7 @@ pub fn overlays(s: &Session, pal: &theme::Palette) -> Vec<Overlay> {
                     dashed: !closed,
                 },
             })
+            .chain(holes)
             .collect();
     }
     let frames = flat_frames(s);
