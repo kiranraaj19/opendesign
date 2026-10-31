@@ -10,6 +10,7 @@ bytemuck = { version = "1.25.2", features = ["derive"] }
 earcutr = "0.5"
 glam = { version = "0.30", features = ["bytemuck"] }
 gltf = "1.4.1"
+od_core = { path = "../od_core" }
 tobj = "4.0.5"
 wgpu = "30"
 

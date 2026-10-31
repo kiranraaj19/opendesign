@@ -17,6 +17,7 @@ pub mod pattern;
 pub mod pick;
 pub mod render;
 pub mod scene;
+pub mod skeleton;
 pub mod view;
 
 pub use glam;

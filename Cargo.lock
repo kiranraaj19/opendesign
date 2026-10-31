@@ -2693,6 +2693,7 @@ dependencies = [
  "gltf",
  "image",
  "naga",
+ "od_core",
  "pollster 0.4.0",
  "tobj",
  "wgpu",

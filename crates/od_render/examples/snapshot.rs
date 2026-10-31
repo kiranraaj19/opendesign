@@ -1,11 +1,11 @@
 //! Render the garment view offscreen to a PNG, to check the renderer on a
 //! machine without a window (any wgpu adapter, software ones included).
 //!
-//! cargo run -p od_render --example snapshot -- out.png [female|male|kid] [dark|light] [front|back|left|right|top] [avatar]
+//! cargo run -p od_render --example snapshot -- out.png [female|male|kid] [dark|light] [front|back|left|right|top] [avatar] [pose=<built-in pose name>]
 
 use std::sync::Arc;
 
-use od_render::avatar::{avatar_mesh, AvatarKind};
+use od_render::avatar::AvatarKind;
 use od_render::camera::{OrbitCamera, ViewPreset};
 use od_render::glam::Vec2;
 use od_render::gpu::{render_to_rgba, Renderer, Targets};
@@ -27,6 +27,18 @@ fn main() {
             .find(|p| p.label().eq_ignore_ascii_case(v))
     });
     let avatar_only = args.iter().any(|a| a == "avatar");
+    // A built-in pose by name, e.g. `pose=T-pose`.
+    let pose = args
+        .iter()
+        .find_map(|a| a.strip_prefix("pose="))
+        .map(|name| {
+            od_core::pose::builtin_poses()
+                .into_iter()
+                .find(|(n, _)| n.eq_ignore_ascii_case(name))
+                .unwrap_or_else(|| panic!("no built-in pose called {name}"))
+                .1
+        })
+        .unwrap_or_default();
 
     let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
     let adapter =
@@ -70,7 +82,8 @@ fn main() {
         )
     };
 
-    let mesh = Arc::new(avatar_mesh(kind, kind.default_measurements()));
+    let rig = od_render::skeleton::Rig::avatar(kind, kind.default_measurements());
+    let mesh = Arc::new(rig.skin(&od_render::skeleton::pose_rotations(&pose, rig.bones())));
     let body = mesh.bounds().unwrap();
     let blocks: Vec<(u32, Vec<Vec2>)> = vec![
         (

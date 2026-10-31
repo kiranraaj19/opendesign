@@ -7,6 +7,7 @@
 //! they join, as on a shop mannequin.
 
 use glam::Vec3;
+use od_core::pose::Joint;
 
 use crate::mesh::Mesh;
 
@@ -207,7 +208,7 @@ const KID: Proportions = Proportions {
 };
 
 /// Arms hang this far out from vertical.
-const ARM_ANGLE: f32 = 16.0 * std::f32::consts::PI / 180.0;
+pub(crate) const ARM_ANGLE: f32 = 16.0 * std::f32::consts::PI / 180.0;
 
 /// Ellipse perimeter (Ramanujan's second approximation).
 pub fn ellipse_perimeter(a: f32, b: f32) -> f32 {
@@ -230,6 +231,91 @@ pub fn landmarks(kind: AvatarKind, m: Measurements) -> Landmarks {
         waist: p.waist * h,
         hip: p.hip * h,
     }
+}
+
+/// Where the skeleton's joints sit in the rest pose, indexed by
+/// [`Joint::index`], placed the same way [`avatar_parts`] places the body:
+/// each arm's shoulder joint is the centre of its rounded top, so the arm
+/// turns in its socket; elbows and wrists are on the arm's axis.
+pub fn joint_positions(kind: AvatarKind, m: Measurements) -> [Vec3; Joint::COUNT] {
+    let p = kind.proportions();
+    let m = m.clamped();
+    let h = m.height / 100.0;
+    let (chest_a, _) = section(m.chest / 100.0, p.chest_depth);
+    let (_, waist_b) = section(m.waist / 100.0, p.waist_depth);
+    let (hip_a, _) = section(m.hip / 100.0, p.hip_depth);
+    let hip_joint = (p.crotch + p.hip) * 0.5 * h;
+    let mut joints = [Vec3::ZERO; Joint::COUNT];
+    let mut put = |joint: Joint, at: Vec3| joints[joint.index()] = at;
+    put(Joint::Pelvis, Vec3::new(0.0, hip_joint, 0.0));
+    put(Joint::Spine, Vec3::new(0.0, p.waist * h, -0.25 * waist_b));
+    put(
+        Joint::Neck,
+        Vec3::new(0.0, p.neck_base * h, -0.2 * p.neck_radius * h),
+    );
+    for (side, [shoulder, elbow, wrist, hip, knee, ankle]) in [
+        (
+            1.0f32,
+            [
+                Joint::LeftShoulder,
+                Joint::LeftElbow,
+                Joint::LeftWrist,
+                Joint::LeftHip,
+                Joint::LeftKnee,
+                Joint::LeftAnkle,
+            ],
+        ),
+        (
+            -1.0,
+            [
+                Joint::RightShoulder,
+                Joint::RightElbow,
+                Joint::RightWrist,
+                Joint::RightHip,
+                Joint::RightKnee,
+                Joint::RightAnkle,
+            ],
+        ),
+    ] {
+        // As in `avatar_parts`.
+        let r = 0.31 * chest_a;
+        let (sin, cos) = ARM_ANGLE.sin_cos();
+        let origin = Vec3::new(
+            side * (p.shoulder_half_width * h - r),
+            p.shoulder * h - 0.9 * r,
+            0.0,
+        );
+        let t = Vec3::new(side * sin, -cos, 0.0);
+        put(shoulder, origin);
+        put(elbow, origin + t * p.upper_arm * h);
+        put(wrist, origin + t * (p.upper_arm + p.forearm) * h);
+        let leg_x = side * hip_a * 0.48;
+        put(hip, Vec3::new(leg_x, hip_joint, 0.0));
+        put(knee, Vec3::new(leg_x, p.knee * h, 0.0));
+        put(ankle, Vec3::new(leg_x, p.ankle * h, 0.0));
+    }
+    joints
+}
+
+/// Where each limb ends beyond its last joint: the top of the head, the
+/// fingertips and the soles, indexed like [`avatar_parts`]' arms and legs
+/// (`[head, left hand, right hand, left sole, right sole]`).
+pub(crate) fn limb_ends(kind: AvatarKind, m: Measurements) -> [Vec3; 5] {
+    let p = kind.proportions();
+    let h = m.clamped().height / 100.0;
+    let joints = joint_positions(kind, m);
+    let hand = |wrist: Joint, elbow: Joint| {
+        let (w, e) = (joints[wrist.index()], joints[elbow.index()]);
+        w + (w - e).normalize() * p.hand * h
+    };
+    let sole = |ankle: Joint| joints[ankle.index()] * Vec3::new(1.0, 0.0, 1.0);
+    [
+        Vec3::new(0.0, h, 0.0),
+        hand(Joint::LeftWrist, Joint::LeftElbow),
+        hand(Joint::RightWrist, Joint::RightElbow),
+        sole(Joint::LeftAnkle),
+        sole(Joint::RightAnkle),
+    ]
 }
 
 /// The whole mannequin as one mesh.

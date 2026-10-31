@@ -21,6 +21,7 @@ pub mod measure;
 pub mod piece;
 #[cfg(feature = "python-plugins")]
 pub mod plugin;
+pub mod pose;
 pub mod project;
 pub mod seam;
 pub mod workspace;
@@ -51,4 +52,5 @@ pub use measure::{
     RenameMeasurement,
 };
 pub use piece::{CutPattern, MergePatterns};
+pub use pose::{Joint, JointAngles, Pose};
 pub use seam::Side;
