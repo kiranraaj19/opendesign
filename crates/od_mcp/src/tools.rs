@@ -217,7 +217,7 @@ pub fn list() -> Vec<Value> {
                 "height": { "type": "integer", "description": "Default 1024." },
                 "style": { "type": "string", "enum": ["fabric", "strain"] },
                 "avatar": { "type": "boolean", "description": "Show the avatar. Default true." },
-                "background": { "type": "string", "enum": ["light", "dark"] },
+                "background": { "type": "string", "enum": ["light", "dark", "black"], "description": "Default light." },
                 "turn": { "type": "number", "description": "Turn the camera this many degrees around the garment." },
                 "save_to": { "type": "string", "description": "Also write the PNG to this file." },
             }),
@@ -1169,7 +1169,12 @@ fn render_tool(s: &mut Session, args: &Value) -> Result<Outcome> {
         view,
         size: [dim("width", 768), dim("height", 1024)],
         avatar: args.get("avatar").and_then(Value::as_bool).unwrap_or(true),
-        dark: str_arg(args, "background") == Some("dark"),
+        background: match str_arg(args, "background") {
+            Some(name) => render::Background::parse(name).ok_or_else(|| {
+                format!("no background called \"{name}\"; try light, dark or black")
+            })?,
+            None => render::Background::Light,
+        },
         strain: str_arg(args, "style") == Some("strain"),
         turn: num(args, "turn").unwrap_or(0.0),
     };

@@ -47,17 +47,45 @@ pub struct Request {
     pub view: View,
     pub size: [u32; 2],
     pub avatar: bool,
-    pub dark: bool,
+    pub background: Background,
     /// Colour the cloth by how stretched it is instead of by fabric.
     pub strain: bool,
     /// Turn the camera this many degrees around the scene after aiming.
     pub turn: f32,
 }
 
+/// What's behind the scene: the app's light or dark canvas, or black.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Background {
+    Light,
+    Dark,
+    Black,
+}
+
+impl Background {
+    pub fn parse(name: &str) -> Option<Self> {
+        Some(match name {
+            "light" => Background::Light,
+            "dark" => Background::Dark,
+            "black" => Background::Black,
+            _ => return None,
+        })
+    }
+
+    /// The canvas colour, as sRGB bytes.
+    fn rgb(self) -> u32 {
+        match self {
+            Background::Light => 0xF7F7F8,
+            Background::Dark => 0x1E1E21,
+            Background::Black => 0x000000,
+        }
+    }
+}
+
 /// A render as PNG bytes, and a line saying what it shows.
 pub fn render(s: &mut Session, req: &Request) -> Result<(Vec<u8>, String), String> {
     let gpu = s.gpu()?;
-    let theme = theme(req.dark);
+    let theme = theme(req.background != Background::Light);
     let aspect = req.size[0] as f32 / req.size[1].max(1) as f32;
     let avatar = s.avatar_mesh();
     let avatar_bounds = avatar.bounds().unwrap_or(Aabb {
@@ -157,7 +185,7 @@ pub fn render(s: &mut Session, req: &Request) -> Result<(Vec<u8>, String), Strin
             size: req.size,
             ..Default::default()
         },
-        clear(req.dark),
+        clear(req.background),
     );
     let png = encode_png(&pixels, req.size)?;
     let what = match (req.view, draped) {
@@ -277,8 +305,8 @@ fn theme(dark: bool) -> Theme {
 }
 
 /// The background, as sRGB bytes (the target isn't an sRGB format).
-fn clear(dark: bool) -> wgpu::Color {
-    let bg: u32 = if dark { 0x1E1E21 } else { 0xF7F7F8 };
+fn clear(background: Background) -> wgpu::Color {
+    let bg = background.rgb();
     let channel = |shift: u32| f64::from((bg >> shift) as u8) / 255.0;
     wgpu::Color {
         r: channel(16),
