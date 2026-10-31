@@ -319,6 +319,7 @@ fn cut(doc: &mut Document, id: PatternId, line: usize, sew: bool) -> Option<Stat
         topstitches: Vec::new(),
         trims: Vec::new(),
         grading: Grading::default(),
+        bindings: Vec::new(),
         ..p.clone()
     };
     let mut a = Pattern {
@@ -587,6 +588,7 @@ fn merge(doc: &mut Document, seam: SewingLineId) -> Option<State> {
         grading,
         ..pa.clone()
     };
+    merged.bindings = crate::details::bindings_by_position(&pa, &merged);
     merged
         .internal_lines
         .extend(tb.internal_lines.iter().cloned());

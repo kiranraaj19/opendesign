@@ -1,12 +1,13 @@
 //! Garment details over the 3D view: each zipper's two sides, on the
 //! flat pieces before draping and along the cloth while it drapes
-//! (dashed while the zipper is open), and buttonhole slits on the draped
+//! (dashed while the zipper is open), binding and piping along their
+//! edges the same way, and buttonhole slits on the draped
 //! cloth (drawn, like the other trims, only while draping).
 
 use od_sim::details::EdgeKind;
 
 use crate::app::Session;
-use crate::panels::details::zipper_color;
+use crate::panels::details::{binding_color, zipper_color};
 use crate::panels::viewport3d::{flat_frames, Overlay};
 use crate::theme;
 
@@ -30,6 +31,11 @@ pub fn overlays(s: &Session, pal: &theme::Palette) -> Vec<Overlay> {
                     points,
                     color,
                     dashed: !closed,
+                },
+                EdgeKind::Binding { kind, .. } => Overlay {
+                    points,
+                    color: binding_color(kind, pal),
+                    dashed: false,
                 },
             })
             .chain(holes)
@@ -55,6 +61,22 @@ pub fn overlays(s: &Session, pal: &theme::Palette) -> Vec<Overlay> {
                     .collect(),
                 color,
                 dashed: !zipper.closed,
+            });
+        }
+    }
+    for pattern in &s.doc.patterns {
+        let Some(frame) = frames.get(&pattern.id) else {
+            continue;
+        };
+        for binding in &pattern.bindings {
+            out.push(Overlay {
+                points: pattern
+                    .edge_points(&binding.edge(pattern.id))
+                    .into_iter()
+                    .map(|p| frame.world(p))
+                    .collect(),
+                color: binding_color(binding.kind, pal),
+                dashed: false,
             });
         }
     }

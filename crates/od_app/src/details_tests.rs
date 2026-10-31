@@ -251,6 +251,85 @@ fn buttonholes_are_placed_at_the_tools_angle() {
     assert_eq!(hole.angle, 90.0);
 }
 
+#[test]
+fn the_binding_tool_binds_and_unbinds_an_edge() {
+    use od_core::{Binding, BindingKind};
+    let mut h = harness();
+    let [left, _] = two_pieces(&mut h);
+    press(&mut h, Modifiers::NONE, Key::G);
+    assert_eq!(h.state().session.tool, Tool::Binding);
+    click(&mut h, "Piping");
+    // Left's top edge.
+    click_mm(&mut h, 50.0, 0.0);
+    let bindings = h
+        .state()
+        .session
+        .doc
+        .pattern(left)
+        .unwrap()
+        .bindings
+        .clone();
+    assert_eq!(
+        bindings,
+        [Binding {
+            kind: BindingKind::Piping,
+            start: 0.0,
+            end: 1.0,
+            width: Binding::DEFAULT_WIDTH,
+        }]
+    );
+    assert_eq!(last_step(&h), "Add piping");
+    let pal = crate::theme::palette(true);
+    assert_eq!(details3d::overlays(&h.state().session, pal).len(), 1);
+
+    // Clicking the bound edge again takes it off.
+    click_mm(&mut h, 50.0, 0.0);
+    assert!(h
+        .state()
+        .session
+        .doc
+        .pattern(left)
+        .unwrap()
+        .bindings
+        .is_empty());
+    assert_eq!(last_step(&h), "Remove binding");
+}
+
+#[test]
+fn a_pieces_bindings_are_edited_in_properties() {
+    use od_core::{AddBinding, Binding, BindingKind};
+    let mut h = harness();
+    let [left, _] = two_pieces(&mut h);
+    {
+        let s = &mut h.state_mut().session;
+        s.execute(AddBinding::new(
+            left,
+            Binding {
+                kind: BindingKind::Binding,
+                start: 2.0,
+                end: 3.0,
+                width: 8.0,
+            },
+        ));
+        s.selection.set(Some(left));
+    }
+    h.run();
+    h.get_by_label("100 mm long");
+    click(&mut h, "Piping");
+    let b = h.state().session.doc.pattern(left).unwrap().bindings[0];
+    assert_eq!(b.kind, BindingKind::Piping);
+    assert_eq!(last_step(&h), "Edit binding");
+    click(&mut h, "Remove binding 1");
+    assert!(h
+        .state()
+        .session
+        .doc
+        .pattern(left)
+        .unwrap()
+        .bindings
+        .is_empty());
+}
+
 /// Screenshots of the garment details for a look by eye, written to
 /// `$OD_SHOTS` (default: a temporary folder). Needs a wgpu adapter; a
 /// software one (lavapipe) is enough.
@@ -313,5 +392,20 @@ fn screenshots_of_garment_details() {
     h.hover_at(hover);
     h.state_mut().session.selection.set(Some(right));
     shot(&mut h, "buttonholes.png");
+
+    // Binding along Left's top and bottom, piping along Right's top and
+    // outer side, and Left's bindings in Properties.
+    press(&mut h, Modifiers::NONE, Key::Escape);
+    press(&mut h, Modifiers::NONE, Key::G);
+    click_mm(&mut h, 50.0, 0.0);
+    click_mm(&mut h, 50.0, 300.0);
+    h.state_mut().session.canvas.details.binding_kind = od_core::BindingKind::Piping;
+    h.state_mut().session.canvas.details.binding_width = 5.0;
+    click_mm(&mut h, 200.0, 0.0);
+    click_mm(&mut h, 250.0, 150.0);
+    h.state_mut().session.selected_seam = None;
+    h.state_mut().session.tool = Tool::Select;
+    h.state_mut().session.selection.set(Some(left));
+    shot(&mut h, "binding.png");
     eprintln!("screenshots in {}", dir.display());
 }

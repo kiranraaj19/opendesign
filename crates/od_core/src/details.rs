@@ -2,7 +2,10 @@
 //! rather than drawn as lines of their own. A zipper is a seam with a
 //! tape either side that can be opened ([`SeamDetails::zipper`]). A
 //! buttonhole is a [`Trim`] with a slit, and a button is fastened into
-//! one by a tack between their points ([`Fastening`]).
+//! one by a tack between their points ([`Fastening`]). Binding and
+//! piping are strips along a stretch of a pattern's outline
+//! ([`Binding`], kept on the pattern and carried along when its outline
+//! changes).
 //!
 //! Seam details live on the [`SewingLine`] itself, so every command that
 //! moves, re-places, splits or copies seams carries them along.
@@ -11,10 +14,11 @@ use serde::{Deserialize, Serialize};
 
 use crate::command::{AddTack, Command, RemoveTack};
 use crate::document::{
-    normalize_degrees, Document, PatternId, SewingLine, SewingLineId, TackId, TackPoint,
-    TackTarget, Trim, TrimKind,
+    normalize_degrees, Document, Pattern, PatternId, SeamEdge, SewingLine, SewingLineId, TackId,
+    TackPoint, TackTarget, Trim, TrimKind, TOLERANCE,
 };
 use crate::geometry::Vec2;
+use crate::seam;
 
 /// What a seam is besides two sides sewn together. The default is a
 /// plain seam.
@@ -232,6 +236,168 @@ impl Command for Unfasten {
     }
 }
 
+/// What kind of strip is sewn along an edge.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BindingKind {
+    /// A bias strip folded over the raw edge, showing on both faces.
+    #[default]
+    Binding,
+    /// A covered cord standing out of the edge.
+    Piping,
+}
+
+impl BindingKind {
+    pub fn label(self) -> &'static str {
+        match self {
+            BindingKind::Binding => "Binding",
+            BindingKind::Piping => "Piping",
+        }
+    }
+}
+
+/// A strip of binding or piping along a stretch of a pattern's outline,
+/// as outline parameters like a [`SeamEdge`]'s (`end` may exceed the
+/// point count when it wraps). It stiffens that edge when draping.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct Binding {
+    pub kind: BindingKind,
+    pub start: f32,
+    pub end: f32,
+    /// How wide it shows, in mm (a piping cord's thickness).
+    pub width: f32,
+}
+
+impl Binding {
+    pub const DEFAULT_WIDTH: f32 = 10.0;
+    /// The widths offered, in mm.
+    pub const WIDTH_RANGE: std::ops::RangeInclusive<f32> = 2.0..=40.0;
+
+    /// The stretch it runs along, as an edge of `pattern`.
+    pub fn edge(&self, pattern: PatternId) -> SeamEdge {
+        SeamEdge {
+            pattern,
+            start: self.start,
+            end: self.end,
+            forward: true,
+        }
+    }
+}
+
+/// `before`'s bindings carried over to `after` (the same pattern with
+/// its outline points renumbered) by `remap`, as seams are. A binding
+/// that shrinks to nothing is dropped.
+pub(crate) fn remap_bindings(
+    before: &Pattern,
+    after: &Pattern,
+    remap: &impl Fn(&Pattern, &Pattern, f32) -> f32,
+) -> Vec<Binding> {
+    before
+        .bindings
+        .iter()
+        .filter_map(|b| {
+            let moved = seam::remap_edge(&b.edge(before.id), before, after, remap)?;
+            Some(Binding {
+                start: moved.start,
+                end: moved.end,
+                ..*b
+            })
+        })
+        .collect()
+}
+
+/// `before`'s bindings placed on `after`'s outline (a new outline for the
+/// same piece) at the nearest points to where they were.
+pub(crate) fn bindings_by_position(before: &Pattern, after: &Pattern) -> Vec<Binding> {
+    remap_bindings(before, after, &|b, a, t| {
+        a.nearest_param(b.pos_at_param(t, TOLERANCE)).0
+    })
+}
+
+/// Sew a binding or piping along a pattern's edge.
+pub struct AddBinding {
+    id: PatternId,
+    binding: Binding,
+}
+
+impl AddBinding {
+    pub fn new(id: PatternId, binding: Binding) -> Self {
+        Self { id, binding }
+    }
+}
+
+impl Command for AddBinding {
+    fn label(&self) -> String {
+        format!("Add {}", self.binding.kind.label().to_lowercase())
+    }
+
+    fn apply(&mut self, doc: &mut Document) {
+        if let Some(p) = doc.pattern_mut(self.id) {
+            p.bindings.push(self.binding);
+        }
+    }
+
+    fn undo(&mut self, doc: &mut Document) {
+        if let Some(p) = doc.pattern_mut(self.id) {
+            p.bindings.pop();
+        }
+    }
+}
+
+/// Change a binding (its kind or width), or take it off (`None`).
+pub struct SetBinding {
+    id: PatternId,
+    index: usize,
+    binding: Option<Binding>,
+    before: Option<Binding>,
+}
+
+impl SetBinding {
+    pub fn new(id: PatternId, index: usize, binding: Option<Binding>) -> Self {
+        Self {
+            id,
+            index,
+            binding,
+            before: None,
+        }
+    }
+}
+
+impl Command for SetBinding {
+    fn label(&self) -> String {
+        match self.binding {
+            None => "Remove binding".into(),
+            Some(_) => "Edit binding".into(),
+        }
+    }
+
+    fn apply(&mut self, doc: &mut Document) {
+        let Some(p) = doc.pattern_mut(self.id) else {
+            return;
+        };
+        if self.index >= p.bindings.len() {
+            return;
+        }
+        self.before = Some(p.bindings[self.index]);
+        match self.binding {
+            Some(b) => p.bindings[self.index] = b,
+            None => {
+                p.bindings.remove(self.index);
+            }
+        }
+    }
+
+    fn undo(&mut self, doc: &mut Document) {
+        let (Some(p), Some(before)) = (doc.pattern_mut(self.id), self.before.take()) else {
+            return;
+        };
+        match self.binding {
+            Some(_) => p.bindings[self.index] = before,
+            None => p.bindings.insert(self.index.min(p.bindings.len()), before),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -415,6 +581,85 @@ mod tests {
         assert_eq!(doc.tacks.len(), 1, "the plain tack stays");
         history.undo(&mut doc);
         assert_eq!(fastenings(&doc).len(), 1);
+    }
+
+    fn binding(start: f32, end: f32) -> Binding {
+        Binding {
+            kind: BindingKind::Piping,
+            start,
+            end,
+            width: 6.0,
+        }
+    }
+
+    #[test]
+    fn a_binding_is_added_edited_and_removed_with_undo() {
+        let (mut doc, [a, _]) = doc();
+        let plain = doc.clone();
+        let mut history = History::new();
+        run(
+            &mut history,
+            &mut doc,
+            AddBinding::new(a, binding(3.0, 4.5)),
+        );
+        assert_eq!(history.undo_label(), Some("Add piping".into()));
+        let wider = Binding {
+            width: 9.0,
+            kind: BindingKind::Binding,
+            ..binding(3.0, 4.5)
+        };
+        run(&mut history, &mut doc, SetBinding::new(a, 0, Some(wider)));
+        assert_eq!(doc.pattern(a).unwrap().bindings, [wider]);
+        let edited = doc.clone();
+        run(&mut history, &mut doc, SetBinding::new(a, 0, None));
+        assert_eq!(history.undo_label(), Some("Remove binding".into()));
+        assert_eq!(doc, plain);
+        history.undo(&mut doc);
+        assert_eq!(doc, edited);
+        history.undo(&mut doc);
+        history.undo(&mut doc);
+        assert_eq!(doc, plain);
+
+        // Saved and loaded; a pattern without any writes none.
+        assert!(!crate::project::to_json(&doc).contains("bindings"));
+        AddBinding::new(a, wider).apply(&mut doc);
+        let loaded = crate::project::from_json(&crate::project::to_json(&doc)).unwrap();
+        assert_eq!(loaded, doc);
+    }
+
+    #[test]
+    fn a_binding_stays_on_its_stretch_as_points_come_and_go() {
+        use crate::{DeletePoint, InsertPoint, OutlinePoint, SetOutline};
+        let (mut doc, [a, _]) = doc();
+        // The bottom edge (2 → 3) and half the left one.
+        AddBinding::new(a, binding(2.0, 3.5)).apply(&mut doc);
+        let ends = |doc: &Document| {
+            let p = doc.pattern(a).unwrap();
+            let b = p.bindings[0];
+            [b.start, b.end].map(|t| p.pos_at_param(t, TOLERANCE))
+        };
+        let where_ = ends(&doc);
+        let before = doc.clone();
+        let mut history = History::new();
+        // A point in the middle of the top edge, before the binding.
+        let mid = OutlinePoint::corner(Vec2::new(50.0, 0.0));
+        run(&mut history, &mut doc, InsertPoint::new(a, 1, mid));
+        assert_eq!(doc.pattern(a).unwrap().bindings[0].start, 3.0);
+        assert_eq!(ends(&doc), where_);
+        run(&mut history, &mut doc, DeletePoint::new(a, 1));
+        assert_eq!(ends(&doc), where_);
+        history.undo(&mut doc);
+        history.undo(&mut doc);
+        assert_eq!(doc, before);
+
+        // A whole new outline: placed by position.
+        let mut outline = doc.pattern(a).unwrap().outline.clone();
+        outline.insert(3, OutlinePoint::corner(Vec2::new(50.0, 300.0)));
+        run(&mut history, &mut doc, SetOutline::new(a, "Edit", outline));
+        let moved = ends(&doc);
+        assert!(moved[0].distance(where_[0]) < 1e-3 && moved[1].distance(where_[1]) < 1e-3);
+        history.undo(&mut doc);
+        assert_eq!(doc, before);
     }
 
     #[test]

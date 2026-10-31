@@ -1,13 +1,16 @@
 //! Garment details in the 2D window and Properties: the Zipper tool, the
 //! zippers drawn along their seams (tape, teeth and slider), and the
 //! zipper settings of a selected seam; the Buttonhole tool, which places
-//! buttonholes and fastens buttons into them.
+//! buttonholes and fastens buttons into them; the Binding tool, binding
+//! and piping drawn along their edges, and a piece's bindings in
+//! Properties.
 
 use egui::{Align2, Color32, FontId, Key, Pos2, Rect, Shape, Stroke};
 use od_core::details::{fastenings, Fasten, Unfasten};
 use od_core::{
-    AddSewingLine, AddTrim, Batch, Command, Pattern, PatternId, RemoveTrim, SeamEdge, SetZipper,
-    SewingLine, SewingLineId, TackPoint, Trim, TrimKind, Vec2, Zipper,
+    AddBinding, AddSewingLine, AddTrim, Batch, Binding, BindingKind, Command, Pattern, PatternId,
+    RemoveTrim, SeamEdge, SetBinding, SetZipper, SewingLine, SewingLineId, TackPoint, Trim,
+    TrimKind, Vec2, Zipper,
 };
 
 use crate::app::{Session, Tool};
@@ -26,6 +29,9 @@ pub struct Details2D {
     pub button_start: Option<TackPoint>,
     /// Which way new buttonholes' slits run (see [`Trim::angle`]).
     pub hole_angle: f32,
+    /// What the Binding tool sews on, and how wide.
+    pub binding_kind: BindingKind,
+    pub binding_width: f32,
 }
 
 impl Default for Details2D {
@@ -36,6 +42,8 @@ impl Default for Details2D {
             tape_width: Zipper::DEFAULT_TAPE_WIDTH,
             button_start: None,
             hole_angle: 0.0,
+            binding_kind: BindingKind::Binding,
+            binding_width: Binding::DEFAULT_WIDTH,
         }
     }
 }
@@ -202,6 +210,86 @@ pub fn handle_buttonhole(ui: &egui::Ui, response: &egui::Response, rect: Rect, s
     s.execute(AddTrim::new(target, TrimKind::Buttonhole, at).at_angle(angle));
 }
 
+/// The Binding tool: a click on an edge binds that corner-to-corner
+/// segment, a drag along an outline the stretch it covers; picking a
+/// stretch that is already bound takes the binding off.
+pub fn handle_binding(response: &egui::Response, rect: Rect, s: &mut Session) {
+    let Some(edge) = picked_edge(response, rect, s) else {
+        return;
+    };
+    s.selection.set(Some(edge.pattern));
+    let (target, _) = s.edit_target(edge.pattern);
+    let bound = s.doc.pattern(target).and_then(|p| {
+        p.bindings
+            .iter()
+            .position(|b| same_stretch(&b.edge(target), &edge))
+    });
+    match bound {
+        Some(index) => s.execute(SetBinding::new(target, index, None)),
+        None => {
+            let binding = Binding {
+                kind: s.canvas.details.binding_kind,
+                start: edge.start,
+                end: edge.end,
+                width: s.canvas.details.binding_width,
+            };
+            s.execute(AddBinding::new(target, binding));
+        }
+    }
+}
+
+/// The colour binding or piping is drawn in.
+pub fn binding_color(kind: BindingKind, pal: &theme::Palette) -> Color32 {
+    match kind {
+        BindingKind::Binding => pal.seams[2],
+        BindingKind::Piping => pal.seams[4],
+    }
+}
+
+/// Binding along an edge: a band folded over it, half its width either
+/// side. Piping: a cord standing just outside it.
+fn draw_binding(
+    painter: &egui::Painter,
+    s: &Session,
+    pattern: &Pattern,
+    binding: &Binding,
+    pal: &theme::Palette,
+    to_screen: &impl Fn(Vec2) -> Pos2,
+) {
+    let points = pattern.edge_points(&binding.edge(pattern.id));
+    let color = binding_color(binding.kind, pal);
+    match binding.kind {
+        BindingKind::Binding => {
+            let half = binding.width * 0.5;
+            for inner in band(pattern, &points, half) {
+                // The inner half, then the outer half mirrored over the edge.
+                let [a, b, c, d] = inner;
+                let outer = [a, b, b * 2.0 - c, a * 2.0 - d];
+                for q in [inner, outer] {
+                    painter.add(Shape::convex_polygon(
+                        q.map(to_screen).to_vec(),
+                        color.gamma_multiply(0.45),
+                        Stroke::NONE,
+                    ));
+                }
+            }
+        }
+        BindingKind::Piping => {
+            let width = (binding.width * 0.5).max(1.0);
+            let cord: Vec<Pos2> = points
+                .windows(2)
+                .flat_map(|w| {
+                    let n = -inward(pattern, w[0], w[1]) * (width * 0.5);
+                    [w[0] + n, w[1] + n]
+                })
+                .map(to_screen)
+                .collect();
+            let px = (width / s.canvas.px(1.0)).max(2.0);
+            painter.add(Shape::line(cord, Stroke::new(px, color)));
+        }
+    }
+}
+
 /// A buttonhole: its slit, with a bar across each end.
 pub fn draw_buttonhole(
     painter: &egui::Painter,
@@ -221,6 +309,9 @@ pub fn draw_buttonhole(
 /// What the detail tools say they do, at the top of the 2D window.
 pub fn hint(s: &Session) -> &'static str {
     match s.tool {
+        Tool::Binding => {
+            "Click an edge (or drag along one) to bind it · click a bound edge to take the binding off · kind and width in Properties"
+        }
         Tool::Buttonhole if s.canvas.details.button_start.is_some() => {
             "Click the buttonhole to fasten the button into · Esc cancels"
         }
@@ -296,6 +387,11 @@ pub fn draw(painter: &egui::Painter, rect: Rect, s: &Session, pal: &theme::Palet
     let to_screen = |p: Vec2| s.canvas.to_screen(rect, p);
     for line in s.doc.sewing_lines.iter().filter(|l| l.is_zipper()) {
         draw_zipper(painter, s, line, pal, &to_screen);
+    }
+    for pattern in s.doc.patterns.iter().filter(|p| !p.hidden) {
+        for binding in &pattern.bindings {
+            draw_binding(painter, s, pattern, binding, pal, &to_screen);
+        }
     }
     // A button over each buttonhole it is fastened into.
     for f in fastenings(&s.doc) {
@@ -399,6 +495,23 @@ fn draw_zipper(
 
 /// Settings for a detail tool in use, in Properties.
 pub fn tool_section(ui: &mut egui::Ui, s: &mut Session) {
+    if s.tool == Tool::Binding {
+        ui.add_space(8.0);
+        ui.heading("Binding tool");
+        let d = &mut s.canvas.details;
+        ui.horizontal(|ui| {
+            for kind in [BindingKind::Binding, BindingKind::Piping] {
+                ui.selectable_value(&mut d.binding_kind, kind, kind.label());
+            }
+            ui.label("Width");
+            ui.add(
+                egui::DragValue::new(&mut d.binding_width)
+                    .range(Binding::WIDTH_RANGE)
+                    .suffix(" mm")
+                    .speed(0.5),
+            );
+        });
+    }
     if s.tool == Tool::Buttonhole {
         ui.add_space(8.0);
         ui.heading("Buttonhole tool");
@@ -513,6 +626,55 @@ pub fn seam_section(ui: &mut egui::Ui, s: &mut Session, id: SewingLineId) {
     });
     if let Some(zipper) = set {
         s.execute(SetZipper::new(id, Some(zipper)));
+    }
+}
+
+/// A piece's binding and piping, in Properties: each one's kind, width
+/// and length, and a way to take it off.
+pub fn pattern_section(ui: &mut egui::Ui, s: &mut Session, id: PatternId) {
+    let Some(pattern) = s.doc.pattern(id) else {
+        return;
+    };
+    if pattern.bindings.is_empty() {
+        return;
+    }
+    let bindings = pattern.bindings.clone();
+    let lengths: Vec<f32> = bindings
+        .iter()
+        .map(|b| pattern.segment_length(b.start, b.end, od_core::document::TOLERANCE))
+        .collect();
+    let (target, _) = s.edit_target(id);
+    ui.add_space(8.0);
+    ui.label("Binding and piping");
+    let mut set = None;
+    for (i, (binding, length)) in bindings.iter().zip(lengths).enumerate() {
+        ui.horizontal_wrapped(|ui| {
+            for kind in [BindingKind::Binding, BindingKind::Piping] {
+                if ui
+                    .selectable_label(binding.kind == kind, kind.label())
+                    .clicked()
+                    && binding.kind != kind
+                {
+                    set = Some((i, Some(Binding { kind, ..*binding })));
+                }
+            }
+            if let Some(width) = deferred_value(
+                ui,
+                ("binding_width", id, i),
+                binding.width,
+                Binding::WIDTH_RANGE,
+                " mm wide",
+            ) {
+                set = Some((i, Some(Binding { width, ..*binding })));
+            }
+            ui.label(format!("{length:.0} mm long"));
+            if ui.button(format!("Remove binding {}", i + 1)).clicked() {
+                set = Some((i, None));
+            }
+        });
+    }
+    if let Some((i, binding)) = set {
+        s.execute(SetBinding::new(target, i, binding));
     }
 }
 

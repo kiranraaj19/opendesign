@@ -62,11 +62,12 @@ pub enum Tool {
     Measure,
     Zipper,
     Buttonhole,
+    Binding,
 }
 
 impl Tool {
     /// Toolbar order, with button label, shortcut key and tooltip.
-    const BUTTONS: [(Tool, &'static str, Key, &'static str); 15] = [
+    const BUTTONS: [(Tool, &'static str, Key, &'static str); 16] = [
         (
             Tool::Select,
             "Select",
@@ -157,6 +158,12 @@ impl Tool {
             Key::H,
             "Click to place a buttonhole; click a button, then a buttonhole, to fasten them (H)",
         ),
+        (
+            Tool::Binding,
+            "Binding",
+            Key::G,
+            "Click an edge to bind it (binding or piping); click a bound edge to unbind it (G)",
+        ),
     ];
 
     pub fn name(self) -> &'static str {
@@ -176,6 +183,7 @@ impl Tool {
             Tool::Measure => "Measure",
             Tool::Zipper => "Zipper",
             Tool::Buttonhole => "Buttonhole",
+            Tool::Binding => "Binding",
         }
     }
 }

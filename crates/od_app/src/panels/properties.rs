@@ -169,6 +169,7 @@ pub fn ui(ui: &mut egui::Ui, s: &mut Session) {
     }
     lines_section(ui, s, id);
     darts_section(ui, s, id);
+    crate::panels::details::pattern_section(ui, s, id);
 
     selection_actions(ui, s, "Delete pattern");
 }

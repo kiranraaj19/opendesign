@@ -371,9 +371,11 @@ pub struct InsertPoint {
     id: PatternId,
     index: usize,
     point: OutlinePoint,
-    /// Seams and grading before the insert, restored exactly on undo.
+    /// Seams, grading and bindings before the insert, restored exactly on
+    /// undo.
     sewing_lines: Vec<SewingLine>,
     grading: Grading,
+    bindings: Vec<crate::details::Binding>,
 }
 
 impl InsertPoint {
@@ -384,6 +386,7 @@ impl InsertPoint {
             point,
             sewing_lines: Vec::new(),
             grading: Grading::default(),
+            bindings: Vec::new(),
         }
     }
 }
@@ -403,9 +406,9 @@ impl Command for InsertPoint {
         p.grading = Grading::carried_over(&before, &p.outline);
         self.grading = before.grading.clone();
         let index = self.index;
-        self.sewing_lines = remap_sewing(doc, &before, &|b, a, t| {
-            seam::param_after_insert(b, a, index, t)
-        });
+        let remap = |b: &Pattern, a: &Pattern, t| seam::param_after_insert(b, a, index, t);
+        self.sewing_lines = remap_sewing(doc, &before, &remap);
+        self.bindings = rebind(doc, &before, &remap);
     }
 
     fn undo(&mut self, doc: &mut Document) {
@@ -413,6 +416,7 @@ impl Command for InsertPoint {
             if self.index < p.outline.len() {
                 p.outline.remove(self.index);
                 p.grading = std::mem::take(&mut self.grading);
+                p.bindings = std::mem::take(&mut self.bindings);
                 doc.sewing_lines = std::mem::take(&mut self.sewing_lines);
             }
         }
@@ -425,9 +429,11 @@ pub struct DeletePoint {
     id: PatternId,
     index: usize,
     removed: Option<OutlinePoint>,
-    /// Seams and grading before the delete, restored exactly on undo.
+    /// Seams, grading and bindings before the delete, restored exactly on
+    /// undo.
     sewing_lines: Vec<SewingLine>,
     grading: Grading,
+    bindings: Vec<crate::details::Binding>,
 }
 
 impl DeletePoint {
@@ -438,6 +444,7 @@ impl DeletePoint {
             removed: None,
             sewing_lines: Vec::new(),
             grading: Grading::default(),
+            bindings: Vec::new(),
         }
     }
 }
@@ -457,9 +464,9 @@ impl Command for DeletePoint {
             p.grading = Grading::carried_over(&before, &p.outline);
             self.grading = before.grading.clone();
             let index = self.index;
-            self.sewing_lines = remap_sewing(doc, &before, &|b, a, t| {
-                seam::param_after_delete(b, a, index, t)
-            });
+            let remap = |b: &Pattern, a: &Pattern, t| seam::param_after_delete(b, a, index, t);
+            self.sewing_lines = remap_sewing(doc, &before, &remap);
+            self.bindings = rebind(doc, &before, &remap);
         }
     }
 
@@ -467,6 +474,7 @@ impl Command for DeletePoint {
         if let (Some(p), Some(point)) = (doc.pattern_mut(self.id), self.removed.take()) {
             p.outline.insert(self.index.min(p.outline.len()), point);
             p.grading = std::mem::take(&mut self.grading);
+            p.bindings = std::mem::take(&mut self.bindings);
             doc.sewing_lines = std::mem::take(&mut self.sewing_lines);
         }
     }
@@ -522,6 +530,7 @@ impl Command for SetOutline {
         p.outline = self.outline.clone();
         p.notches = remap_notches(&before, p);
         p.grading = Grading::carried_over(&before, &p.outline);
+        p.bindings = crate::details::bindings_by_position(&before, p);
         let seams = remap_sewing(doc, &before, &|b, a, t| {
             a.nearest_param(b.pos_at_param(t, TOLERANCE)).0
         });
@@ -1487,6 +1496,24 @@ pub(crate) fn remap_sewing(
             })
     });
     old
+}
+
+/// After `before`'s outline points were renumbered, move its bindings
+/// with `remap` as [`remap_sewing`] moves seams. Returns them as they
+/// were, for undo.
+fn rebind(
+    doc: &mut Document,
+    before: &Pattern,
+    remap: &impl Fn(&Pattern, &Pattern, f32) -> f32,
+) -> Vec<crate::details::Binding> {
+    let Some(after) = doc.pattern(before.id).cloned() else {
+        return before.bindings.clone();
+    };
+    let moved = crate::details::remap_bindings(before, &after, remap);
+    if let Some(p) = doc.pattern_mut(before.id) {
+        p.bindings = moved;
+    }
+    before.bindings.clone()
 }
 
 /// Move every tack point on pattern `id` with `f`, as the pattern itself

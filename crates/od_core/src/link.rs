@@ -43,6 +43,7 @@ pub fn sync(doc: &mut Document) {
         copy.darts = source.darts.clone();
         copy.topstitches = source.topstitches.clone();
         copy.trims = source.trims.clone();
+        copy.bindings = source.bindings.clone();
         copy.notches = source.notches.clone();
         copy.fabric = source.fabric.clone();
         copy.seam_allowance = source.seam_allowance;

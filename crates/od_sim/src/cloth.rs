@@ -78,8 +78,8 @@ pub struct ClothScene {
     /// two points it holds together, the second either on the cloth or at
     /// a fixed anchor particle on the avatar.
     pub tacks: Vec<(usize, SurfaceStitch)>,
-    /// Zipper tapes (their constraints, and the edge particles to draw
-    /// them through) and buttonhole slits.
+    /// Zipper tapes, binding and piping (their constraints, and the edge
+    /// particles to draw them through) and buttonhole slits.
     pub details: crate::details::SceneDetails,
 }
 
@@ -538,6 +538,15 @@ pub fn build(
                 let [a, b] = trim.slit().map(|p| layout.surface_point(p));
                 details.holes.extend(a.zip(b).map(|(a, b)| [a, b]));
             }
+        }
+        let outline_len = layout.pattern.outline.len();
+        for (index, binding) in layout.pattern.bindings.iter().enumerate() {
+            let chain: Vec<usize> =
+                points_in_range(&layout.boundary, outline_len, binding.start, binding.end)
+                    .into_iter()
+                    .map(|(i, _)| layout.offset + i)
+                    .collect();
+            details.binding(*id, index, binding.kind, &chain, &mut particles);
         }
         for line in &layout.pattern.topstitches {
             topstitches.push(

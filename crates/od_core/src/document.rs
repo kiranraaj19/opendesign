@@ -619,6 +619,9 @@ pub struct Pattern {
     pub arrangement: Option<Arrangement>,
     /// Set for a linked copy of another pattern (symmetric editing).
     pub link: Option<Link>,
+    /// Binding and piping along stretches of the outline.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub bindings: Vec<crate::details::Binding>,
 }
 
 /// What makes a pattern a linked copy of another: its outline and
@@ -728,6 +731,7 @@ impl Pattern {
             locked: false,
             arrangement: None,
             link: None,
+            bindings: Vec::new(),
         }
     }
 

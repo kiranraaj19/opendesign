@@ -1,5 +1,5 @@
-//! Garment details in the simulation: a zipper's tapes, which stiffen
-//! and weigh down the edges they are sewn to, and (when it is open) leave
+//! Garment details in the simulation: a zipper's tapes and binding or
+//! piping, which stiffen and weigh down the edges they are sewn to, and (when it is open) leave
 //! its two sides unstitched; and buttonhole slits, carried on the cloth
 //! for drawing. A fastened button needs nothing here: its tack holds it.
 //!
@@ -7,8 +7,8 @@
 //! ones between neighbours, so the edge hardly stretches, and between
 //! particles a few apart, so it resists bending more than the cloth.
 
-use od_core::document::SewingLineId;
-use od_core::Zipper;
+use od_core::document::{PatternId, SewingLineId};
+use od_core::{BindingKind, Zipper};
 
 use crate::xpbd::{DistanceConstraint, Particle, SurfacePoint};
 
@@ -31,6 +31,28 @@ impl Tape {
         stretch_compliance: 1e-9,
         bending_compliance: 1e-8,
     };
+
+    /// A bias binding folded over the edge: light, and only a little
+    /// stiffer than the cloth.
+    pub const BINDING: Tape = Tape {
+        mass_per_m: 0.01,
+        stretch_compliance: 2e-8,
+        bending_compliance: 1e-6,
+    };
+
+    /// Piping: a covered cord, firm against bending.
+    pub const PIPING: Tape = Tape {
+        mass_per_m: 0.012,
+        stretch_compliance: 5e-9,
+        bending_compliance: 5e-8,
+    };
+
+    pub fn for_binding(kind: BindingKind) -> Tape {
+        match kind {
+            BindingKind::Binding => Self::BINDING,
+            BindingKind::Piping => Self::PIPING,
+        }
+    }
 }
 
 /// The most neighbours along an edge a tape's bending constraints span.
@@ -44,6 +66,12 @@ pub enum EdgeKind {
         seam: SewingLineId,
         side: usize,
         closed: bool,
+    },
+    /// Binding or piping: `pattern`'s binding number `index`.
+    Binding {
+        pattern: PatternId,
+        index: usize,
+        kind: BindingKind,
     },
 }
 
@@ -85,10 +113,12 @@ impl SceneDetails {
     /// open.
     pub fn set_closed(&mut self, closed: &[SewingLineId]) {
         for edge in &mut self.edges {
-            let EdgeKind::Zipper {
+            if let EdgeKind::Zipper {
                 seam, closed: c, ..
-            } = &mut edge.kind;
-            *c = closed.contains(seam);
+            } = &mut edge.kind
+            {
+                *c = closed.contains(seam);
+            }
         }
     }
 
@@ -144,6 +174,26 @@ impl SceneDetails {
                 particle.inv_mass = 1.0 / (1.0 / particle.inv_mass + extra);
             }
         }
+    }
+
+    /// Binding or piping along `chain`, `pattern`'s binding `index`.
+    pub fn binding(
+        &mut self,
+        pattern: PatternId,
+        index: usize,
+        kind: BindingKind,
+        chain: &[usize],
+        particles: &mut [Particle],
+    ) {
+        self.tape(chain, particles, Tape::for_binding(kind));
+        self.edges.push(EdgeDetail {
+            kind: EdgeKind::Binding {
+                pattern,
+                index,
+                kind,
+            },
+            particles: chain.to_vec(),
+        });
     }
 
     /// A zipper on seam `seam` whose sides run through `sides`' particles:
@@ -312,6 +362,55 @@ mod tests {
         let zipper = bend(zipped(true));
         assert!(plain > 0.01, "the cloth bends: {plain}");
         assert!(zipper < plain * 0.8, "{zipper} vs {plain}");
+    }
+
+    #[test]
+    fn piping_stiffens_the_edge_it_runs_along() {
+        use od_core::{Binding, BindingKind};
+        // One clamped panel pushed out of its plane: its piped right edge
+        // gives way less than a bare one, and its binding is drawn.
+        let bend = |piping: Option<BindingKind>| {
+            let (mut doc, placements) = two_panels(SeamDetails::default());
+            doc.sewing_lines.clear();
+            doc.patterns.truncate(1);
+            if let Some(kind) = piping {
+                doc.patterns[0].bindings.push(Binding {
+                    kind,
+                    start: 1.0,
+                    end: 2.0,
+                    width: 6.0,
+                });
+            }
+            let scene = build(&doc, &placements[..1], None, &ClothConfig::default());
+            let edges = scene.details.edges.len();
+            let mut world = World::new(scene.particles.clone());
+            world.gravity = glam::Vec3::new(0.0, 0.0, -0.5);
+            world.distance_constraints = scene.structural.clone();
+            world.distance_constraints.extend(scene.bending.clone());
+            world.distance_constraints.extend(scene.details.constraints);
+            for p in &mut world.particles {
+                if p.position.y > 1.35 - 0.021 {
+                    p.inv_mass = 0.0;
+                }
+            }
+            for _ in 0..240 {
+                world.step(1.0 / 60.0, 8, &[]);
+            }
+            let corner = glam::Vec3::new(0.0, 1.05, 0.3);
+            let bottom = (0..scene.particles.len())
+                .min_by(|&i, &j| {
+                    let d = |k: usize| scene.particles[k].position.distance(corner);
+                    d(i).total_cmp(&d(j))
+                })
+                .unwrap();
+            (0.3 - world.particles[bottom].position.z, edges)
+        };
+        let (bare, none) = bend(None);
+        let (piped, one) = bend(Some(BindingKind::Piping));
+        let (bound, _) = bend(Some(BindingKind::Binding));
+        assert_eq!((none, one), (0, 1));
+        assert!(piped < bare * 0.8, "{piped} vs {bare}");
+        assert!(bound < bare && piped < bound, "{piped} < {bound} < {bare}");
     }
 
     #[test]
