@@ -52,6 +52,8 @@ pub struct Request {
     pub strain: bool,
     /// Turn the camera this many degrees around the scene after aiming.
     pub turn: f32,
+    /// Draw each piece's outline over it.
+    pub outlines: bool,
 }
 
 /// What's behind the scene: the app's light or dark canvas, or black.
@@ -179,7 +181,10 @@ pub fn render(s: &mut Session, req: &Request) -> Result<(Vec<u8>, String), Strin
             theme: &theme,
             pattern_colors: strain_colors.as_deref(),
             pattern_materials: Some(&materials),
-            display: Default::default(),
+            display: od_render::view::Display {
+                hide_outlines: !req.outlines,
+                ..Default::default()
+            },
         },
         StillSettings {
             size: req.size,

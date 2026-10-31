@@ -97,7 +97,7 @@ pub fn list() -> Vec<Value> {
                 "color": { "type": "string", "description": "Hex colour, e.g. \"#8B1E3F\"." },
                 "ease_mm": { "type": "number", "description": "Extra girth beyond the body, in mm. Default 120 (tops) or 60 (skirts)." },
                 "length_mm": { "type": "number", "description": "From the shoulder (tshirt, dress) or waist (skirt) down." },
-                "sleeve_length_mm": { "type": "number", "description": "From the shoulder down the arm. Default 330 (short)." },
+                "sleeve_length_mm": { "type": "number", "description": "From the shoulder down the arm. Default 330 (short); 0 for sleeveless, which drapes the most cleanly." },
                 "flare_mm": { "type": "number", "description": "Extra hem width on each side seam (skirt, dress). Default 60 (skirt) or 120 (dress)." },
             }),
             &["type"],
@@ -203,6 +203,7 @@ pub fn list() -> Vec<Value> {
                 "seconds": { "type": "number", "description": "Simulated time to run. Default 3 (enough for most garments); 4-5 for long or full ones." },
                 "particle_distance": { "type": "number", "description": "Cloth resolution in mm. Default 25; 35 is faster, 15 finer and much slower." },
                 "max_wait_seconds": { "type": "number", "description": "Stop and answer after this long. Default 45." },
+                "quality": { "type": "string", "enum": ["draft", "normal", "high"], "description": "Solver effort: draft is twice as fast and stretchier; high is twice as slow, with stiffer, cleaner cloth and seams, for a final render. Default normal." },
                 "reset": { "type": "boolean", "description": "Start again from the flat pieces." },
                 "cloth_collision": { "type": "boolean", "description": "Keep layers of cloth from passing through each other. Default true; false is faster for a quick look." },
             }),
@@ -219,6 +220,7 @@ pub fn list() -> Vec<Value> {
                 "avatar": { "type": "boolean", "description": "Show the avatar. Default true." },
                 "background": { "type": "string", "enum": ["light", "dark", "black"], "description": "Default light." },
                 "turn": { "type": "number", "description": "Turn the camera this many degrees around the garment." },
+                "outlines": { "type": "boolean", "description": "Draw each piece's outline. Default: only in the pattern view." },
                 "save_to": { "type": "string", "description": "Also write the PNG to this file." },
             }),
             &[],
@@ -406,7 +408,7 @@ fn create_garment(s: &mut Session, args: &Value) -> Result<Outcome> {
         fabric,
         ease: num(args, "ease_mm").unwrap_or(if skirt { 60.0 } else { 120.0 }),
         length: num(args, "length_mm"),
-        sleeve_length: num(args, "sleeve_length_mm").unwrap_or(330.0),
+        sleeve_length: num(args, "sleeve_length_mm").unwrap_or(330.0).max(0.0),
         flare: num(args, "flare_mm").unwrap_or(match kind {
             garment::Kind::Skirt => 60.0,
             garment::Kind::Dress => 120.0,
@@ -1102,6 +1104,18 @@ fn drape(s: &mut Session, args: &Value) -> Result<Outcome> {
         .filter(|p| !p.hidden && p.arrangement.is_none())
         .map(|p| p.id.0)
         .collect();
+    // More substeps make the cloth stiffer and truer, at a proportional
+    // cost in time.
+    let substeps = match str_arg(args, "quality").unwrap_or("normal") {
+        "draft" => SUBSTEPS / 2,
+        "normal" => SUBSTEPS,
+        "high" => SUBSTEPS * 2,
+        other => {
+            return Err(format!(
+                "quality \"{other}\" should be draft, normal or high"
+            ))
+        }
+    };
     let collision = args
         .get("cloth_collision")
         .and_then(Value::as_bool)
@@ -1113,7 +1127,7 @@ fn drape(s: &mut Session, args: &Value) -> Result<Outcome> {
     let steps = (seconds / DT).round() as u32;
     let mut done = 0;
     while done < steps && started.elapsed().as_secs_f32() < budget {
-        state.drape.step(DT, SUBSTEPS);
+        state.drape.step(DT, substeps);
         done += 1;
     }
     state.time += done as f32 * DT;
@@ -1177,6 +1191,10 @@ fn render_tool(s: &mut Session, args: &Value) -> Result<Outcome> {
         },
         strain: str_arg(args, "style") == Some("strain"),
         turn: num(args, "turn").unwrap_or(0.0),
+        outlines: args
+            .get("outlines")
+            .and_then(Value::as_bool)
+            .unwrap_or(view == View::Sheet),
     };
     let (png, mut text) = render::render(s, &req)?;
     if let Some(path) = str_arg(args, "save_to") {
@@ -1309,6 +1327,18 @@ mod tests {
                 .center[2]
         };
         assert!(z("front") > 0.0 && z("back") < 0.0);
+
+        // Sleeveless: just the body, sewn at the shoulders and sides, the
+        // armholes left open.
+        let mut bare = Session::new();
+        let made = text(&run(
+            &mut bare,
+            "create_garment",
+            json!({ "type": "dress", "sleeve_length_mm": 0 }),
+        ));
+        assert_eq!(made["seams"], 4);
+        assert_eq!(bare.doc.patterns.len(), 2);
+        assert!(bare.wraps.is_empty());
 
         let skirt = text(&run(
             &mut s,
@@ -1484,8 +1514,9 @@ mod tests {
         let cut = text(&run(
             &mut s,
             "drape",
-            json!({ "seconds": 20, "particle_distance": 40, "max_wait_seconds": 1 }),
+            json!({ "seconds": 20, "particle_distance": 40, "max_wait_seconds": 1, "quality": "draft" }),
         ));
+        assert!(fails(&mut s, "drape", json!({ "quality": "ultra" })).contains("draft"));
         assert!(
             cut["notes"][0]
                 .as_str()

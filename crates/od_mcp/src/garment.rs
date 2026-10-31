@@ -89,13 +89,14 @@ pub fn create(s: &mut Session, o: &Options) -> Made {
             let girth = (m.chest.max(m.hip) * 10.0 + o.ease).max(400.0);
             // Front and back are each half the girth across, shoulder
             // tips just past the avatar's shoulder joints so the garment
-            // hangs from them, and a neckline the head goes through.
+            // hangs from them. (Wider shoulders or deeper armholes let the
+            // frictionless cloth slide off the shoulders.)
             let width = girth / 2.0;
             let mid = width / 2.0;
             let shoulder =
                 (joints[Joint::LeftShoulder.index()].x.abs() * 1000.0 + 25.0).min(mid - 20.0);
             // The solver has no friction, so a loose neckline lets the
-            // garment slide off one shoulder: keep it close to the neck.
+            // garment slide off the shoulders: keep it close to the neck.
             let neck_y = joints[Joint::Neck.index()].y + 0.02;
             let neck_half = (clearance(&avatar, Vec3::X, (neck_y, neck_y), 0.0) - GAP) * 1000.0;
             let neck = (neck_half + 15.0).clamp(45.0, shoulder - 60.0);
@@ -108,12 +109,12 @@ pub fn create(s: &mut Session, o: &Options) -> Made {
                     (mid + neck - 5.0, neck_depth, Q),
                     (mid + neck, 0.0, C),
                     (mid + shoulder, 50.0, C),
-                    (mid + shoulder - 12.0, 215.0, Q),
-                    (width, 230.0, C),
+                    (mid + shoulder - 12.0, UNDERARM - 18.0, Q),
+                    (width, UNDERARM, C),
                     (width + hem_flare, length, C),
                     (-hem_flare, length, C),
-                    (0.0, 230.0, C),
-                    (mid - shoulder + 12.0, 215.0, Q),
+                    (0.0, UNDERARM, C),
+                    (mid - shoulder + 12.0, UNDERARM - 18.0, Q),
                 ]
                 .into_iter()
                 .map(|(x, y, kind)| OutlinePoint {
@@ -131,18 +132,47 @@ pub fn create(s: &mut Session, o: &Options) -> Made {
             let front = add(s, &format!("{name} front"), body(95.0), &mut cursor);
             let back = add(s, &format!("{name} back"), body(25.0), &mut cursor);
 
-            // Sleeves: the cap's width scaled until it matches the armhole.
+            // Front pattern x runs to the avatar's left (+X), back pattern x
+            // to its right; see `od_render::arrange`.
+            sew(s, &mut made, &[(front, 1, 0)], &[(back, 4, 5)]);
+            sew(s, &mut made, &[(front, 4, 5)], &[(back, 1, 0)]);
+            sew(s, &mut made, &[(front, 10, 9)], &[(back, 7, 8)]);
+            sew(s, &mut made, &[(front, 7, 8)], &[(back, 10, 9)]);
+
+            let top = shoulder_y + 0.07;
+            let mid_y = top - length / 2000.0;
+            let span = (top - length / 1000.0, top - 0.05);
+            let half_width = girth / 4000.0;
+            let front_z = clearance(&avatar, Vec3::Z, span, half_width);
+            let back_z = clearance(&avatar, Vec3::NEG_Z, span, half_width);
+            arrange(s, front, Vec3::new(0.0, mid_y, front_z), Vec3::Z);
+            arrange(s, back, Vec3::new(0.0, mid_y, -back_z), Vec3::NEG_Z);
+            made.pieces = vec![("front", front), ("back", back)];
+
+            // A sleeve length of zero leaves the armholes open.
             let armhole = edge_length(s, front, 7, 5) + edge_length(s, back, 0, 10);
+            if o.sleeve_length <= 0.0 {
+                made.notes.push(format!(
+                    "Sleeveless: body {girth:.0} mm round the chest ({:.0} mm ease), {length:.0} mm long, {armhole:.0} mm armholes.",
+                    o.ease
+                ));
+                return finish(s, o, made);
+            }
+
+            // Sleeves: a low, T-shirt cap, its width scaled until its
+            // length matches the armhole exactly. The solver can't ease a
+            // longer cap in, so any extra stands up in a peak at the
+            // shoulder.
             let sleeve = |scale: f32| -> Vec<OutlinePoint> {
-                let hem = o.sleeve_length.max(140.0);
-                let taper = 30.0 * (hem - 130.0) / 200.0;
+                let hem = o.sleeve_length.max(CAP_HEIGHT + 40.0);
+                let taper = 30.0 * (hem - CAP_HEIGHT) / 200.0;
                 [
-                    (0.0, 130.0, C),
-                    (80.0, 125.0, Q),
-                    (120.0, 0.0, Q),
-                    (320.0, 0.0, Q),
-                    (360.0, 125.0, Q),
-                    (440.0, 130.0, C),
+                    (0.0, CAP_HEIGHT, C),
+                    (90.0, CAP_HEIGHT - 8.0, Q),
+                    (140.0, 0.0, Q),
+                    (300.0, 0.0, Q),
+                    (350.0, CAP_HEIGHT - 8.0, Q),
+                    (440.0, CAP_HEIGHT, C),
                     (440.0 - taper, hem, C),
                     (taper, hem, C),
                 ]
@@ -158,18 +188,11 @@ pub fn create(s: &mut Session, o: &Options) -> Made {
                 let cap = od_core::Pattern::new(PatternId(0), "probe", sleeve(scale));
                 let len = cap.segment_length(0.0, 5.0, TOLERANCE);
                 if len > 1.0 {
-                    scale *= armhole * 1.02 / len;
+                    scale *= armhole / len;
                 }
             }
             let left = add(s, "Left sleeve", sleeve(scale), &mut cursor);
             let right = add(s, "Right sleeve", sleeve(scale), &mut cursor);
-
-            // Front pattern x runs to the avatar's left (+X), back pattern x
-            // to its right; see `od_render::arrange`.
-            sew(s, &mut made, &[(front, 1, 0)], &[(back, 4, 5)]);
-            sew(s, &mut made, &[(front, 4, 5)], &[(back, 1, 0)]);
-            sew(s, &mut made, &[(front, 10, 9)], &[(back, 7, 8)]);
-            sew(s, &mut made, &[(front, 7, 8)], &[(back, 10, 9)]);
             // The left sleeve's x runs towards the back, the right's to the
             // front; each cap goes round its armhole from underarm to
             // underarm, across the shoulder.
@@ -188,14 +211,6 @@ pub fn create(s: &mut Session, o: &Options) -> Made {
             sew(s, &mut made, &[(left, 0, 7)], &[(left, 5, 6)]);
             sew(s, &mut made, &[(right, 0, 7)], &[(right, 5, 6)]);
 
-            let top = shoulder_y + 0.07;
-            let mid_y = top - length / 2000.0;
-            let span = (top - length / 1000.0, top - 0.05);
-            let half_width = girth / 4000.0;
-            let front_z = clearance(&avatar, Vec3::Z, span, half_width);
-            let back_z = clearance(&avatar, Vec3::NEG_Z, span, half_width);
-            arrange(s, front, Vec3::new(0.0, mid_y, front_z), Vec3::Z);
-            arrange(s, back, Vec3::new(0.0, mid_y, -back_z), Vec3::NEG_Z);
             let sleeve_mid = top - o.sleeve_length.max(140.0) / 2000.0 - 0.02;
             for (id, side, limb) in [
                 (left, Vec3::X, Limb::LeftArm),
@@ -206,12 +221,8 @@ pub fn create(s: &mut Session, o: &Options) -> Made {
                 // Drape with the arm inside the sleeve, not beside it.
                 s.wraps.insert(id, limb);
             }
-            made.pieces = vec![
-                ("front", front),
-                ("back", back),
-                ("left sleeve", left),
-                ("right sleeve", right),
-            ];
+            made.pieces
+                .extend([("left sleeve", left), ("right sleeve", right)]);
             made.notes.push(format!(
                 "Body {:.0} mm round the chest ({:.0} mm ease), {:.0} mm long; sleeve cap {:.0} mm for a {:.0} mm armhole.",
                 girth, o.ease, length, s.doc.pattern(left).map_or(0.0, |p| p.segment_length(0.0, 5.0, TOLERANCE)), armhole
@@ -256,7 +267,11 @@ pub fn create(s: &mut Session, o: &Options) -> Made {
             ));
         }
     }
+    finish(s, o, made)
+}
 
+/// Give every piece made the garment's fabric.
+fn finish(s: &mut Session, o: &Options, made: Made) -> Made {
     for &(_, id) in &made.pieces {
         s.execute(SetFabric::new(id, o.fabric.clone()));
     }
@@ -325,6 +340,12 @@ fn arrange(s: &mut Session, id: PatternId, center: Vec3, outward: Vec3) {
         }),
     ));
 }
+
+/// How far below the neck point a top's underarm is, in mm.
+const UNDERARM: f32 = 230.0;
+
+/// How tall a sleeve cap is, from the underarm to its crown, in mm.
+const CAP_HEIGHT: f32 = 95.0;
 
 /// Room left between a piece and the body when it is placed, in metres.
 const GAP: f32 = 0.04;

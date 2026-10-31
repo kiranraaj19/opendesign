@@ -95,6 +95,9 @@ pub struct Display {
     pub cloth: Style,
     /// Draw the cloth's triangle edges over it.
     pub mesh_edges: bool,
+    /// Leave out each piece's outline, as for a finished render, where
+    /// the seams should read as cloth rather than as drawn lines.
+    pub hide_outlines: bool,
 }
 
 /// How solid see-through surfaces are.
@@ -175,7 +178,9 @@ pub fn compose_frame<K: PartialEq>(input: FrameInput<'_, K>) -> Frame {
         if input.display.mesh_edges && cloth != Style::Wireframe {
             frame.add_edges(&p.mesh, with_alpha(line, 0.5));
         }
-        frame.add_outline(&p.outline, p.normal, line);
+        if !input.display.hide_outlines {
+            frame.add_outline(&p.outline, p.normal, line);
+        }
     }
     frame.lines.extend(floor_grid(2.0, 0.1, 5, &theme.grid));
     let b = input.avatar_bounds;
@@ -494,6 +499,7 @@ mod tests {
             avatar: Style::Wireframe,
             cloth: Style::Wireframe,
             mesh_edges: false,
+            hide_outlines: false,
         });
         assert!(wire.avatar.is_none() && wire.surfaces.is_empty());
         assert!(wire.lines.len() > solid.lines.len() + avatar.indices.len() / 2);
@@ -502,6 +508,7 @@ mod tests {
             avatar: Style::SeeThrough,
             cloth: Style::SeeThrough,
             mesh_edges: false,
+            hide_outlines: false,
         });
         assert!(clear.avatar.is_none() && clear.surfaces.is_empty());
         assert!(clear.translucent.iter().all(|v| v.color[3] < 1.0));
@@ -517,5 +524,13 @@ mod tests {
         });
         assert!(edged.lines.len() > solid.lines.len());
         assert_eq!(edged.surfaces.len(), solid.surfaces.len());
+
+        // A finished render can leave the outlines out.
+        let clean = draw(Display {
+            hide_outlines: true,
+            ..Display::default()
+        });
+        assert!(clean.lines.len() < solid.lines.len());
+        assert_eq!(clean.surfaces.len(), solid.surfaces.len());
     }
 }
