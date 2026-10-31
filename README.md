@@ -62,6 +62,12 @@ without this step.
 | Drape | Drape button above the 3D view; Pin and Strain toggles while draping; Cloth collision keeps pieces from passing through each other |
 | Particle distance | Properties -> Simulation: spacing of a piece's simulation particles (default 20 mm; smaller is finer and slower) |
 | Select / move | Select tool (`V`), click or drag a pattern; `Shift`/`Ctrl`+click adds or removes, drag a box from empty space to select what it touches, `Ctrl+A` selects all, `Esc` clears. Moves, flips and deletes act on every selected piece |
+| Zippers | Zipper tool (`Z`): click or drag two outline stretches to zip them together with stiff tapes; click a zipper to open or close it, live while draping. Tape width in Properties |
+| Buttons and buttonholes | Buttonhole tool (`H`): click to place a buttonhole (angle in Properties); click a button, then a buttonhole, to fasten them so draping holds them together; click a fastened button to unfasten |
+| Binding and piping | Binding tool (`G`): click or drag an edge to bind it or pipe it; click a bound edge to remove it. Kind and width in Properties |
+| Puckered seams | Select a seam: Properties → Pucker gathers its longer side in so it ripples when draped |
+| Pose the avatar | Pose above the 3D view: built-in poses (A-pose, T-pose, arms down, walking, …), per-joint sliders, copy or mirror a side. The pose is saved with the project; while draping, the body glides to a new pose and the cloth follows |
+| Motion | Pose → Motion: load a BVH file or the built-in walk and play, pause, loop or scrub it; while draping, the cloth moves with the body |
 | Import DXF patterns | File → Import → Patterns from DXF (AAMA)…, or drop a `.dxf` on the window: outlines, seam allowance, grainline, notches, internal and fold lines, darts. One undo removes the import |
 | Recover unsaved work | Unsaved changes are written to a recovery file every minute (never over your own file); after a crash, the next start offers to restore them |
 | Reference garment | File → Import → Garment model for reference (OBJ, glTF): drawn see-through in the 3D view, not simulated |
@@ -98,7 +104,7 @@ the default arrangement.
 ### Project files
 
 Projects are saved as `.odproj`: versioned JSON
-(`{"format": "opendesign-project", "version": 13, "document": {...}}`).
+(`{"format": "opendesign-project", "version": 14, "document": {...}}`).
 Older versions are upgraded when opened.
 Saves go through a temporary file and a rename, so a crash mid-save never
 leaves a half-written project. The title bar shows `*` and the status bar

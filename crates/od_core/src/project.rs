@@ -1,7 +1,7 @@
 //! Project files (`.odproj`): a versioned JSON wrapper around a [`Document`].
 //!
 //! ```json
-//! { "format": "opendesign-project", "version": 13, "document": { ... } }
+//! { "format": "opendesign-project", "version": 14, "document": { ... } }
 //! ```
 //!
 //! Older versions are upgraded on load by the `migrate_*` steps below, so a
@@ -43,7 +43,10 @@ pub const FORMAT: &str = "opendesign-project";
 /// - 13: the document gains garment measurements, colourways, groups and
 ///   saved camera views; fabrics gain stretch and bending across the
 ///   grain and a shear stiffness.
-pub const VERSION: u32 = 13;
+/// - 14: seams can be zippers or puckered; patterns gain binding and
+///   piping; trims gain an angle and can be buttonholes; the document
+///   keeps the avatar's pose.
+pub const VERSION: u32 = 14;
 
 #[derive(Debug)]
 pub enum ProjectError {
@@ -324,6 +327,23 @@ fn migrate_v12(doc: &mut serde_json::Value) {
     doc.insert("active_colourway".into(), Value::Null);
 }
 
+/// Upgrade a version 13 document to version 14 in place: every trim lies
+/// at its pattern's angle. Seams without details, patterns without
+/// bindings and a resting avatar are what the missing fields already
+/// mean.
+fn migrate_v13(doc: &mut serde_json::Value) {
+    use serde_json::Value;
+    let Some(patterns) = doc.get_mut("patterns").and_then(Value::as_array_mut) else {
+        return; // leave it for deserialisation to report
+    };
+    for pattern in patterns.iter_mut().filter_map(Value::as_object_mut) {
+        let trims = pattern.get_mut("trims").and_then(Value::as_array_mut);
+        for trim in trims.into_iter().flatten().filter_map(Value::as_object_mut) {
+            trim.insert("angle".into(), 0.0.into());
+        }
+    }
+}
+
 pub fn to_json(doc: &Document) -> String {
     let file = FileOut {
         format: FORMAT,
@@ -389,6 +409,9 @@ pub fn from_json(text: &str) -> Result<Document, ProjectError> {
     }
     if header.version < 13 {
         migrate_v12(&mut body);
+    }
+    if header.version < 14 {
+        migrate_v13(&mut body);
     }
     let mut doc: Document = serde_json::from_value(body).map_err(ProjectError::Malformed)?;
     doc.validate()?;
@@ -467,7 +490,7 @@ mod tests {
             Err(ProjectError::NotAProject)
         ));
         assert!(matches!(
-            from_json(&good.replace("\"version\": 13", "\"version\": 99")),
+            from_json(&good.replace("\"version\": 14", "\"version\": 99")),
             Err(ProjectError::UnsupportedVersion(99))
         ));
         let dup = good.replace("\"id\": 2", "\"id\": 1");
@@ -490,7 +513,7 @@ mod tests {
         doc.patterns[0].seam_allowance = 7.5;
 
         let text = to_json(&doc);
-        assert!(text.contains("\"version\": 13"));
+        assert!(text.contains("\"version\": 14"));
         assert!(text.contains("\"kind\": \"curve\""));
         assert_eq!(from_json(&text).unwrap(), doc);
     }
@@ -539,7 +562,7 @@ mod tests {
 
         // Saving writes the current version, which loads back the same.
         let resaved = to_json(&doc);
-        assert!(resaved.contains("\"version\": 13"));
+        assert!(resaved.contains("\"version\": 14"));
         assert_eq!(from_json(&resaved).unwrap(), doc);
     }
 
@@ -597,7 +620,7 @@ mod tests {
 
         // Saving writes the current version, which loads back the same.
         let resaved = to_json(&doc);
-        assert!(resaved.contains("\"version\": 13"));
+        assert!(resaved.contains("\"version\": 14"));
         assert_eq!(from_json(&resaved).unwrap(), doc);
     }
 
@@ -647,7 +670,7 @@ mod tests {
         assert_eq!(doc.tacks.len(), 1);
 
         let resaved = to_json(&doc);
-        assert!(resaved.contains("\"version\": 13"));
+        assert!(resaved.contains("\"version\": 14"));
         assert_eq!(from_json(&resaved).unwrap(), doc);
     }
 
@@ -710,7 +733,7 @@ mod tests {
         );
 
         let resaved = to_json(&doc);
-        assert!(resaved.contains("\"version\": 13"));
+        assert!(resaved.contains("\"version\": 14"));
         assert_eq!(from_json(&resaved).unwrap(), doc);
     }
 
@@ -751,7 +774,7 @@ mod tests {
         assert_eq!(doc.patterns[0].fabric, crate::document::Fabric::cotton());
 
         let resaved = to_json(&doc);
-        assert!(resaved.contains("\"version\": 13"));
+        assert!(resaved.contains("\"version\": 14"));
         assert_eq!(from_json(&resaved).unwrap(), doc);
     }
 
@@ -770,7 +793,7 @@ mod tests {
         assert_eq!(doc.patterns[0].trims.len(), 1);
 
         let resaved = to_json(&doc);
-        assert!(resaved.contains("\"version\": 13"));
+        assert!(resaved.contains("\"version\": 14"));
         assert_eq!(from_json(&resaved).unwrap(), doc);
     }
 
@@ -834,7 +857,7 @@ mod tests {
         assert_ne!(doc.patterns[0].graded_outline(1), doc.patterns[0].outline);
 
         let resaved = to_json(&doc);
-        assert!(resaved.contains("\"version\": 13"));
+        assert!(resaved.contains("\"version\": 14"));
         assert_eq!(from_json(&resaved).unwrap(), doc);
     }
 
@@ -1032,6 +1055,35 @@ mod tests {
         let fabric = &loaded.patterns[0].fabric;
         assert_eq!(fabric.weft_stretch_compliance, fabric.stretch_compliance);
         assert_eq!(fabric.weft_bending_compliance, fabric.bending_compliance);
+
+        // The current version keeps them.
+        assert_eq!(from_json(&to_json(&doc)).unwrap(), doc);
+    }
+
+    #[test]
+    fn version_13_files_load_with_plain_seams_and_a_resting_avatar() {
+        use crate::document::{Trim, TrimKind};
+        let mut doc = sample();
+        doc.patterns[0].trims.push(Trim {
+            kind: TrimKind::Button,
+            pos: Vec2::new(20.0, 20.0),
+            angle: 30.0,
+        });
+        let mut file: serde_json::Value = serde_json::from_str(&to_json(&doc)).unwrap();
+        file["version"] = 13.into();
+        file["document"]
+            .as_object_mut()
+            .unwrap()
+            .remove("avatar_pose");
+        for pattern in file["document"]["patterns"].as_array_mut().unwrap() {
+            for trim in pattern["trims"].as_array_mut().unwrap() {
+                trim.as_object_mut().unwrap().remove("angle");
+            }
+        }
+        let loaded = from_json(&file.to_string()).unwrap();
+        assert_eq!(loaded.patterns[0].trims[0].angle, 0.0);
+        assert_eq!(loaded.avatar_pose, crate::pose::Pose::default());
+        assert!(loaded.sewing_lines.iter().all(|l| l.details.is_plain()));
 
         // The current version keeps them.
         assert_eq!(from_json(&to_json(&doc)).unwrap(), doc);
