@@ -1,7 +1,7 @@
 //! Render the garment view offscreen to a PNG, to check the renderer on a
 //! machine without a window (any wgpu adapter, software ones included).
 //!
-//! cargo run -p od_render --example snapshot -- out.png [female|male|kid] [dark|light] [front|back|left|right|top] [avatar] [pose=<built-in pose name>]
+//! cargo run -p od_render --example snapshot -- out.png [female|male|kid] [dark|light] [front|back|left|right|top] [avatar] [pose=<built-in pose name>] [walk=<seconds into the built-in walk>]
 
 use std::sync::Arc;
 
@@ -83,7 +83,20 @@ fn main() {
     };
 
     let rig = od_render::skeleton::Rig::avatar(kind, kind.default_measurements());
-    let mesh = Arc::new(rig.skin(&od_render::skeleton::pose_rotations(&pose, rig.bones())));
+    let walk = args
+        .iter()
+        .find_map(|a| a.strip_prefix("walk="))
+        .map(|t| t.parse::<f32>().expect("walk=<seconds>"));
+    let rotations = match walk {
+        Some(time) => {
+            let bvh = od_render::bvh::Bvh::parse(&od_render::bvh::walk_cycle()).unwrap();
+            od_render::bvh::retarget(&bvh, rig.bones())
+                .unwrap()
+                .rotations_at(time)
+        }
+        None => od_render::skeleton::pose_rotations(&pose, rig.bones()),
+    };
+    let mesh = Arc::new(rig.skin(&rotations));
     let body = mesh.bounds().unwrap();
     let blocks: Vec<(u32, Vec<Vec2>)> = vec![
         (

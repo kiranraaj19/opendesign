@@ -189,4 +189,67 @@ fn screenshots_of_the_pose_panel() {
     h.run();
     let image = h.render().expect("a wgpu adapter to render with");
     image.save(dir.join("pose-panel.png")).unwrap();
+
+    // The built-in walk, paused part way.
+    h.get_by_label("Walk in place").click();
+    h.step();
+    h.get_by_label("Pause").click();
+    h.run();
+    let image = h.render().expect("a wgpu adapter to render with");
+    image.save(dir.join("pose-panel-motion.png")).unwrap();
+}
+
+#[test]
+fn the_built_in_walk_plays_pauses_and_stops() {
+    let mut h = harness();
+    open_panel(&mut h);
+    h.get_by_label("Walk in place").click();
+    h.step();
+    let player = h.state().session.viewport.posing.motion.as_ref().unwrap();
+    assert!(player.playing);
+    assert_eq!(player.motion.matched.len(), Joint::COUNT);
+    // The body moves from frame to frame.
+    let rotations =
+        |h: &Harness<'_, OpenDesignApp>| h.state().session.viewport.avatar.rotations().to_vec();
+    let before = rotations(&h);
+    for _ in 0..5 {
+        h.step();
+    }
+    let after = rotations(&h);
+    assert_ne!(before, after, "walking");
+
+    h.get_by_label("Pause").click();
+    h.run();
+    let paused = rotations(&h);
+    h.run();
+    assert_eq!(rotations(&h), paused, "held still");
+    assert!(
+        h.state().session.doc.avatar_pose.is_rest(),
+        "the pose is untouched"
+    );
+
+    h.get_by_label("Stop motion").click();
+    h.run();
+    h.run();
+    assert!(h.state().session.viewport.posing.motion.is_none());
+    let rest = rotations(&h);
+    assert!(
+        rest.iter().all(|q| q.abs_diff_eq(Quat::IDENTITY, 1e-6)),
+        "back to the pose"
+    );
+}
+
+#[test]
+fn a_bad_motion_file_shows_why() {
+    let mut h = harness();
+    open_panel(&mut h);
+    let v = &mut h.state_mut().session.viewport;
+    let rig = v.avatar.rig().unwrap().clone();
+    assert!(v
+        .posing
+        .load_motion("junk.bvh", "not a motion", &rig)
+        .is_err());
+    h.run();
+    assert!(h.state().session.viewport.posing.motion.is_none());
+    h.get_by_label("Couldn't load junk.bvh: not a BVH file (no HIERARCHY)");
 }

@@ -6,6 +6,7 @@
 
 pub mod arrange;
 pub mod avatar;
+pub mod bvh;
 pub mod camera;
 pub mod export;
 pub mod gpu;
