@@ -206,9 +206,11 @@ impl Default for SeamCheck {
 }
 
 impl SeamCheck {
-    /// Should `line` be flagged?
+    /// Should `line` be flagged? A puckered seam is eased on purpose.
     pub fn flags(&self, doc: &Document, line: &SewingLine) -> bool {
-        self.enabled && line.is_mismatched_by(doc, self.percent / 100.0)
+        self.enabled
+            && line.details.pucker.is_none()
+            && line.is_mismatched_by(doc, self.percent / 100.0)
     }
 
     /// Seams to flag, in document order.

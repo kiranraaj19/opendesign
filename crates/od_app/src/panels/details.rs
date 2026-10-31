@@ -3,14 +3,15 @@
 //! zipper settings of a selected seam; the Buttonhole tool, which places
 //! buttonholes and fastens buttons into them; the Binding tool, binding
 //! and piping drawn along their edges, and a piece's bindings in
-//! Properties.
+//! Properties; gather marks along puckered seams and the Pucker setting
+//! of a selected seam.
 
 use egui::{Align2, Color32, FontId, Key, Pos2, Rect, Shape, Stroke};
 use od_core::details::{fastenings, Fasten, Unfasten};
 use od_core::{
     AddBinding, AddSewingLine, AddTrim, Batch, Binding, BindingKind, Command, Pattern, PatternId,
-    RemoveTrim, SeamEdge, SetBinding, SetZipper, SewingLine, SewingLineId, TackPoint, Trim,
-    TrimKind, Vec2, Zipper,
+    Pucker, RemoveTrim, SeamEdge, SetBinding, SetPucker, SetZipper, SewingLine, SewingLineId,
+    TackPoint, Trim, TrimKind, Vec2, Zipper,
 };
 
 use crate::app::{Session, Tool};
@@ -388,6 +389,10 @@ pub fn draw(painter: &egui::Painter, rect: Rect, s: &Session, pal: &theme::Palet
     for line in s.doc.sewing_lines.iter().filter(|l| l.is_zipper()) {
         draw_zipper(painter, s, line, pal, &to_screen);
     }
+    for (i, line) in s.doc.sewing_lines.iter().enumerate() {
+        let color = crate::panels::pattern2d::seam_color(s, i, pal);
+        draw_pucker(painter, s, line, color, &to_screen);
+    }
     for pattern in s.doc.patterns.iter().filter(|p| !p.hidden) {
         for binding in &pattern.bindings {
             draw_binding(painter, s, pattern, binding, pal, &to_screen);
@@ -571,9 +576,94 @@ fn deferred_value(
     (done != current).then_some(done)
 }
 
+/// A selected seam's puckering: on or off, and how much further than its
+/// shorter side it is gathered.
+fn pucker_row(ui: &mut egui::Ui, s: &mut Session, id: SewingLineId) {
+    let Some(line) = s.doc.sewing_line(id) else {
+        return;
+    };
+    let pucker = line.details.pucker;
+    ui.add_space(8.0);
+    let mut set = None;
+    ui.horizontal(|ui| {
+        let mut on = pucker.is_some();
+        if ui
+            .checkbox(&mut on, "Pucker")
+            .on_hover_text(
+                "Gather the longer side in to the shorter one, so the extra cloth ripples along the seam",
+            )
+            .changed()
+        {
+            set = Some(on.then(Pucker::default));
+        }
+        if let Some(pucker) = pucker {
+            ui.label("Extra gather");
+            let percent = |r: std::ops::RangeInclusive<f32>| r.start() * 100.0..=r.end() * 100.0;
+            if let Some(amount) = deferred_value(
+                ui,
+                ("pucker", id),
+                pucker.amount * 100.0,
+                percent(Pucker::AMOUNT_RANGE),
+                "%",
+            ) {
+                set = Some(Some(Pucker {
+                    amount: amount / 100.0,
+                }));
+            }
+        }
+    });
+    if let Some(pucker) = set {
+        s.execute(SetPucker::new(id, pucker));
+    }
+}
+
+/// Gather marks along each side of a puckered seam that is drawn in:
+/// short ticks, closer together the more it is gathered.
+fn draw_pucker(
+    painter: &egui::Painter,
+    s: &Session,
+    line: &SewingLine,
+    color: Color32,
+    to_screen: &impl Fn(Vec2) -> Pos2,
+) {
+    let Some(pucker) = line.details.pucker else {
+        return;
+    };
+    let Some((a, b)) = line.side_lengths(&s.doc) else {
+        return;
+    };
+    let sewn = pucker.sewn_length(a, b);
+    for (group, length) in [(&line.a, a), (&line.b, b)] {
+        if length <= 0.0 || sewn >= length * 0.999 {
+            continue;
+        }
+        let step = GATHER_MM * sewn / length;
+        let reach = s.canvas.px(5.0);
+        for edge in group {
+            let Some(pattern) = s.doc.pattern(edge.pattern).filter(|p| !p.hidden) else {
+                continue;
+            };
+            let points = pattern.edge_points(edge);
+            for (at, i) in every(&points, step) {
+                let n = inward(pattern, points[i], points[i + 1]);
+                let d = points[i + 1] - points[i];
+                let along = d * (reach * 0.4 / d.length().max(1e-6));
+                // A small arc of gathered cloth: in and back out.
+                let pts = [at - along, at + n * reach, at + along].map(to_screen);
+                painter.add(Shape::line(pts.to_vec(), Stroke::new(1.2, color)));
+            }
+        }
+    }
+}
+
+/// Gather marks on a puckered side are this far apart when it isn't
+/// drawn in at all, in mm; closer the more it is.
+const GATHER_MM: f32 = 8.0;
+
 /// A selected seam's zipper: open or closed and its tape, or a way to
 /// make the seam one.
 pub fn seam_section(ui: &mut egui::Ui, s: &mut Session, id: SewingLineId) {
+    pucker_row(ui, s, id);
     let Some(line) = s.doc.sewing_line(id) else {
         return;
     };

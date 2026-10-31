@@ -330,6 +330,35 @@ fn a_pieces_bindings_are_edited_in_properties() {
         .is_empty());
 }
 
+#[test]
+fn a_seam_is_puckered_in_properties() {
+    use od_core::Pucker;
+    let mut h = harness();
+    two_pieces(&mut h);
+    {
+        let s = &mut h.state_mut().session;
+        let a = s.doc.patterns[0].shorter_edge(1.0, 2.0);
+        // Gathered into the top two thirds of Right's left edge.
+        let b = s.doc.patterns[1].shorter_edge(3.4, 4.0).reversed();
+        s.execute(od_core::AddSewingLine::new(vec![a], vec![b]));
+        s.selected_seam = Some(s.doc.sewing_lines[0].id);
+    }
+    h.run();
+    let flagged = |h: &Harness<'_, OpenDesignApp>| {
+        let s = &h.state().session;
+        s.seam_check.flags(&s.doc, &s.doc.sewing_lines[0])
+    };
+    assert!(flagged(&h), "100 mm longer on one side");
+    click(&mut h, "Pucker");
+    let line = &h.state().session.doc.sewing_lines[0];
+    assert_eq!(line.details.pucker, Some(Pucker::default()));
+    assert_eq!(last_step(&h), "Pucker seam");
+    assert!(!flagged(&h), "eased on purpose");
+    click(&mut h, "Pucker");
+    assert_eq!(h.state().session.doc.sewing_lines[0].details.pucker, None);
+    assert_eq!(last_step(&h), "Sew seam flat");
+}
+
 /// Screenshots of the garment details for a look by eye, written to
 /// `$OD_SHOTS` (default: a temporary folder). Needs a wgpu adapter; a
 /// software one (lavapipe) is enough.
@@ -407,5 +436,28 @@ fn screenshots_of_garment_details() {
     h.state_mut().session.tool = Tool::Select;
     h.state_mut().session.selection.set(Some(left));
     shot(&mut h, "binding.png");
+
+    // A third piece whose long side is puckered into Right's outer side.
+    {
+        let s = &mut h.state_mut().session;
+        s.add_pattern(
+            "Ruffle",
+            od_core::geometry::rectangle(Vec2::new(300.0, 0.0), Vec2::new(360.0, 400.0)),
+        );
+        let ruffle = s.doc.patterns.len() - 1;
+        let a = s.doc.patterns[ruffle].shorter_edge(3.0, 4.0).reversed();
+        let b = s.doc.patterns[1].shorter_edge(1.0, 2.0);
+        s.execute(od_core::AddSewingLine::new(vec![b], vec![a]));
+        let id = s.doc.sewing_lines.last().unwrap().id;
+        s.execute(od_core::SetPucker::new(
+            id,
+            Some(od_core::Pucker::default()),
+        ));
+        s.selected_seam = Some(id);
+    }
+    press(&mut h, Modifiers::COMMAND, Key::A);
+    press(&mut h, Modifiers::NONE, Key::F);
+    h.state_mut().session.selection.clear();
+    shot(&mut h, "pucker.png");
     eprintln!("screenshots in {}", dir.display());
 }

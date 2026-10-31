@@ -28,6 +28,80 @@ pub struct SeamDetails {
     /// while it is closed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub zipper: Option<Zipper>,
+    /// The seam is gathered: its longer side is drawn in to the shorter
+    /// one's length (and both a little further), so the extra cloth
+    /// puckers along it instead of being stretched flat.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pucker: Option<Pucker>,
+}
+
+/// How a puckered seam is gathered.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct Pucker {
+    /// How much further than the shorter side both sides are drawn in, as
+    /// a fraction of its length (0 eases only the difference in length).
+    pub amount: f32,
+}
+
+impl Pucker {
+    pub const DEFAULT_AMOUNT: f32 = 0.05;
+    /// The amounts offered.
+    pub const AMOUNT_RANGE: std::ops::RangeInclusive<f32> = 0.0..=0.3;
+
+    /// How long a seam whose sides are `a` and `b` mm long ends up once
+    /// sewn, in mm.
+    pub fn sewn_length(&self, a: f32, b: f32) -> f32 {
+        a.min(b) * (1.0 - self.amount.clamp(0.0, 0.9))
+    }
+}
+
+impl Default for Pucker {
+    fn default() -> Self {
+        Self {
+            amount: Self::DEFAULT_AMOUNT,
+        }
+    }
+}
+
+/// Pucker a seam, change how much, or sew it flat again (`None`).
+pub struct SetPucker {
+    id: SewingLineId,
+    pucker: Option<Pucker>,
+    before: Option<Option<Pucker>>,
+}
+
+impl SetPucker {
+    pub fn new(id: SewingLineId, pucker: Option<Pucker>) -> Self {
+        Self {
+            id,
+            pucker,
+            before: None,
+        }
+    }
+}
+
+impl Command for SetPucker {
+    fn label(&self) -> String {
+        match (self.before.flatten(), self.pucker) {
+            (None, Some(_)) => "Pucker seam",
+            (Some(_), None) => "Sew seam flat",
+            _ => "Edit pucker",
+        }
+        .into()
+    }
+
+    fn apply(&mut self, doc: &mut Document) {
+        if let Some(line) = doc.sewing_line_mut(self.id) {
+            self.before = Some(line.details.pucker);
+            line.details.pucker = self.pucker;
+        }
+    }
+
+    fn undo(&mut self, doc: &mut Document) {
+        if let (Some(line), Some(before)) = (doc.sewing_line_mut(self.id), self.before) {
+            line.details.pucker = before;
+        }
+    }
 }
 
 impl SeamDetails {
@@ -660,6 +734,34 @@ mod tests {
         assert!(moved[0].distance(where_[0]) < 1e-3 && moved[1].distance(where_[1]) < 1e-3);
         history.undo(&mut doc);
         assert_eq!(doc, before);
+    }
+
+    #[test]
+    fn a_seam_is_puckered_and_sewn_flat_again() {
+        let (mut doc, [a, b]) = doc();
+        AddSewingLine::new(vec![edge(a, 1.0, true)], vec![edge(b, 3.0, false)]).apply(&mut doc);
+        let id = doc.sewing_lines[0].id;
+        let flat = doc.clone();
+        let mut history = History::new();
+        run(
+            &mut history,
+            &mut doc,
+            SetPucker::new(id, Some(Pucker::default())),
+        );
+        assert_eq!(history.undo_label(), Some("Pucker seam".into()));
+        let loaded = crate::project::from_json(&crate::project::to_json(&doc)).unwrap();
+        assert_eq!(loaded, doc);
+        run(&mut history, &mut doc, SetPucker::new(id, None));
+        assert_eq!(history.undo_label(), Some("Sew seam flat".into()));
+        assert_eq!(doc, flat);
+        history.undo(&mut doc);
+        history.undo(&mut doc);
+        assert_eq!(doc, flat);
+
+        // Eased to the shorter side, then gathered a little further.
+        let p = Pucker { amount: 0.1 };
+        assert!((p.sewn_length(300.0, 200.0) - 180.0).abs() < 1e-4);
+        assert_eq!(Pucker { amount: 0.0 }.sewn_length(200.0, 300.0), 200.0);
     }
 
     #[test]

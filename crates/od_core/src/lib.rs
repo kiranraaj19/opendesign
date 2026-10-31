@@ -38,7 +38,9 @@ pub use command::{
     SetOutline, SetParticleDistance, SetPatternFlag, SetPatternValue, SetPointKind, SetSeamEdge,
     PARTICLE_DISTANCE_RANGE,
 };
-pub use details::{AddBinding, Binding, BindingKind, SeamDetails, SetBinding, SetZipper, Zipper};
+pub use details::{
+    AddBinding, Binding, BindingKind, Pucker, SeamDetails, SetBinding, SetPucker, SetZipper, Zipper,
+};
 pub use document::{
     Arrangement, Axis, Dart, Document, Fabric, FabricTexture, Fold, Grading, InternalLine, Link,
     Notch, OutlinePoint, Pattern, PatternId, PointKind, SeamEdge, SewingLine, SewingLineId,

@@ -2,13 +2,18 @@
 //! piping, which stiffen and weigh down the edges they are sewn to, and (when it is open) leave
 //! its two sides unstitched; and buttonhole slits, carried on the cloth
 //! for drawing. A fastened button needs nothing here: its tack holds it.
+//! A puckered seam has its longer side drawn in, the way a gathering
+//! thread would, and seeded to ripple out of the cloth's plane.
 //!
 //! A tape is extra constraints along a run of outline particles: stiff
 //! ones between neighbours, so the edge hardly stretches, and between
 //! particles a few apart, so it resists bending more than the cloth.
 
 use od_core::document::{PatternId, SewingLineId};
-use od_core::{BindingKind, Zipper};
+use std::collections::HashMap;
+
+use glam::Vec3;
+use od_core::{BindingKind, Pucker, Zipper};
 
 use crate::xpbd::{DistanceConstraint, Particle, SurfacePoint};
 
@@ -92,7 +97,15 @@ pub struct SceneDetails {
     pub zipper_stitches: Vec<(SewingLineId, DistanceConstraint)>,
     /// Each buttonhole's slit, as its two ends on the cloth.
     pub holes: Vec<[SurfacePoint; 2]>,
+    /// Each gathered side of a puckered seam (its seam, 0 for side A or 1
+    /// for B) and how far it is drawn in: its sewn length over its own.
+    pub gathers: Vec<(SewingLineId, usize, f32)>,
 }
+
+/// How far a puckered seam's gathered particles start out of the cloth's
+/// plane, alternately either way, in metres: enough to set it rippling
+/// rather than squashing flat.
+const PUCKER_NUDGE: f32 = 0.002;
 
 impl SceneDetails {
     /// The stitches of the zippers that are closed.
@@ -196,6 +209,57 @@ impl SceneDetails {
         });
     }
 
+    /// Gather puckered seam `seam`, whose sides run through `sides`'
+    /// particles (in order): a side longer than the seam's sewn length
+    /// (see [`Pucker::sewn_length`]) has the structural constraints
+    /// between its neighbouring particles shortened to match, as if a
+    /// gathering thread drew it in, and its particles nudged alternately
+    /// either side of the cloth (along `normal_of` each) so it ripples.
+    pub fn pucker(
+        &mut self,
+        seam: SewingLineId,
+        pucker: Pucker,
+        sides: [&[usize]; 2],
+        structural: &mut [DistanceConstraint],
+        particles: &mut [Particle],
+        normal_of: impl Fn(usize) -> Option<Vec3>,
+    ) {
+        let by_pair: HashMap<(usize, usize), usize> = structural
+            .iter()
+            .enumerate()
+            .map(|(i, c)| ((c.a.min(c.b), c.a.max(c.b)), i))
+            .collect();
+        let length = |chain: &[usize]| -> f32 {
+            chain
+                .windows(2)
+                .map(|w| particles[w[0]].position.distance(particles[w[1]].position))
+                .sum()
+        };
+        let lengths = sides.map(length);
+        let sewn = pucker.sewn_length(lengths[0], lengths[1]);
+        for (side, chain) in sides.into_iter().enumerate() {
+            if lengths[side] <= 0.0 || sewn >= lengths[side] * 0.999 {
+                continue;
+            }
+            let ratio = sewn / lengths[side];
+            for w in chain.windows(2) {
+                if let Some(&i) = by_pair.get(&(w[0].min(w[1]), w[0].max(w[1]))) {
+                    structural[i].rest_length *= ratio;
+                }
+            }
+            for (k, &p) in chain.iter().enumerate().skip(1) {
+                if k + 1 == chain.len() {
+                    break;
+                }
+                if let Some(normal) = normal_of(p) {
+                    let way = if k % 2 == 0 { 1.0 } else { -1.0 };
+                    particles[p].position += normal * (PUCKER_NUDGE * way);
+                }
+            }
+            self.gathers.push((seam, side, ratio));
+        }
+    }
+
     /// A zipper on seam `seam` whose sides run through `sides`' particles:
     /// both taped, and recorded for drawing. Whether its sides are also
     /// stitched together is up to the caller (only while it is closed).
@@ -283,6 +347,7 @@ mod tests {
                 closed,
                 ..Zipper::default()
             }),
+            ..SeamDetails::default()
         }
     }
 
@@ -362,6 +427,61 @@ mod tests {
         let zipper = bend(zipped(true));
         assert!(plain > 0.01, "the cloth bends: {plain}");
         assert!(zipper < plain * 0.8, "{zipper} vs {plain}");
+    }
+
+    /// A 300 mm edge eased into a 240 mm one, with `pucker` or not, in
+    /// the plane z = 0.3 without gravity: how far the longer piece's
+    /// cloth near the seam ends up out of that plane, at most and on
+    /// average, and the scene's gathers.
+    fn eased(pucker: Option<Pucker>) -> (f32, f32, Vec<(SewingLineId, usize, f32)>) {
+        let (mut doc, mut placements) = two_panels(SeamDetails {
+            pucker,
+            ..SeamDetails::default()
+        });
+        doc.patterns[1] = rectangle(2, 150.0, 240.0);
+        placements[1].1.center.y = 1.35 - 0.12;
+        let scene = build(&doc, &placements, None, &ClothConfig::default());
+        let gathers = scene.details.gathers.clone();
+        let mut world = World::new(scene.particles.clone());
+        world.gravity = glam::Vec3::ZERO;
+        world.distance_constraints = scene.structural.clone();
+        world.distance_constraints.extend(scene.bending.clone());
+        world.distance_constraints.extend(scene.stitches.clone());
+        for _ in 0..300 {
+            world.step(1.0 / 60.0, 8, &[]);
+        }
+        let (range, mesh) = (&scene.pattern_ranges[0].1, &scene.pattern_meshes[0].1);
+        let near: Vec<f32> = range
+            .clone()
+            .zip(&mesh.vertices)
+            .filter(|(_, v)| v.pos.x >= 100.0)
+            .map(|(i, _)| (world.particles[i].position.z - 0.3).abs())
+            .collect();
+        let max = near.iter().copied().fold(0.0, f32::max);
+        (max, near.iter().sum::<f32>() / near.len() as f32, gathers)
+    }
+
+    #[test]
+    fn a_puckered_seam_gathers_its_longer_side_into_ripples() {
+        let (flat_max, flat_mean, none) = eased(None);
+        assert!(none.is_empty());
+        let (max, mean, gathers) = eased(Some(Pucker { amount: 0.0 }));
+        // Only the longer side is drawn in, to the shorter one's length.
+        assert_eq!(gathers.len(), 1);
+        let (_, side, ratio) = gathers[0];
+        assert_eq!(side, 0);
+        assert!((ratio - 0.8).abs() < 0.01, "{ratio}");
+        assert!(max > 0.004, "it ripples out of the plane: {max}");
+        assert!(
+            max > flat_max * 1.5 && mean > flat_mean * 1.5,
+            "{max} / {mean} vs {flat_max} / {flat_mean}"
+        );
+
+        // More pucker draws both sides in further.
+        let (_, _, more) = eased(Some(Pucker { amount: 0.1 }));
+        assert_eq!(more.len(), 2);
+        assert!((more[0].2 - 0.72).abs() < 0.01, "{more:?}");
+        assert!((more[1].2 - 0.9).abs() < 0.01, "{more:?}");
     }
 
     #[test]

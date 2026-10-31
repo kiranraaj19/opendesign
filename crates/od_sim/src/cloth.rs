@@ -559,9 +559,36 @@ pub fn build(
     }
 
     let mut stitch_pairs: BTreeSet<(usize, usize)> = BTreeSet::new();
+    // Each piece's normal towards the 2D window's viewer, for puckering.
+    let normals: HashMap<PatternId, glam::Vec3> = layouts
+        .iter()
+        .filter_map(|(id, l)| {
+            let range = l.offset..l.offset + l.mesh.vertices.len();
+            let world: Vec<glam::Vec3> = particles[range].iter().map(|p| p.position).collect();
+            Some((*id, towards_viewer(&l.mesh, &world)?))
+        })
+        .collect();
+    let normal_of = |particle: usize| {
+        let (id, _) = pattern_ranges
+            .iter()
+            .find(|(_, r): &&(PatternId, Range<usize>)| r.contains(&particle))?;
+        normals.get(id).copied()
+    };
     for seam in &doc.sewing_lines {
         let a_chain = side_chain(&layouts, &seam.a);
         let b_chain = side_chain(&layouts, &seam.b);
+        if let Some(pucker) = seam.details.pucker {
+            let ids = |chain: &[(usize, f32)]| chain.iter().map(|&(i, _)| i).collect::<Vec<_>>();
+            let sides = [ids(&a_chain), ids(&b_chain)];
+            details.pucker(
+                seam.id,
+                pucker,
+                [&sides[0], &sides[1]],
+                &mut structural,
+                &mut particles,
+                normal_of,
+            );
+        }
         let mut pairs = BTreeSet::new();
         for &(ia, fa) in &a_chain {
             if let Some(ib) = nearest_by_fraction(&b_chain, fa) {
