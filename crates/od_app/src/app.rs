@@ -819,6 +819,7 @@ impl OpenDesignApp {
                     ui.separator();
                     let dark = ui.visuals().dark_mode;
                     ui.add_enabled_ui(s.viewport.has_gpu(), |ui| {
+                        ui.menu_button("Render look", |ui| render_look_menu(ui, &mut s.viewport.look));
                         if ui
                             .button("Turntable frames…")
                             .on_hover_text(
@@ -1212,6 +1213,28 @@ fn restore_layout(storage: Option<&dyn eframe::Storage>) -> DockState<Tab> {
         .and_then(|s| eframe::get_value::<DockState<Tab>>(s, LAYOUT_KEY))
         .filter(|dock| Tab::ALL.iter().all(|tab| dock.find_tab(tab).is_some()))
         .unwrap_or_else(default_layout)
+}
+
+/// Lighting, backdrop and exposure for exported stills.
+fn render_look_menu(ui: &mut egui::Ui, look: &mut crate::panels::viewport3d::RenderLook) {
+    use od_render::light::LightPreset;
+    use od_render::view::Backdrop;
+    ui.label("Lighting");
+    for preset in LightPreset::ALL {
+        ui.radio_value(&mut look.lighting, Some(preset), preset.label());
+    }
+    ui.radio_value(&mut look.lighting, None, "Plain (as in the editor)");
+    ui.separator();
+    ui.label("Backdrop");
+    ui.radio_value(&mut look.backdrop, Backdrop::Studio, "Studio sweep");
+    ui.radio_value(&mut look.backdrop, Backdrop::Grid, "Floor grid");
+    ui.radio_value(&mut look.backdrop, Backdrop::None, "None");
+    ui.separator();
+    ui.add(
+        egui::Slider::new(&mut look.exposure, -3.0..=3.0)
+            .step_by(0.25)
+            .text("Exposure (stops)"),
+    );
 }
 
 #[cfg(test)]

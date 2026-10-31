@@ -218,7 +218,12 @@ pub fn list() -> Vec<Value> {
                 "height": { "type": "integer", "description": "Default 1024." },
                 "style": { "type": "string", "enum": ["fabric", "strain"] },
                 "avatar": { "type": "boolean", "description": "Show the avatar. Default true." },
-                "background": { "type": "string", "enum": ["light", "dark", "black"], "description": "Default light." },
+                "background": { "type": "string", "enum": ["light", "dark", "black", "transparent"], "description": "Default light. transparent gives a cut-out PNG (use with backdrop none)." },
+                "backdrop": { "type": "string", "enum": ["grid", "studio", "none"], "description": "What the avatar stands on: the editor's floor grid (default), a photo studio's seamless grey sweep (best for presentation shots), or just a soft shadow on the background." },
+                "lighting": { "type": "string", "enum": ["studio_soft", "studio_contrast", "daylight", "flat"], "description": "studio_soft (default): large soft key, even catalogue light. studio_contrast: one smaller key and rim lights, deeper folds. daylight: open sky and sun. flat: the editor's plain two-light rig." },
+                "hdri": { "type": "string", "description": "Light with this equirect Radiance .hdr image instead of a lighting preset (e.g. a CC0 one from Poly Haven)." },
+                "exposure": { "type": "number", "description": "Brighter or darker, in photographic stops: +1 doubles the light, -1 halves it. Default 0." },
+                "tone_map": { "type": "string", "enum": ["neutral", "aces"], "description": "neutral (default) keeps fabric colours true; aces is punchier, film-like." },
                 "turn": { "type": "number", "description": "Turn the camera this many degrees around the garment." },
                 "outlines": { "type": "boolean", "description": "Draw each piece's outline. Default: only in the pattern view." },
                 "save_to": { "type": "string", "description": "Also write the PNG to this file." },
@@ -1185,7 +1190,7 @@ fn render_tool(s: &mut Session, args: &Value) -> Result<Outcome> {
         avatar: args.get("avatar").and_then(Value::as_bool).unwrap_or(true),
         background: match str_arg(args, "background") {
             Some(name) => render::Background::parse(name).ok_or_else(|| {
-                format!("no background called \"{name}\"; try light, dark or black")
+                format!("no background called \"{name}\"; try light, dark, black or transparent")
             })?,
             None => render::Background::Light,
         },
@@ -1195,6 +1200,27 @@ fn render_tool(s: &mut Session, args: &Value) -> Result<Outcome> {
             .get("outlines")
             .and_then(Value::as_bool)
             .unwrap_or(view == View::Sheet),
+        lighting: match (str_arg(args, "hdri"), str_arg(args, "lighting")) {
+            (Some(path), _) => render::Lights::Hdri(PathBuf::from(path)),
+            (None, Some(name)) => render::Lights::parse(name).ok_or_else(|| {
+                format!(
+                    "no lighting called \"{name}\"; try studio_soft, studio_contrast, daylight or flat"
+                )
+            })?,
+            (None, None) => render::Lights::Preset(Default::default()),
+        },
+        exposure: num(args, "exposure").unwrap_or(0.0),
+        backdrop: match str_arg(args, "backdrop") {
+            Some(name) => od_render::view::Backdrop::parse(name).ok_or_else(|| {
+                format!("no backdrop called \"{name}\"; try grid, studio or none")
+            })?,
+            None => Default::default(),
+        },
+        tone_map: match str_arg(args, "tone_map") {
+            Some(name) => od_render::render::ToneMap::parse(name)
+                .ok_or_else(|| format!("no tone_map called \"{name}\"; try neutral or aces"))?,
+            None => Default::default(),
+        },
     };
     let (png, mut text) = render::render(s, &req)?;
     if let Some(path) = str_arg(args, "save_to") {

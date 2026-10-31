@@ -2,18 +2,20 @@
 //! scene from a chosen side (flat pieces, or the drape when there is one),
 //! optionally as a strain heatmap, or a flat sheet of every pattern piece.
 
-use std::sync::Arc;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
 use od_core::document::TOLERANCE;
 use od_core::{Fabric, FabricTexture, PatternId};
 use od_render::camera::{OrbitCamera, ViewPreset};
 use od_render::glam::{Vec2, Vec3};
+use od_render::light::{Environment, LightPreset, Lighting};
 use od_render::material::{plain_weave, twill_weave, Material};
 use od_render::mesh::Aabb;
 use od_render::pattern::Placement;
-use od_render::render::{render_still, StillSettings};
+use od_render::render::{render_still, StillSettings, ToneMap};
 use od_render::scene::{linear, AvatarDraw, Color, GridColors};
-use od_render::view::{place_pattern, scene_bounds, FrameInput, PlacedPattern, Theme};
+use od_render::view::{place_pattern, scene_bounds, Backdrop, FrameInput, PlacedPattern, Theme};
 use od_render::wgpu;
 
 use crate::session::Session;
@@ -54,14 +56,67 @@ pub struct Request {
     pub turn: f32,
     /// Draw each piece's outline over it.
     pub outlines: bool,
+    pub lighting: Lights,
+    /// Brighter or darker, in photographic stops (+1 doubles the light).
+    pub exposure: f32,
+    pub backdrop: Backdrop,
+    pub tone_map: ToneMap,
 }
 
-/// What's behind the scene: the app's light or dark canvas, or black.
+/// How a render is lit.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Lights {
+    Preset(LightPreset),
+    /// The editor's plain two-light rig.
+    Flat,
+    /// An equirect Radiance `.hdr` image, and nothing else.
+    Hdri(PathBuf),
+}
+
+impl Lights {
+    pub fn parse(name: &str) -> Option<Self> {
+        match name {
+            "flat" => Some(Lights::Flat),
+            _ => LightPreset::parse(name).map(Lights::Preset),
+        }
+    }
+
+    fn lighting(&self) -> Result<Option<Lighting>, String> {
+        Ok(match self {
+            Lights::Preset(preset) => Some(preset.lighting()),
+            Lights::Flat => None,
+            Lights::Hdri(path) => Some(hdri(path)?),
+        })
+    }
+}
+
+/// An HDR file made ready to light with, kept for the next render of the
+/// same file: preparing a large image takes a moment.
+fn hdri(path: &Path) -> Result<Lighting, String> {
+    static LAST: Mutex<Option<(PathBuf, Lighting)>> = Mutex::new(None);
+    let mut last = LAST.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some((p, lighting)) = last.as_ref() {
+        if p == path {
+            return Ok(lighting.clone());
+        }
+    }
+    let bytes =
+        std::fs::read(path).map_err(|e| format!("couldn't read {}: {e}", path.display()))?;
+    let env = Environment::from_hdr(&bytes)?;
+    // Any id unlike the presets' will do: each render uploads afresh.
+    let lighting = Lighting::from_environment(0x4844_5249 ^ bytes.len() as u64, &env);
+    *last = Some((path.to_path_buf(), lighting.clone()));
+    Ok(lighting)
+}
+
+/// What's behind the scene: the app's light or dark canvas, black, or
+/// nothing (a PNG with a transparent background, for cut-outs).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Background {
     Light,
     Dark,
     Black,
+    Transparent,
 }
 
 impl Background {
@@ -70,6 +125,7 @@ impl Background {
             "light" => Background::Light,
             "dark" => Background::Dark,
             "black" => Background::Black,
+            "transparent" => Background::Transparent,
             _ => return None,
         })
     }
@@ -79,7 +135,7 @@ impl Background {
         match self {
             Background::Light => 0xF7F7F8,
             Background::Dark => 0x1E1E21,
-            Background::Black => 0x000000,
+            Background::Black | Background::Transparent => 0x000000,
         }
     }
 }
@@ -183,11 +239,15 @@ pub fn render(s: &mut Session, req: &Request) -> Result<(Vec<u8>, String), Strin
             pattern_materials: Some(&materials),
             display: od_render::view::Display {
                 hide_outlines: !req.outlines,
+                backdrop: req.backdrop,
                 ..Default::default()
             },
         },
-        StillSettings {
+        &StillSettings {
             size: req.size,
+            lighting: req.lighting.lighting()?,
+            exposure: 2f32.powf(req.exposure.clamp(-10.0, 10.0)),
+            tone_map: req.tone_map,
             ..Default::default()
         },
         clear(req.background),
@@ -317,7 +377,11 @@ fn clear(background: Background) -> wgpu::Color {
         r: channel(16),
         g: channel(8),
         b: channel(0),
-        a: 1.0,
+        a: if background == Background::Transparent {
+            0.0
+        } else {
+            1.0
+        },
     }
 }
 

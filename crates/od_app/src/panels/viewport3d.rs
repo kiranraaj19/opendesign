@@ -16,12 +16,13 @@ use od_render::avatar::{AvatarKind, Measurements};
 use od_render::camera::{ndc_from_pixel, OrbitCamera, ViewPreset};
 use od_render::glam;
 use od_render::gpu::{Renderer, Targets};
+use od_render::light::LightPreset;
 use od_render::material::Material;
 use od_render::mesh::{Aabb, Mesh};
 use od_render::pattern::{Placement, RingLayout};
 use od_render::scene::{linear, AvatarDraw, Frame, GridColors};
 use od_render::skeleton::Rig;
-use od_render::view::{self, Display, FrameInput, PlacedPattern, Style, Theme};
+use od_render::view::{self, Backdrop, Display, FrameInput, PlacedPattern, Style, Theme};
 use od_sim::collision::Collider;
 
 use crate::app::{Session, Tool};
@@ -263,6 +264,47 @@ pub struct Viewport3D {
     pub measure: measure3d::Measure3D,
     /// The avatar's pose as shown, and the Pose panel (see [`pose`]).
     pub posing: pose::Posing,
+    /// How exported stills are lit and staged.
+    pub look: RenderLook,
+}
+
+/// How exported stills (turntable, drape animation) are lit and staged;
+/// the live view keeps its plain lights and floor grid.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct RenderLook {
+    /// `None`: the live view's plain two-light rig.
+    pub lighting: Option<LightPreset>,
+    pub backdrop: Backdrop,
+    /// Brighter or darker, in photographic stops.
+    pub exposure: f32,
+}
+
+impl Default for RenderLook {
+    fn default() -> Self {
+        Self {
+            lighting: Some(LightPreset::default()),
+            backdrop: Backdrop::Studio,
+            exposure: 0.0,
+        }
+    }
+}
+
+impl RenderLook {
+    fn settings(&self, size: [u32; 2]) -> od_render::render::StillSettings {
+        od_render::render::StillSettings {
+            size,
+            lighting: self.lighting.map(LightPreset::lighting),
+            exposure: 2f32.powf(self.exposure),
+            ..Default::default()
+        }
+    }
+
+    fn display(&self) -> Display {
+        Display {
+            backdrop: self.backdrop,
+            ..Default::default()
+        }
+    }
 }
 
 /// Things the 3D view can hide, to see the garment more clearly.
@@ -327,6 +369,7 @@ impl Viewport3D {
             reference: None,
             measure: Default::default(),
             posing: Default::default(),
+            look: RenderLook::default(),
         }
     }
 
@@ -861,10 +904,7 @@ pub fn export_turntable_frames(
     );
     let theme = export_theme(dark);
     let materials = materials_for(s, &placed);
-    let settings = od_render::render::StillSettings {
-        size,
-        ..Default::default()
-    };
+    let settings = s.viewport.look.settings(size);
     let clear = export_clear(dark);
     for i in 0..frames {
         let cam = camera.turntable(i, frames);
@@ -886,9 +926,9 @@ pub fn export_turntable_frames(
                 theme: &theme,
                 pattern_colors: None,
                 pattern_materials: Some(&materials),
-                display: Default::default(),
+                display: s.viewport.look.display(),
             },
-            settings,
+            &settings,
             clear,
         );
         write_png(dir, "turntable", i, size, &bytes)?;
@@ -924,10 +964,7 @@ pub fn export_drape_frames(
         aspect,
     );
     let theme = export_theme(dark);
-    let settings = od_render::render::StillSettings {
-        size,
-        ..Default::default()
-    };
+    let settings = s.viewport.look.settings(size);
     let clear = export_clear(dark);
     const DT: f32 = 1.0 / 60.0;
     for i in 0..frames {
@@ -952,9 +989,9 @@ pub fn export_drape_frames(
                 theme: &theme,
                 pattern_colors: None,
                 pattern_materials: Some(&materials),
-                display: Default::default(),
+                display: s.viewport.look.display(),
             },
-            settings,
+            &settings,
             clear,
         );
         write_png(dir, "drape", i, size, &bytes)?;
