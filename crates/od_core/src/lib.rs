@@ -52,5 +52,5 @@ pub use measure::{
     RenameMeasurement,
 };
 pub use piece::{CutPattern, MergePatterns};
-pub use pose::{Joint, JointAngles, Pose};
+pub use pose::{Joint, JointAngles, Pose, SetPose};
 pub use seam::Side;

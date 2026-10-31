@@ -9,6 +9,9 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
+use crate::command::Command;
+use crate::document::Document;
+
 /// How far out from vertical the avatar's arms hang in its rest pose, in
 /// degrees. A shoulder's `spread` adds to this.
 pub const REST_ARM_ANGLE: f32 = 16.0;
@@ -250,6 +253,36 @@ impl Pose {
     }
 }
 
+/// Put the avatar in `pose`; undo puts back the pose it had.
+pub struct SetPose {
+    label: String,
+    /// The pose to put in place; holds the old one after apply.
+    pose: Pose,
+}
+
+impl SetPose {
+    pub fn new(label: impl Into<String>, pose: Pose) -> Self {
+        Self {
+            label: label.into(),
+            pose,
+        }
+    }
+}
+
+impl Command for SetPose {
+    fn label(&self) -> String {
+        self.label.clone()
+    }
+
+    fn apply(&mut self, doc: &mut Document) {
+        std::mem::swap(&mut doc.avatar_pose, &mut self.pose);
+    }
+
+    fn undo(&mut self, doc: &mut Document) {
+        std::mem::swap(&mut doc.avatar_pose, &mut self.pose);
+    }
+}
+
 /// The poses offered in the app, written for these avatars: name and pose.
 pub fn builtin_poses() -> Vec<(&'static str, Pose)> {
     use Joint::*;
@@ -350,6 +383,39 @@ mod tests {
         assert_eq!(m.get(Joint::LeftHip), JointAngles::default());
         assert_eq!(m.get(Joint::Spine), JointAngles::new(10.0, -4.0, -3.0));
         assert_eq!(m.mirrored(), pose);
+    }
+
+    #[test]
+    fn set_pose_is_undoable_and_saved() {
+        use crate::{project, History};
+        let mut doc = Document::new("Posed");
+        let mut history = History::new();
+        let before = doc.clone();
+        let t_pose = builtin_poses()
+            .into_iter()
+            .find(|(n, _)| *n == "T-pose")
+            .unwrap()
+            .1;
+        history.execute(
+            &mut doc,
+            Box::new(SetPose::new("Pose: T-pose", t_pose.clone())),
+        );
+        assert_eq!(doc.avatar_pose, t_pose);
+        let loaded = project::from_json(&project::to_json(&doc)).unwrap();
+        assert_eq!(loaded, doc);
+        history.undo(&mut doc);
+        assert_eq!(doc, before);
+        history.redo(&mut doc);
+        assert_eq!(doc.avatar_pose, t_pose);
+
+        // Version 13 files from before poses load standing at rest.
+        let mut json: serde_json::Value = serde_json::from_str(&project::to_json(&doc)).unwrap();
+        json["document"]
+            .as_object_mut()
+            .unwrap()
+            .remove("avatar_pose");
+        let loaded = project::from_json(&json.to_string()).unwrap();
+        assert!(loaded.avatar_pose.is_rest());
     }
 
     #[test]

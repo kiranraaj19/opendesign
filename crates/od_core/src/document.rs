@@ -1167,6 +1167,9 @@ pub struct Document {
     pub measurements: Vec<crate::measure::Measurement>,
     #[serde(default)]
     pub(crate) next_measurement_id: u64,
+    /// How the avatar stands (see [`crate::pose`]).
+    #[serde(default)]
+    pub avatar_pose: crate::pose::Pose,
 }
 
 impl Default for Document {
@@ -1192,6 +1195,7 @@ impl Document {
             next_tack_id: 1,
             measurements: Vec::new(),
             next_measurement_id: 0,
+            avatar_pose: crate::pose::Pose::rest(),
         }
     }
 
