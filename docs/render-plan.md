@@ -242,9 +242,10 @@ against the steps above:
   hem `finish` (deferred from R2) still isn't in the document.
 - **Seen.** The MCP dress was rendered in all seven presets. Satin,
   velvet, denim and chiffon are clearly different from each other. Cotton,
-  jersey and silk are closer. The dress template's drape is unsettled
-  after 3 s in every preset; that is a simulation issue, not a shading
-  one.
+  jersey and silk are closer. The dress looks the same after 3 s and
+  8 s of draping, so it has settled. It still looks home-made because of
+  its pattern, the frictionless solver and the mannequin. That's covered
+  by `docs/realism-plan.md` (G1–G9), which comes before R4.
 
 ## R4: Shadows and ambient occlusion
 
