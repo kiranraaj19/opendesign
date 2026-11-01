@@ -493,9 +493,13 @@ pub struct Fabric {
     pub bending_compliance: f32,
     /// Like `bending_compliance`, for folding the weft threads.
     pub weft_bending_compliance: f32,
-    /// Coefficient of friction against other surfaces, 0..1. Not yet read
-    /// by `od_sim`'s collision (reserved for a future pass).
+    /// Coefficient of friction against other surfaces, 0..1: the body,
+    /// the ground and other cloth.
     pub friction: f32,
+    /// How far, in mm, other cloth is kept from this one: about the
+    /// fabric's thickness with its loose fibres. Two layers keep the sum
+    /// of their halves apart.
+    pub collision_mm: f32,
     /// Base tint, straight sRGB 0..255.
     pub color: [u8; 3],
     pub texture: FabricTexture,
@@ -513,6 +517,7 @@ impl Fabric {
             bending_compliance: 1e-5,
             weft_bending_compliance: 1.5e-5,
             friction: 0.3,
+            collision_mm: 2.5,
             color: [235, 230, 210],
             texture: FabricTexture::Plain,
             look: FabricLook {
@@ -538,6 +543,7 @@ impl Fabric {
             bending_compliance: 8e-5,
             weft_bending_compliance: 1e-4,
             friction: 0.1,
+            collision_mm: 2.0,
             color: [232, 226, 236],
             texture: FabricTexture::Flat,
             look: FabricLook {
@@ -563,6 +569,7 @@ impl Fabric {
             bending_compliance: 2e-6,
             weft_bending_compliance: 3e-6,
             friction: 0.5,
+            collision_mm: 3.5,
             color: [68, 88, 128],
             texture: FabricTexture::Twill,
             look: FabricLook {
@@ -588,6 +595,7 @@ impl Fabric {
             bending_compliance: 4e-5,
             weft_bending_compliance: 5e-5,
             friction: 0.1,
+            collision_mm: 2.0,
             color: [228, 206, 168],
             texture: FabricTexture::Satin,
             look: FabricLook {
@@ -613,6 +621,7 @@ impl Fabric {
             bending_compliance: 6e-6,
             weft_bending_compliance: 8e-6,
             friction: 0.6,
+            collision_mm: 4.0,
             color: [112, 22, 44],
             texture: FabricTexture::Velvet,
             look: FabricLook {
@@ -638,6 +647,7 @@ impl Fabric {
             bending_compliance: 2e-5,
             weft_bending_compliance: 2e-5,
             friction: 0.4,
+            collision_mm: 2.5,
             color: [150, 152, 158],
             texture: FabricTexture::Jersey,
             look: FabricLook {
@@ -663,6 +673,7 @@ impl Fabric {
             bending_compliance: 2e-4,
             weft_bending_compliance: 2.5e-4,
             friction: 0.15,
+            collision_mm: 1.5,
             color: [240, 204, 208],
             texture: FabricTexture::Plain,
             look: FabricLook {
@@ -1448,6 +1459,9 @@ pub struct Document {
     /// How the avatar stands (see [`crate::pose`]).
     #[serde(default)]
     pub avatar_pose: crate::pose::Pose,
+    /// How far, in mm, cloth is kept off the avatar's skin.
+    #[serde(default = "crate::pose::default_skin_offset_mm")]
+    pub skin_offset_mm: f32,
 }
 
 impl Default for Document {
@@ -1474,6 +1488,7 @@ impl Document {
             measurements: Vec::new(),
             next_measurement_id: 0,
             avatar_pose: crate::pose::Pose::rest(),
+            skin_offset_mm: crate::pose::DEFAULT_SKIN_OFFSET_MM,
         }
     }
 

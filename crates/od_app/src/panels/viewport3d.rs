@@ -704,15 +704,16 @@ fn new_drape(s: &Session) -> od_sim::drape::Drape {
             ..Default::default()
         },
     );
-    drape.colliders = avatar_colliders(&s.viewport.avatar);
+    drape.colliders = avatar_colliders(&s.viewport.avatar, s.doc.skin_offset_mm);
     drape.set_cloth_collision(s.viewport.cloth_collision);
     drape
 }
 
-/// The avatar and the floor it stands on.
-fn avatar_colliders(avatar: &Avatar) -> Vec<Collider> {
+/// The avatar, with cloth kept `skin_offset_mm` off it, and the floor it
+/// stands on.
+fn avatar_colliders(avatar: &Avatar, skin_offset_mm: f32) -> Vec<Collider> {
     vec![
-        Collider::mesh(avatar.mesh().clone(), 0.005),
+        Collider::mesh(avatar.mesh().clone(), skin_offset_mm * 1e-3),
         Collider::ground(avatar.bounds.min.y),
     ]
 }
@@ -728,8 +729,11 @@ fn sync_drape(s: &mut Session) {
     drape.set_cloth_collision(v.cloth_collision);
     let resized = v.drape_avatar != v.avatar.generation;
     if resized {
-        drape.colliders = avatar_colliders(&v.avatar);
+        drape.colliders = avatar_colliders(&v.avatar, s.doc.skin_offset_mm);
         v.drape_avatar = v.avatar.generation;
+    }
+    for collider in &mut drape.colliders {
+        collider.set_thickness(s.doc.skin_offset_mm * 1e-3);
     }
     if resized || !drape.has_tacks(&s.doc.tacks) {
         drape.sync_tacks(&s.doc.tacks, Some(v.avatar.mesh()));
@@ -1531,8 +1535,43 @@ fn sizing_panel(ui: &mut egui::Ui, rect: Rect, s: &mut Session) {
             if let Some(error) = &v.error {
                 ui.colored_label(ui.visuals().error_fg_color, error);
             }
+            ui.separator();
+            skin_offset_control(ui, s);
         });
     });
+}
+
+/// How far cloth is kept off the avatar, kept in the document; a drag is
+/// one undo step, taken when it ends.
+fn skin_offset_control(ui: &mut egui::Ui, s: &mut Session) {
+    let id = ui.id().with("skin_offset");
+    let current = s.doc.skin_offset_mm;
+    let mut mm = ui.data(|d| d.get_temp::<f32>(id)).unwrap_or(current);
+    let (lo, hi) = od_core::SKIN_OFFSET_RANGE_MM;
+    let help = "How far the cloth is kept off the avatar's skin: \
+                small for close-fitting garments, more for loose ones";
+    let response = ui
+        .horizontal(|ui| {
+            let label = ui.label("Skin offset").on_hover_text(help);
+            ui.add(
+                egui::DragValue::new(&mut mm)
+                    .range(lo..=hi)
+                    .suffix(" mm")
+                    .speed(0.05)
+                    .max_decimals(1),
+            )
+            .labelled_by(label.id)
+            .on_hover_text(help)
+        })
+        .inner;
+    if response.dragged() || response.has_focus() {
+        ui.data_mut(|d| d.insert_temp(id, mm));
+    } else {
+        ui.data_mut(|d| d.remove::<f32>(id));
+        if (mm - current).abs() > 1e-4 {
+            s.execute(od_core::SetSkinOffset::new(mm));
+        }
+    }
 }
 
 struct SceneCallback {

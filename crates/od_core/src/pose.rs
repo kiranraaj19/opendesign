@@ -283,6 +283,45 @@ impl Command for SetPose {
     }
 }
 
+/// How far cloth is kept off the avatar's skin unless the document says
+/// otherwise, mm: about where a fitted garment sits.
+pub const DEFAULT_SKIN_OFFSET_MM: f32 = 3.0;
+
+/// Smallest and largest skin offset offered, mm.
+pub const SKIN_OFFSET_RANGE_MM: (f32, f32) = (0.5, 20.0);
+
+pub(crate) fn default_skin_offset_mm() -> f32 {
+    DEFAULT_SKIN_OFFSET_MM
+}
+
+/// Keep cloth `mm` off the avatar's skin (clamped to
+/// [`SKIN_OFFSET_RANGE_MM`]); undo puts back the old offset.
+pub struct SetSkinOffset {
+    mm: f32,
+}
+
+impl SetSkinOffset {
+    pub fn new(mm: f32) -> Self {
+        Self {
+            mm: mm.clamp(SKIN_OFFSET_RANGE_MM.0, SKIN_OFFSET_RANGE_MM.1),
+        }
+    }
+}
+
+impl Command for SetSkinOffset {
+    fn label(&self) -> String {
+        format!("Skin offset {:.1} mm", self.mm)
+    }
+
+    fn apply(&mut self, doc: &mut Document) {
+        std::mem::swap(&mut doc.skin_offset_mm, &mut self.mm);
+    }
+
+    fn undo(&mut self, doc: &mut Document) {
+        std::mem::swap(&mut doc.skin_offset_mm, &mut self.mm);
+    }
+}
+
 /// The poses offered in the app, written for these avatars: name and pose.
 pub fn builtin_poses() -> Vec<(&'static str, Pose)> {
     use Joint::*;
@@ -432,5 +471,16 @@ mod tests {
             "T-pose arms are horizontal"
         );
         assert_eq!(t, &t.mirrored(), "symmetric");
+    }
+
+    #[test]
+    fn skin_offset_is_clamped_and_undoes() {
+        let mut doc = Document::new("t");
+        assert_eq!(doc.skin_offset_mm, DEFAULT_SKIN_OFFSET_MM);
+        let mut set = SetSkinOffset::new(50.0);
+        set.apply(&mut doc);
+        assert_eq!(doc.skin_offset_mm, SKIN_OFFSET_RANGE_MM.1);
+        set.undo(&mut doc);
+        assert_eq!(doc.skin_offset_mm, DEFAULT_SKIN_OFFSET_MM);
     }
 }

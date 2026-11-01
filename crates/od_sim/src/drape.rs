@@ -19,7 +19,11 @@ use crate::details::{EdgeKind, SceneDetails};
 use crate::finish::{finish, Finish, Piece};
 use crate::mesh::draped_mesh;
 use crate::mesher::PatternMesh;
-use crate::self_collision::{SelfCollision, DEFAULT_THICKNESS};
+use crate::self_collision::SelfCollision;
+
+/// The least gap kept between layers of cloth, m; each fabric's own
+/// collision thickness usually keeps more.
+const MIN_CLOTH_GAP: f32 = 0.0015;
 use crate::xpbd::{Pin, SurfacePoint, World};
 
 /// A garment mid-simulation: the XPBD world plus enough of `ClothScene`'s
@@ -51,9 +55,6 @@ pub struct Drape {
     /// whenever the tacks are.
     anchor_start: usize,
     stitch_compliance: f32,
-    /// Particles joined by seams, which cloth-to-cloth collision leaves
-    /// out so it doesn't push apart the panels a seam joins.
-    seam_particles: Vec<usize>,
     /// The particle being pulled by the mouse, held by a pin in
     /// `world.pins` that [`Self::move_grab`] moves.
     grabbed: Option<usize>,
@@ -64,7 +65,8 @@ pub struct Drape {
 }
 
 /// Seams closing over time: each stitch's gap when sewing started, how far
-/// through the closing it is, and the gravity held off meanwhile.
+/// through the closing it is, and the gravity held off meanwhile (friction
+/// is held off too).
 struct SewIn {
     gaps: Vec<f32>,
     elapsed: f32,
@@ -92,11 +94,11 @@ impl Drape {
             .map(|(_, r)| r.end)
             .max()
             .unwrap_or(0);
-        let seam_particles = scene
+        let seam_pairs: Vec<(usize, usize)> = scene
             .stitches
             .iter()
             .chain(scene.details.zipper_stitches.iter().map(|(_, c)| c))
-            .flat_map(|c| [c.a, c.b])
+            .map(|c| (c.a, c.b))
             .collect();
         let triangles = scene
             .pattern_ranges
@@ -123,7 +125,9 @@ impl Drape {
             .extend(scene.details.closed_stitches());
         let (tack_indices, stitches) = scene.tacks.into_iter().unzip();
         world.surface_stitches = stitches;
-        world.self_collision = Some(SelfCollision::new(triangles, Vec::new(), DEFAULT_THICKNESS));
+        let mut self_collision = SelfCollision::new(triangles, Vec::new(), MIN_CLOTH_GAP);
+        self_collision.set_partners(&seam_pairs);
+        world.self_collision = Some(self_collision);
         let mut drape = Self {
             world,
             colliders: Vec::new(),
@@ -138,7 +142,6 @@ impl Drape {
             tack_indices,
             anchor_start,
             stitch_compliance: config.stitch_compliance,
-            seam_particles,
             grabbed: None,
             seams,
             sew_in: None,
@@ -147,13 +150,11 @@ impl Drape {
         drape
     }
 
-    /// Particles cloth-to-cloth collision leaves out: seam and tack ends,
-    /// and the avatar anchors.
+    /// Particles cloth-to-cloth collision leaves out: tack ends and the
+    /// avatar anchors. (Seam ends collide, but not with the side they're
+    /// sewn to; see [`SelfCollision::set_partners`].)
     fn update_collision_skip(&mut self) {
         let mut skip = vec![false; self.world.particles.len()];
-        for &i in &self.seam_particles {
-            skip[i] = true;
-        }
         for s in &self.world.surface_stitches {
             for side in [s.a, s.b] {
                 for (&i, w) in side.particles.iter().zip(side.weights) {
@@ -196,6 +197,7 @@ impl Drape {
             }
             if left == 0.0 {
                 self.world.gravity = sew.gravity;
+                self.world.friction = 1.0;
                 self.sew_in = None;
             }
         }
@@ -206,8 +208,9 @@ impl Drape {
     /// starts at the gap it has to close and shrinks to nothing, so pieces
     /// that start far apart are drawn together gently rather than snapping
     /// shut fast enough to pass through the avatar. Gravity is held off
-    /// until they are closed, or the pieces would fall away first. Call
-    /// before stepping.
+    /// until they are closed, or the pieces would fall away first, and so
+    /// is friction, which would grip them where they were placed and
+    /// bunch them up as the seams pull. Call before stepping.
     pub fn sew_in(&mut self, seconds: f32) {
         let particles = &self.world.particles;
         let gaps = self.world.distance_constraints[self.seams.clone()]
@@ -219,6 +222,7 @@ impl Drape {
             None => self.world.gravity,
         };
         self.world.gravity = Vec3::ZERO;
+        self.world.friction = 0.0;
         self.sew_in = Some(SewIn {
             gaps,
             elapsed: 0.0,
@@ -872,6 +876,7 @@ mod tests {
         assert!(start > 0.3, "the panels start apart: {start}");
         drape.sew_in(0.5);
         assert_eq!(drape.world.gravity, Vec3::ZERO);
+        assert_eq!(drape.world.friction, 0.0);
         for _ in 0..15 {
             drape.step(1.0 / 60.0, 8);
         }
@@ -883,6 +888,7 @@ mod tests {
         }
         assert!(!drape.sewing_in());
         assert_eq!(drape.world.gravity.y, -9.81, "gravity back on");
+        assert_eq!(drape.world.friction, 1.0, "friction back on");
         assert!(gap(&drape) < 0.02, "sewn shut: {}", gap(&drape));
 
         // Finished for a render: the seam is welded shut and each piece

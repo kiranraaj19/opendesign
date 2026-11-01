@@ -57,7 +57,7 @@ impl PoseChange<'_> {
 }
 
 /// Put `mesh` in place of the avatar among `colliders` (the first mesh
-/// collider, keeping its thickness), or add it if there is none.
+/// collider, keeping its thickness and friction), or add it if there is none.
 pub fn set_avatar(colliders: &mut Vec<Collider>, mesh: Mesh) {
     let found = colliders
         .iter()
@@ -68,7 +68,8 @@ pub fn set_avatar(colliders: &mut Vec<Collider>, mesh: Mesh) {
                 Collider::Mesh { thickness, .. } => *thickness,
                 _ => DEFAULT_THICKNESS,
             };
-            colliders[i] = Collider::mesh(mesh, thickness);
+            let friction = colliders[i].friction();
+            colliders[i] = Collider::mesh(mesh, thickness).with_friction(friction);
         }
         None => colliders.push(Collider::mesh(mesh, DEFAULT_THICKNESS)),
     }

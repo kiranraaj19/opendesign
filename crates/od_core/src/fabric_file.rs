@@ -2,7 +2,7 @@
 //! so a fabric can be kept and reused across projects.
 //!
 //! ```json
-//! { "format": "opendesign-fabric", "version": 2, "fabric": { ... } }
+//! { "format": "opendesign-fabric", "version": 3, "fabric": { ... } }
 //! ```
 
 use std::fmt;
@@ -18,7 +18,7 @@ pub const EXTENSION: &str = "odfab";
 pub const FORMAT: &str = "opendesign-fabric";
 /// 2: fabrics have a [`crate::document::FabricLook`]; version 1 files
 /// load with one made up from the weave.
-pub const VERSION: u32 = 2;
+pub const VERSION: u32 = 3;
 
 #[derive(Debug)]
 pub enum FabricFileError {
@@ -141,7 +141,7 @@ mod tests {
             from_str("[1, 2]"),
             Err(FabricFileError::NotAFabric)
         ));
-        let newer = to_string(&Fabric::silk()).replace("\"version\": 2", "\"version\": 99");
+        let newer = to_string(&Fabric::silk()).replace("\"version\": 3", "\"version\": 99");
         assert!(matches!(
             from_str(&newer),
             Err(FabricFileError::UnsupportedVersion(99))

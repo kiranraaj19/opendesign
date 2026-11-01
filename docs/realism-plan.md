@@ -33,13 +33,13 @@ The MCP dress after R3 shows the gap. It looked the same after 3 s and
 
 | Area | CLO (observed) | OpenDesign today | Phase |
 |---|---|---|---|
-| Friction | Fabric `Friction`, body and cloth | stored, unused | G1 |
-| Collision thickness | separate from render thickness; avatar `Skin Offset` | one fixed body distance | G1 |
+| Friction | Fabric `Friction`, body and cloth | body and cloth (G1 done) | G1 |
+| Collision thickness | separate from render thickness; avatar `Skin Offset` | per fabric, document skin offset (G1 done) | G1 |
 | Bending | warp/weft/bias bending, `Buckling Ratio`/`Buckling Stiffness` (bias too) | distance springs | G2 |
 | Stretch | warp/weft, nonlinear curves, `Stretch Test` input | linear XPBD | G2 |
 | Damping, density, shrinkage | internal and air damping, density, `Shrinkage` warp/weft | gravity only | G2 |
 | Fabric measurement | `Stretch Test`, `Bending Test` input → parameters | firmness sliders | G2 |
-| Self-collision | point-triangle and edge-edge, proximity, intersection resolution | point-triangle only, seams left out | G3 |
+| Self-collision | point-triangle and edge-edge, proximity, intersection resolution | point-triangle only; seams collide except with their own seam (G1) | G3 |
 | Layers | per-piece `Layer`, sewing layers, layer clone over/under | none | G3 |
 | Solver | implicit CG solver, substeps, Normal/Complete/Nonlinear presets | single-threaded XPBD | G3 |
 | Blocks | Dress (One Piece, Waisted), T-shirt (Basic, Raglan, Ribbing), Shirt, Coat (Basic, Raglan, Dolman), Jacket, Pants, Skirt | a T-shirt template, 1 bodice starter | G4 |
@@ -56,9 +56,9 @@ The MCP dress after R3 shows the gap. It looked the same after 3 s and
 - **Branch and commits:** branch from `origin/master` as `claude/gN-...`,
   one commit per step, all four checks clean before each commit, and merge
   only when asked.
-- **Data:** any new document data bumps `project::VERSION` (currently 15)
+- **Data:** any new document data bumps `project::VERSION` (currently 16)
   and adds a migration and a load test. Any new fabric data bumps the fabric
-  file version (currently 2).
+  file version (currently 3).
 - **Verification:** render the MCP dress, T-shirt and skirt front, back and
   three-quarter, before and after, plus a timing line.
   - Where possible, add a numeric test: shoulder seam within N mm of the
@@ -91,6 +91,51 @@ The MCP dress after R3 shows the gap. It looked the same after 3 s and
 
 Done when the dress and the T-shirt stay on the shoulders, and a skirt
 stays on the hips without being held up by the waist seam.
+
+### G1 status: done on `claude/g1-contact`
+
+- **Friction.** `Particle` carries its fabric's `friction` and a collision
+  `radius`.
+  - **Body:** `Collider::contact` returns the push-out and the normal.
+    `xpbd::friction_correction` then removes the tangential movement: all of
+    it below μ·1.25·depth (static), otherwise μ·depth (kinetic).
+  - **Combining:** μ is the geometric mean of the fabric's and the
+    surface's friction. Skin and ground are 0.5 (`SKIN_FRICTION`).
+  - **Cloth on cloth:** the same rule in self-collision, on the movement
+    relative to the triangle, shared by inverse mass like the push.
+  - **Sew-in:** `World::friction` scales all of it and is 0 while seams
+    are sewn in. Otherwise the pieces stick where they were placed and
+    bunch up as the seams pull.
+- **Collision thickness.** `Fabric::collision_mm` (cotton 2.5, silk 2.0,
+  denim 3.5, satin 2.0, velvet 4.0, jersey 2.5, chiffon 1.5; 3.0 for older
+  files) sets each particle's radius.
+  - Two layers keep r<sub>i</sub> + mean r<sub>triangle</sub> apart, but
+    never less than 1.5 mm.
+  - It is a "Collision thickness" field in the fabric editor and
+    `collision_mm` in the MCP `fabric` op, which also takes `friction`.
+- **Skin offset.** `Document::skin_offset_mm` (default 3, 0.5–20) has an
+  undoable `SetSkinOffset`. It is in the avatar size panel and the MCP
+  `set_avatar` tool, and a running drape picks it up.
+- **Seams.** Seam and zipper particles collide again.
+  `SelfCollision::set_partners` groups stitched particles transitively, and
+  a particle skips only triangles that touch its group. Tack ends and
+  anchors are still left out.
+- **Formats.** Project v16, fabric files v3, with load tests.
+- **Result** (MCP, 3 s drape, studio renders):
+  - The dress and T-shirt stay on the shoulders and look a little cleaner
+    at the sides.
+  - The skirt now stays up on the hips. Before, it slid down into a V at
+    the back waist.
+  - Mean stretch is unchanged (dress 6.9% vs 7.5%, T-shirt 10.9% vs 11.4%,
+    skirt 1.4% vs 1.8%). The high peaks are at the armholes and predate G1.
+  - Drape times are about the same.
+- **Left for later phases.**
+  - Friction holds whatever shape sewing-in leaves. The skirt's back-left
+    side seam closes with a ruffle, and the skirt then hangs narrower than
+    its A-line. Without friction, that only went away because the skirt
+    slid down the hips.
+  - Better placement before sewing (G5) and real pattern blocks (G4) are
+    the fix, not less friction.
 
 ## G2: Real fabric mechanics (large)
 

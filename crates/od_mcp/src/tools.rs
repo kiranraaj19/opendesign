@@ -132,7 +132,7 @@ pub fn list() -> Vec<Value> {
             "edit",
             "Change pieces: a list of operations done in order, each its own undo step. Every operation has \"op\" and \"pattern\". Ops:\n\
              move {dx, dy}; rotate {degrees}; mirror {axis: vertical|horizontal}; delete; rename {name}; duplicate {mirror: bool};\n\
-             seam_allowance {mm}; grain {degrees}; fabric {preset?: cotton|silk|denim|satin|velvet|jersey|chiffon, color?: \"#rrggbb\", texture?: flat|plain|twill|satin|jersey|rib|velvet, weight_gsm?, roughness? 0-1, sheen? 0-1, thickness_mm?, opacity? 0-1, translucency? 0-1, weave_mm?};\n\
+             seam_allowance {mm}; grain {degrees}; fabric {preset?: cotton|silk|denim|satin|velvet|jersey|chiffon, color?: \"#rrggbb\", texture?: flat|plain|twill|satin|jersey|rib|velvet, weight_gsm?, roughness? 0-1, sheen? 0-1, thickness_mm?, opacity? 0-1, translucency? 0-1, weave_mm?, friction? 0-1, collision_mm? 0.5-10};\n\
              move_point {index, x, y}; insert_point {index, x, y, curve?} (goes before index); delete_point {index}; point_kind {index, curve: bool};\n\
              round_corner {index, distance}; edge_length {index, length} (from corner index to the next corner);\n\
              outline_dart {x, y, width, depth} (a V cut into the outline nearest x,y, its legs sewn); dart {start: [x,y], end: [x,y], width} (a diamond dart inside);\n\
@@ -194,6 +194,7 @@ pub fn list() -> Vec<Value> {
                 "waist": { "type": "number" },
                 "hip": { "type": "number" },
                 "pose": { "description": "A built-in pose name, or an object of joint angles." },
+                "skin_offset_mm": { "type": "number", "description": "How far cloth is kept off the skin, 0.5-20 mm. Default 3; less for close-fitting garments, more for loose ones." },
             }),
             &[],
         ),
@@ -486,6 +487,7 @@ fn document_summary(s: &mut Session) -> Value {
             "waist_cm": avatar.measurements.waist,
             "hip_cm": avatar.measurements.hip,
             "pose": pose,
+            "skin_offset_mm": s.doc.skin_offset_mm,
         },
         "patterns": patterns,
         "seams": seams,
@@ -727,6 +729,8 @@ fn edit_one(s: &mut Session, op: &Value) -> Result<String> {
                 ("opacity", FabricValue::Opacity),
                 ("translucency", FabricValue::Translucency),
                 ("weave_mm", FabricValue::Repeat),
+                ("friction", FabricValue::Friction),
+                ("collision_mm", FabricValue::Collision),
             ] {
                 if let Some(x) = num(op, key) {
                     fabric = value.set(&fabric, x);
@@ -1079,9 +1083,12 @@ fn set_avatar(s: &mut Session, args: &Value) -> Result<Outcome> {
         }
         _ => {}
     }
+    if let Some(mm) = num(args, "skin_offset_mm") {
+        s.execute(od_core::SetSkinOffset::new(mm));
+    }
     let m = s.avatar.measurements;
     Ok(Outcome::text(format!(
-        "Avatar: {}, {} cm tall, chest {} / waist {} / hip {} cm{}.",
+        "Avatar: {}, {} cm tall, chest {} / waist {} / hip {} cm{}, cloth {:.1} mm off the skin.",
         s.avatar.kind.label(),
         m.height,
         m.chest,
@@ -1091,7 +1098,8 @@ fn set_avatar(s: &mut Session, args: &Value) -> Result<Outcome> {
             ", resting".to_owned()
         } else {
             ", posed".to_owned()
-        }
+        },
+        s.doc.skin_offset_mm
     )))
 }
 
@@ -1488,6 +1496,8 @@ mod tests {
         );
         assert_eq!(s.doc.avatar_pose.get(od_core::Joint::LeftElbow).bend, 40.0);
         assert!(fails(&mut s, "set_avatar", json!({ "pose": "Cartwheel" })).contains("Cartwheel"));
+        run(&mut s, "set_avatar", json!({ "skin_offset_mm": 8 }));
+        assert_eq!(s.doc.skin_offset_mm, 8.0);
 
         let id = text(&run(
             &mut s,

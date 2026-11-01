@@ -1,7 +1,7 @@
 //! Project files (`.odproj`): a versioned JSON wrapper around a [`Document`].
 //!
 //! ```json
-//! { "format": "opendesign-project", "version": 15, "document": { ... } }
+//! { "format": "opendesign-project", "version": 16, "document": { ... } }
 //! ```
 //!
 //! Older versions are upgraded on load by the `migrate_*` steps below, so a
@@ -46,7 +46,7 @@ pub const FORMAT: &str = "opendesign-project";
 /// - 14: seams can be zippers or puckered; patterns gain binding and
 ///   piping; trims gain an angle and can be buttonholes; the document
 ///   keeps the avatar's pose.
-pub const VERSION: u32 = 15;
+pub const VERSION: u32 = 16;
 
 #[derive(Debug)]
 pub enum ProjectError {
@@ -492,7 +492,7 @@ mod tests {
             Err(ProjectError::NotAProject)
         ));
         assert!(matches!(
-            from_json(&good.replace("\"version\": 15", "\"version\": 99")),
+            from_json(&good.replace("\"version\": 16", "\"version\": 99")),
             Err(ProjectError::UnsupportedVersion(99))
         ));
         let dup = good.replace("\"id\": 2", "\"id\": 1");
@@ -515,7 +515,7 @@ mod tests {
         doc.patterns[0].seam_allowance = 7.5;
 
         let text = to_json(&doc);
-        assert!(text.contains("\"version\": 15"));
+        assert!(text.contains("\"version\": 16"));
         assert!(text.contains("\"kind\": \"curve\""));
         assert_eq!(from_json(&text).unwrap(), doc);
     }
@@ -564,7 +564,7 @@ mod tests {
 
         // Saving writes the current version, which loads back the same.
         let resaved = to_json(&doc);
-        assert!(resaved.contains("\"version\": 15"));
+        assert!(resaved.contains("\"version\": 16"));
         assert_eq!(from_json(&resaved).unwrap(), doc);
     }
 
@@ -622,7 +622,7 @@ mod tests {
 
         // Saving writes the current version, which loads back the same.
         let resaved = to_json(&doc);
-        assert!(resaved.contains("\"version\": 15"));
+        assert!(resaved.contains("\"version\": 16"));
         assert_eq!(from_json(&resaved).unwrap(), doc);
     }
 
@@ -672,7 +672,7 @@ mod tests {
         assert_eq!(doc.tacks.len(), 1);
 
         let resaved = to_json(&doc);
-        assert!(resaved.contains("\"version\": 15"));
+        assert!(resaved.contains("\"version\": 16"));
         assert_eq!(from_json(&resaved).unwrap(), doc);
     }
 
@@ -735,7 +735,7 @@ mod tests {
         );
 
         let resaved = to_json(&doc);
-        assert!(resaved.contains("\"version\": 15"));
+        assert!(resaved.contains("\"version\": 16"));
         assert_eq!(from_json(&resaved).unwrap(), doc);
     }
 
@@ -776,7 +776,7 @@ mod tests {
         assert_eq!(doc.patterns[0].fabric, crate::document::Fabric::cotton());
 
         let resaved = to_json(&doc);
-        assert!(resaved.contains("\"version\": 15"));
+        assert!(resaved.contains("\"version\": 16"));
         assert_eq!(from_json(&resaved).unwrap(), doc);
     }
 
@@ -795,7 +795,7 @@ mod tests {
         assert_eq!(doc.patterns[0].trims.len(), 1);
 
         let resaved = to_json(&doc);
-        assert!(resaved.contains("\"version\": 15"));
+        assert!(resaved.contains("\"version\": 16"));
         assert_eq!(from_json(&resaved).unwrap(), doc);
     }
 
@@ -859,7 +859,7 @@ mod tests {
         assert_ne!(doc.patterns[0].graded_outline(1), doc.patterns[0].outline);
 
         let resaved = to_json(&doc);
-        assert!(resaved.contains("\"version\": 15"));
+        assert!(resaved.contains("\"version\": 16"));
         assert_eq!(from_json(&resaved).unwrap(), doc);
     }
 
@@ -1106,6 +1106,35 @@ mod tests {
         assert_eq!(
             fabric.look,
             FabricLook::for_texture(fabric.texture, fabric.mass_per_area)
+        );
+
+        // The current version keeps them.
+        assert_eq!(from_json(&to_json(&doc)).unwrap(), doc);
+    }
+
+    #[test]
+    fn version_15_files_load_with_default_skin_offset_and_collision_thickness() {
+        use crate::document::Fabric;
+        let mut doc = sample();
+        doc.patterns[0].fabric = Fabric::velvet();
+        doc.skin_offset_mm = 6.0;
+        let mut file: serde_json::Value = serde_json::from_str(&to_json(&doc)).unwrap();
+        file["version"] = 15.into();
+        file["document"]
+            .as_object_mut()
+            .unwrap()
+            .remove("skin_offset_mm");
+        for pattern in file["document"]["patterns"].as_array_mut().unwrap() {
+            pattern["fabric"]
+                .as_object_mut()
+                .unwrap()
+                .remove("collision_mm");
+        }
+        let loaded = from_json(&file.to_string()).unwrap();
+        assert_eq!(loaded.skin_offset_mm, crate::pose::DEFAULT_SKIN_OFFSET_MM);
+        assert_eq!(
+            loaded.patterns[0].fabric.collision_mm,
+            crate::fabric::DEFAULT_COLLISION_MM
         );
 
         // The current version keeps them.

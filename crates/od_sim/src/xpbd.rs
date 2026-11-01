@@ -13,7 +13,20 @@ pub struct Particle {
     /// `0.0` pins the particle: it ignores forces and constraints move
     /// everything else to it instead.
     pub inv_mass: f32,
+    /// Coefficient of friction of its fabric, 0..1.
+    pub friction: f32,
+    /// Half the thickness its fabric keeps from other cloth, in metres.
+    pub radius: f32,
 }
+
+/// Friction and collision radius of a particle that wasn't given its
+/// fabric's: a medium cotton.
+pub const DEFAULT_FRICTION: f32 = 0.3;
+pub const DEFAULT_RADIUS: f32 = 0.0015;
+
+/// Static friction is this much stronger than sliding friction: cloth at
+/// rest needs a little more to get going.
+const STATIC_FACTOR: f32 = 1.25;
 
 impl Particle {
     pub fn new(position: Vec3, inv_mass: f32) -> Self {
@@ -21,6 +34,8 @@ impl Particle {
             position,
             velocity: Vec3::ZERO,
             inv_mass,
+            friction: DEFAULT_FRICTION,
+            radius: DEFAULT_RADIUS,
         }
     }
 
@@ -168,6 +183,9 @@ pub struct World {
     pub gravity: Vec3,
     /// Fraction of velocity kept each full step (`1.0` = no damping).
     pub damping: f32,
+    /// How much of each surface's friction applies, 0..1: none while seams
+    /// are being sewn, so pieces can slide into place round the body.
+    pub friction: f32,
 }
 
 impl World {
@@ -180,6 +198,7 @@ impl World {
             self_collision: None,
             gravity: Vec3::new(0.0, -9.81, 0.0),
             damping: 0.995,
+            friction: 1.0,
         }
     }
 
@@ -217,7 +236,7 @@ impl World {
         }
 
         if let Some(collision) = &self.self_collision {
-            collision.resolve(&mut self.particles, &prev_positions);
+            collision.resolve(&mut self.particles, &prev_positions, self.friction);
         }
 
         for pin in &self.pins {
@@ -225,9 +244,16 @@ impl World {
         }
 
         for collider in colliders {
-            for p in &mut self.particles {
-                if p.inv_mass > 0.0 {
-                    p.position = collider.resolve(p.position);
+            let surface_friction = collider.friction() * self.friction;
+            for (p, prev) in self.particles.iter_mut().zip(&prev_positions) {
+                if p.inv_mass == 0.0 {
+                    continue;
+                }
+                if let Some((out, normal)) = collider.contact(p.position) {
+                    let depth = (out - p.position).dot(normal).max(0.0);
+                    p.position = out;
+                    let mu = (p.friction * surface_friction).max(0.0).sqrt();
+                    p.position -= friction_correction(p.position - *prev, normal, depth, mu);
                 }
             }
         }
@@ -239,6 +265,25 @@ impl World {
                 p.velocity = Vec3::ZERO;
             }
         }
+    }
+}
+
+/// How far to move a particle back along a surface it touches: its
+/// movement this substep along the surface (`moved`, less the part along
+/// `normal`), all of it if that's within static friction of how far the
+/// contact pushed it out (`depth`, which stands for the normal force),
+/// otherwise as much as sliding friction takes. Coulomb friction in
+/// position form, as in Macklin et al.'s unified particle physics.
+pub(crate) fn friction_correction(moved: Vec3, normal: Vec3, depth: f32, mu: f32) -> Vec3 {
+    let along = moved - normal * moved.dot(normal);
+    let slide = along.length();
+    if slide <= 1e-12 || mu <= 0.0 || depth <= 0.0 {
+        return Vec3::ZERO;
+    }
+    if slide < mu * STATIC_FACTOR * depth {
+        along
+    } else {
+        along * (mu * depth / slide).min(1.0)
     }
 }
 
@@ -346,5 +391,72 @@ mod tests {
             world.step(1.0 / 60.0, 8, &colliders);
         }
         assert!(world.particles[0].position.y >= -1e-3);
+    }
+
+    /// A particle resting on a slope tilted `degrees` from flat, after
+    /// half a second: how far it slid down.
+    fn slide_on_slope(degrees: f32, friction: f32) -> f32 {
+        let (s, c) = degrees.to_radians().sin_cos();
+        let normal = Vec3::new(-s, c, 0.0);
+        let start = normal * 0.004;
+        let mut p = Particle::new(start, 1.0);
+        p.friction = friction;
+        let mut world = World::new(vec![p]);
+        world.damping = 1.0;
+        // A long slope through the origin, as a mesh of two triangles.
+        let along = Vec3::new(c, s, 0.0);
+        let side = Vec3::Z;
+        let corners = [
+            -along * 10.0 - side * 2.0,
+            along * 10.0 - side * 2.0,
+            along * 10.0 + side * 2.0,
+            -along * 10.0 + side * 2.0,
+        ];
+        // Counter-clockwise seen from the normal's side.
+        let winding = (corners[2] - corners[0]).cross(corners[1] - corners[0]);
+        let indices = if winding.dot(normal) < 0.0 {
+            vec![0, 1, 2, 0, 2, 3]
+        } else {
+            vec![0, 2, 1, 0, 3, 2]
+        };
+        let mesh = od_render::mesh::Mesh {
+            positions: corners.to_vec(),
+            normals: vec![normal; 4],
+            indices,
+        };
+        let colliders = [Collider::mesh(mesh, 0.003).with_friction(friction)];
+        for _ in 0..30 {
+            world.step(1.0 / 60.0, 8, &colliders);
+        }
+        (start - world.particles[0].position).dot(along)
+    }
+
+    #[test]
+    fn friction_holds_cloth_on_a_gentle_slope_and_lets_it_slide_on_a_steep_one() {
+        // tan 15° = 0.27 < 0.5: it stays put.
+        let held = slide_on_slope(15.0, 0.5);
+        assert!(held.abs() < 0.002, "slid {held}");
+        // Without friction it slides off the same slope.
+        let free = slide_on_slope(15.0, 0.0);
+        assert!(free > 0.2, "slid only {free}");
+        // tan 45° = 1 > 0.5: it slides, but slower than without friction.
+        let steep = slide_on_slope(45.0, 0.5);
+        let steep_free = slide_on_slope(45.0, 0.0);
+        assert!(
+            steep > 0.2 && steep < steep_free * 0.8,
+            "{steep} vs {steep_free}"
+        );
+    }
+
+    #[test]
+    fn friction_only_removes_movement_along_the_surface() {
+        let n = Vec3::Y;
+        // Sticks: sideways movement below mu × depth goes entirely.
+        let c = friction_correction(Vec3::new(0.001, -0.5, 0.0), n, 0.01, 0.5);
+        assert!((c - Vec3::new(0.001, 0.0, 0.0)).length() < 1e-7);
+        // Slides: only mu × depth of it.
+        let c = friction_correction(Vec3::new(0.1, 0.0, 0.0), n, 0.01, 0.5);
+        assert!((c.x - 0.005).abs() < 1e-6 && c.y == 0.0);
+        assert_eq!(friction_correction(Vec3::X, n, 0.0, 0.5), Vec3::ZERO);
     }
 }

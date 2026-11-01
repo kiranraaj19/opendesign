@@ -56,5 +56,7 @@ pub use measure::{
     RenameMeasurement,
 };
 pub use piece::{CutPattern, MergePatterns};
-pub use pose::{Joint, JointAngles, Pose, SetPose};
+pub use pose::{
+    Joint, JointAngles, Pose, SetPose, SetSkinOffset, DEFAULT_SKIN_OFFSET_MM, SKIN_OFFSET_RANGE_MM,
+};
 pub use seam::Side;

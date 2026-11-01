@@ -25,9 +25,17 @@ pub enum Collider {
     /// triangles rather than every one of them.
     Mesh {
         grid: TriangleGrid,
+        /// How far cloth is kept off the surface: the avatar's skin
+        /// offset.
         thickness: f32,
+        /// Coefficient of friction of the surface (skin), combined with
+        /// each fabric's by geometric mean.
+        friction: f32,
     },
 }
+
+/// Friction of skin, and of the ground, against cloth.
+pub const SKIN_FRICTION: f32 = 0.5;
 
 impl Collider {
     pub fn ground(y: f32) -> Self {
@@ -42,26 +50,66 @@ impl Collider {
         Collider::Mesh {
             grid: TriangleGrid::build(&mesh),
             thickness,
+            friction: SKIN_FRICTION,
+        }
+    }
+
+    /// A mesh collider with a different friction; others are unchanged.
+    pub fn with_friction(self, friction: f32) -> Self {
+        match self {
+            Collider::Mesh {
+                grid, thickness, ..
+            } => Collider::Mesh {
+                grid,
+                thickness,
+                friction,
+            },
+            other => other,
+        }
+    }
+
+    /// Keep cloth `thickness` off a mesh collider (the avatar's skin
+    /// offset); others are unchanged.
+    pub fn set_thickness(&mut self, new: f32) {
+        if let Collider::Mesh { thickness, .. } = self {
+            *thickness = new;
+        }
+    }
+
+    /// The surface's coefficient of friction against cloth.
+    pub fn friction(&self) -> f32 {
+        match self {
+            Collider::Mesh { friction, .. } => *friction,
+            _ => SKIN_FRICTION,
         }
     }
 
     /// Where `p` ends up after this collider pushes it clear, if it was
     /// penetrating. Returns `p` unchanged otherwise.
     pub fn resolve(&self, p: Vec3) -> Vec3 {
+        self.contact(p).map_or(p, |(q, _)| q)
+    }
+
+    /// If `p` is closer than allowed: where it's pushed out to, and the
+    /// surface's outward normal there.
+    pub fn contact(&self, p: Vec3) -> Option<(Vec3, Vec3)> {
         match self {
-            Collider::Ground { y } => Vec3::new(p.x, p.y.max(*y), p.z),
+            Collider::Ground { y } => (p.y < *y).then(|| (Vec3::new(p.x, *y, p.z), Vec3::Y)),
             Collider::Sphere { center, radius } => {
                 let offset = p - *center;
                 let dist = offset.length();
                 if dist < *radius && dist > 1e-9 {
-                    *center + offset / dist * *radius
+                    let n = offset / dist;
+                    Some((*center + n * *radius, n))
                 } else if dist <= 1e-9 {
-                    *center + Vec3::Y * *radius
+                    Some((*center + Vec3::Y * *radius, Vec3::Y))
                 } else {
-                    p
+                    None
                 }
             }
-            Collider::Mesh { grid, thickness } => resolve_mesh(grid, *thickness, p),
+            Collider::Mesh {
+                grid, thickness, ..
+            } => resolve_mesh(grid, *thickness, p),
         }
     }
 }
@@ -200,8 +248,9 @@ pub(crate) fn closest_on_triangle(a: Vec3, b: Vec3, c: Vec3, p: Vec3) -> Vec3 {
 }
 
 /// Push `p` outside `grid`'s mesh by at least `thickness`, using
-/// whichever nearby triangle it is currently closest to.
-fn resolve_mesh(grid: &TriangleGrid, thickness: f32, p: Vec3) -> Vec3 {
+/// whichever nearby triangle it is currently closest to: where it goes and
+/// that triangle's normal, or `None` if it's clear already.
+fn resolve_mesh(grid: &TriangleGrid, thickness: f32, p: Vec3) -> Option<(Vec3, Vec3)> {
     let mut best: Option<(f32, Vec3, Vec3)> = None;
     for i in grid.candidates(p) {
         let [a, b, c] = grid.triangles[i as usize];
@@ -212,16 +261,10 @@ fn resolve_mesh(grid: &TriangleGrid, thickness: f32, p: Vec3) -> Vec3 {
             best = Some((dist, closest, normal));
         }
     }
-    let Some((dist_sq, closest, normal)) = best else {
-        return p;
-    };
+    let (dist_sq, closest, normal) = best?;
     let dist = dist_sq.sqrt();
     let inside = (p - closest).dot(normal) < 0.0;
-    if inside || dist < thickness {
-        closest + normal * thickness
-    } else {
-        p
-    }
+    (inside || dist < thickness).then(|| (closest + normal * thickness, normal))
 }
 
 #[cfg(test)]

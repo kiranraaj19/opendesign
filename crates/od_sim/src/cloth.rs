@@ -424,7 +424,10 @@ pub fn build(
         let offset = particles.len();
         for (area, &p) in mesh.vertex_areas().iter().zip(&world) {
             let mass = (area * 1e-6 * pattern.fabric.mass_per_area).max(config.min_particle_mass);
-            particles.push(Particle::new(p, 1.0 / mass));
+            let mut particle = Particle::new(p, 1.0 / mass);
+            particle.friction = pattern.fabric.friction;
+            particle.radius = pattern.fabric.collision_mm * 0.5e-3;
+            particles.push(particle);
         }
         pattern_ranges.push((*id, offset..particles.len()));
 

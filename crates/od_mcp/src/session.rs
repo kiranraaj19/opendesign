@@ -211,7 +211,7 @@ impl Session {
             );
             let floor = avatar.bounds().map_or(0.0, |b| b.min.y);
             drape.colliders = vec![
-                Collider::mesh((*avatar).clone(), 0.005),
+                Collider::mesh((*avatar).clone(), self.doc.skin_offset_mm * 1e-3),
                 Collider::ground(floor),
             ];
             self.wrap_limbs(&mut drape, &placements);
