@@ -10,6 +10,7 @@ pub mod cloth;
 pub mod collision;
 pub mod details;
 pub mod drape;
+pub mod finish;
 pub mod mesh;
 pub mod mesher;
 pub mod posing;

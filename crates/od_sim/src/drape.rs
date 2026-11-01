@@ -8,6 +8,7 @@ use std::ops::Range;
 use glam::Vec3;
 use od_core::document::{Document, PatternId, SewingLine, SewingLineId, Tack, TrimKind};
 use od_core::geometry::Vec2;
+use od_core::Fabric;
 use od_render::mesh::Mesh;
 use od_render::pattern::Placement;
 use od_render::view::PlacedPattern;
@@ -15,6 +16,7 @@ use od_render::view::PlacedPattern;
 use crate::cloth::{self, ClothConfig};
 use crate::collision::{closest_on_triangle, Collider};
 use crate::details::{EdgeKind, SceneDetails};
+use crate::finish::{finish, Finish, Piece};
 use crate::mesh::draped_mesh;
 use crate::mesher::PatternMesh;
 use crate::self_collision::{SelfCollision, DEFAULT_THICKNESS};
@@ -537,6 +539,47 @@ impl Drape {
     /// The current draped shape, one [`PlacedPattern`] per pattern that
     /// had faces to build a mesh from. Its outline is the pattern's
     /// outline particles, in order.
+    /// Like [`Self::placed_patterns`], made presentable for a final
+    /// render (see [`crate::finish`]): seams closed and smoothed across,
+    /// subdivided, given each fabric's thickness and hemmed. The meshes no
+    /// longer match the particles one to one, so strain colours and
+    /// picking need [`Self::placed_patterns`].
+    pub fn finished_patterns(
+        &self,
+        doc: &Document,
+        settings: &Finish,
+    ) -> Vec<PlacedPattern<PatternId>> {
+        let positions: Vec<Vec3> = self.world.particles.iter().map(|p| p.position).collect();
+        let seams: Vec<(usize, usize)> = self.world.distance_constraints[self.seams.clone()]
+            .iter()
+            .map(|c| (c.a, c.b))
+            .collect();
+        let pieces: Vec<Piece<'_, PatternId>> = self
+            .pattern_ranges
+            .iter()
+            .filter_map(|(id, range)| {
+                Some(Piece {
+                    key: *id,
+                    range: range.clone(),
+                    faces: &self.mesh_of(*id)?.faces,
+                    thickness: doc
+                        .pattern(*id)
+                        .map_or(display_thickness(&Fabric::cotton()), |p| {
+                            display_thickness(&p.fabric)
+                        }),
+                })
+            })
+            .collect();
+        let mut meshes = finish(&positions, &pieces, &seams, settings);
+        let mut placed = self.placed_patterns();
+        for p in &mut placed {
+            if let Some(mesh) = meshes.remove(&p.key) {
+                p.mesh = mesh;
+            }
+        }
+        placed
+    }
+
     pub fn placed_patterns(&self) -> Vec<PlacedPattern<PatternId>> {
         self.pattern_ranges
             .iter()
@@ -573,6 +616,12 @@ impl Drape {
             })
             .collect()
     }
+}
+
+/// How thick a fabric is drawn, in metres: a little thicker than real
+/// cloth (a few tenths of a millimetre), or it wouldn't show at all.
+pub fn display_thickness(fabric: &Fabric) -> f32 {
+    0.0006 + fabric.mass_per_area * 0.002
 }
 
 #[cfg(test)]
@@ -813,6 +862,29 @@ mod tests {
         assert!(!drape.sewing_in());
         assert_eq!(drape.world.gravity.y, -9.81, "gravity back on");
         assert!(gap(&drape) < 0.02, "sewn shut: {}", gap(&drape));
+
+        // Finished for a render: the seam is welded shut and each piece
+        // has outer and inner faces at its fabric's thickness.
+        let finished = drape.finished_patterns(&doc, &crate::finish::Finish::default());
+        assert_eq!(finished.len(), 2);
+        let raw = drape.placed_patterns();
+        for (f, r) in finished.iter().zip(&raw) {
+            assert_eq!(f.key, r.key);
+            assert!(f.mesh.triangle_count() > r.mesh.triangle_count() * 4);
+        }
+        let closest = finished[0]
+            .mesh
+            .positions
+            .iter()
+            .flat_map(|a| {
+                finished[1]
+                    .mesh
+                    .positions
+                    .iter()
+                    .map(move |b| a.distance(*b))
+            })
+            .fold(f32::MAX, f32::min);
+        assert!(closest < 0.002, "the pieces meet at the seam: {closest}");
     }
 
     #[test]
