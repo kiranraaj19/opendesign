@@ -802,6 +802,19 @@ fn current_placed_patterns(s: &Session) -> Vec<PlacedPattern<PatternId>> {
     }
 }
 
+/// Like [`current_placed_patterns`], with a drape finished for a final
+/// render (see [`od_sim::finish`]).
+fn finished_placed_patterns(s: &Session) -> Vec<PlacedPattern<PatternId>> {
+    match &s.viewport.drape {
+        Some(drape) => {
+            let mut placed = drape.finished_patterns(&s.doc, &Default::default());
+            placed.retain(|p| s.doc.pattern(p.key).is_some_and(|p| !p.hidden));
+            placed
+        }
+        None => placed_patterns(s),
+    }
+}
+
 /// Frames written per turntable or drape-animation export: enough for a
 /// smooth short loop/clip without taking too long on a software GPU.
 pub const EXPORT_FRAME_COUNT: u32 = 24;
@@ -895,7 +908,7 @@ pub fn export_turntable_frames(
         .render_device
         .as_ref()
         .ok_or_else(|| NO_GPU.to_string())?;
-    let placed = current_placed_patterns(s);
+    let placed = finished_placed_patterns(s);
     let aspect = export_aspect(size);
     let mut camera = s.viewport.camera;
     camera.frame(
@@ -969,7 +982,7 @@ pub fn export_drape_frames(
     const DT: f32 = 1.0 / 60.0;
     for i in 0..frames {
         drape.step(DT, 8);
-        let placed = drape.placed_patterns();
+        let placed = drape.finished_patterns(&s.doc, &Default::default());
         let materials = materials_for(s, &placed);
         let bytes = od_render::render::render_still(
             device,

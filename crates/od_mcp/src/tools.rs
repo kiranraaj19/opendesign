@@ -60,9 +60,10 @@ impl Outcome {
 
 type Result<T> = std::result::Result<T, String>;
 
-/// Cloth resolution for drapes, in mm: a little coarser than the app's
-/// default, as a drape here is judged from a still and needs to be quick.
-const DEFAULT_PARTICLE_DISTANCE: f32 = 25.0;
+/// Cloth resolution for drapes, in mm: the app's default. Measured on the
+/// t-shirt, 20 mm drapes as fast as 25 (a fixed cost per step dominates)
+/// with smoother cloth; 15 mm is cleaner still but twice as slow.
+const DEFAULT_PARTICLE_DISTANCE: f32 = od_sim::cloth::DEFAULT_PARTICLE_DISTANCE;
 
 /// Longest a drape call runs before answering, in seconds: well inside the
 /// time clients wait for a tool. A longer drape carries on next call.
@@ -201,7 +202,7 @@ pub fn list() -> Vec<Value> {
             "Simulate the cloth: the seams pull the arranged pieces together round the avatar over the first 1.5 s (gravity held off meanwhile), then the garment settles. Continues the current drape if nothing changed since, else starts again. Each call answers within max_wait_seconds, so a long drape may take several calls: check the notes. Returns how stretched the cloth is; render to see it.",
             json!({
                 "seconds": { "type": "number", "description": "Simulated time to run. Default 3 (enough for most garments); 4-5 for long or full ones." },
-                "particle_distance": { "type": "number", "description": "Cloth resolution in mm. Default 25; 35 is faster, 15 finer and much slower." },
+                "particle_distance": { "type": "number", "description": "Cloth resolution in mm. Default 20; 30 is faster for a quick look, 15 smoother for a final render but about twice as slow." },
                 "max_wait_seconds": { "type": "number", "description": "Stop and answer after this long. Default 45." },
                 "quality": { "type": "string", "enum": ["draft", "normal", "high"], "description": "Solver effort: draft is twice as fast and stretchier; high is twice as slow, with stiffer, cleaner cloth and seams, for a final render. Default normal." },
                 "reset": { "type": "boolean", "description": "Start again from the flat pieces." },
@@ -223,6 +224,7 @@ pub fn list() -> Vec<Value> {
                 "lighting": { "type": "string", "enum": ["studio_soft", "studio_contrast", "daylight", "flat"], "description": "studio_soft (default): large soft key, even catalogue light. studio_contrast: one smaller key and rim lights, deeper folds. daylight: open sky and sun. flat: the editor's plain two-light rig." },
                 "hdri": { "type": "string", "description": "Light with this equirect Radiance .hdr image instead of a lighting preset (e.g. a CC0 one from Poly Haven)." },
                 "exposure": { "type": "number", "description": "Brighter or darker, in photographic stops: +1 doubles the light, -1 halves it. Default 0." },
+                "finish": { "type": "boolean", "description": "Show a drape finished for presentation: seams closed and smoothed, the cloth subdivided, given thickness, edges hemmed. Default true; false shows the raw simulation mesh (strain always does)." },
                 "tone_map": { "type": "string", "enum": ["neutral", "aces"], "description": "neutral (default) keeps fabric colours true; aces is punchier, film-like." },
                 "turn": { "type": "number", "description": "Turn the camera this many degrees around the garment." },
                 "outlines": { "type": "boolean", "description": "Draw each piece's outline. Default: only in the pattern view." },
@@ -1210,6 +1212,7 @@ fn render_tool(s: &mut Session, args: &Value) -> Result<Outcome> {
             (None, None) => render::Lights::Preset(Default::default()),
         },
         exposure: num(args, "exposure").unwrap_or(0.0),
+        finish: args.get("finish").and_then(Value::as_bool).unwrap_or(true),
         backdrop: match str_arg(args, "backdrop") {
             Some(name) => od_render::view::Backdrop::parse(name).ok_or_else(|| {
                 format!("no backdrop called \"{name}\"; try grid, studio or none")

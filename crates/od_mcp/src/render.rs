@@ -19,6 +19,7 @@ use od_render::view::{place_pattern, scene_bounds, Backdrop, FrameInput, PlacedP
 use od_render::wgpu;
 
 use crate::session::Session;
+use od_sim::finish::Finish;
 
 /// Which way the camera looks.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -61,6 +62,9 @@ pub struct Request {
     pub exposure: f32,
     pub backdrop: Backdrop,
     pub tone_map: ToneMap,
+    /// Show the drape finished (seams closed, smoothed, thick and hemmed)
+    /// rather than as the raw simulation mesh.
+    pub finish: bool,
 }
 
 /// How a render is lit.
@@ -154,7 +158,13 @@ pub fn render(s: &mut Session, req: &Request) -> Result<(Vec<u8>, String), Strin
     let (placed, draped, strain_colors) = if req.view == View::Sheet {
         (sheet(s), false, None)
     } else if let Some(state) = s.current_drape() {
-        let placed = state.drape.placed_patterns();
+        let placed = if req.finish && !req.strain {
+            state
+                .drape
+                .finished_patterns(&state.doc, &Finish::default())
+        } else {
+            state.drape.placed_patterns()
+        };
         let colors = req.strain.then(|| {
             let by_id = state.drape.strain_colors(strain_color);
             placed

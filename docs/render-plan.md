@@ -123,6 +123,32 @@ Goal: the garment reads as one continuous, finished piece of fabric.
 Done when: the armholes and hem are smooth curves with visible thickness,
 and no seam shows as a crease or gap at three-quarter view.
 
+**Status: built on `claude/render2-cloth`.** The new code is
+`od_sim::finish` plus `Drape::finished_patterns`, and it is display-only.
+How it went against the steps above:
+- **Seams.** Sewn particles closer than 2 cm are welded into one surface.
+  Pieces are turned over where needed so neighbours across a seam agree,
+  then the welded surface is Loop-subdivided twice and its normals are
+  computed. Smoothing and normals therefore run straight across seams.
+  Open edges, and edges where three pieces meet, are creases.
+- **Thickness.** Display thickness is 0.6 mm plus 2 mm per kg/m² of fabric
+  (about 0.9 mm for cotton, 1.4 mm for denim). Real cloth's few tenths of
+  a millimetre wouldn't show. There's no new fabric field yet: R3 adds one
+  with the format bump.
+- **Hems.** Every open edge gets a 15 mm hem band turned back inside, with
+  the rim drawn as the fold. A per-edge `finish` in the document is left
+  for R3's format change.
+- **Particle spacing.** On the t-shirt, 20 mm drapes in the same time as
+  25 mm, because a fixed cost per step dominates, and the cloth is
+  smoother; 15 mm is cleaner again but twice as slow. MCP now uses the
+  app's 20 mm default and suggests 15 mm for final renders.
+- **Where it's used.** MCP `render` (new `finish`, default true, off for
+  strain) and the app's turntable and drape exports. The live viewport,
+  picking and strain colours keep the raw particle mesh.
+- **What remains.** The large soft blotches on the white top are real
+  bumps in the simulated cloth, not shading artefacts. Finer spacing and
+  the solver are what reduce them.
+
 ## R3: PBR fabric materials
 
 Goal: cotton, satin, denim and velvet look different under the same light.
