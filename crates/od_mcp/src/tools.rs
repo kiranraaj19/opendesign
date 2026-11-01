@@ -7,10 +7,10 @@ use od_core::document::TOLERANCE;
 use od_core::edit::{self, PleatKind};
 use od_core::{
     project, AddDart, AddInternalLine, AddPattern, AddSewingLine, AddTack, AddTrim, Axis, Dart,
-    DeletePattern, DeletePoint, DuplicatePattern, Fabric, FabricTexture, Fold, InsertPoint,
-    MirrorPattern, MovePattern, MovePoint, OutlinePoint, PatternId, PatternValue, PointKind, Pose,
-    RenamePattern, RotatePattern, SetArrangement, SetFabric, SetOutline, SetPatternValue,
-    SetPointKind, SetPose, TackPoint, TackTarget, TrimKind, Vec2, Zipper,
+    DeletePattern, DeletePoint, DuplicatePattern, Fabric, FabricTexture, FabricValue, Fold,
+    InsertPoint, MirrorPattern, MovePattern, MovePoint, OutlinePoint, PatternId, PatternValue,
+    PointKind, Pose, RenamePattern, RotatePattern, SetArrangement, SetFabric, SetOutline,
+    SetPatternValue, SetPointKind, SetPose, TackPoint, TackTarget, TrimKind, Vec2, Zipper,
 };
 use od_render::avatar::{AvatarKind, Measurements};
 use serde_json::{json, Map, Value};
@@ -94,7 +94,7 @@ pub fn list() -> Vec<Value> {
             "Make a complete garment sized to the avatar: pieces drafted, sewn together, given a fabric and placed around the body ready to drape. Types: tshirt (front, back, two sleeves; long sleeves via sleeve_length_mm), dress (a longer, flared tshirt), skirt (front and back panels). Returns the piece ids. Follow with drape and render.",
             json!({
                 "type": { "type": "string", "enum": ["tshirt", "dress", "skirt"] },
-                "fabric": { "type": "string", "enum": ["cotton", "silk", "denim"], "description": "Default cotton." },
+                "fabric": { "type": "string", "enum": ["cotton", "silk", "denim", "satin", "velvet", "jersey", "chiffon"], "description": "Default cotton." },
                 "color": { "type": "string", "description": "Hex colour, e.g. \"#8B1E3F\"." },
                 "ease_mm": { "type": "number", "description": "Extra girth beyond the body, in mm. Default 120 (tops) or 60 (skirts)." },
                 "length_mm": { "type": "number", "description": "From the shoulder (tshirt, dress) or waist (skirt) down." },
@@ -132,7 +132,7 @@ pub fn list() -> Vec<Value> {
             "edit",
             "Change pieces: a list of operations done in order, each its own undo step. Every operation has \"op\" and \"pattern\". Ops:\n\
              move {dx, dy}; rotate {degrees}; mirror {axis: vertical|horizontal}; delete; rename {name}; duplicate {mirror: bool};\n\
-             seam_allowance {mm}; grain {degrees}; fabric {preset?: cotton|silk|denim, color?: \"#rrggbb\", texture?: flat|plain|twill, weight_gsm?};\n\
+             seam_allowance {mm}; grain {degrees}; fabric {preset?: cotton|silk|denim|satin|velvet|jersey|chiffon, color?: \"#rrggbb\", texture?: flat|plain|twill|satin|jersey|rib|velvet, weight_gsm?, roughness? 0-1, sheen? 0-1, thickness_mm?, opacity? 0-1, translucency? 0-1, weave_mm?};\n\
              move_point {index, x, y}; insert_point {index, x, y, curve?} (goes before index); delete_point {index}; point_kind {index, curve: bool};\n\
              round_corner {index, distance}; edge_length {index, length} (from corner index to the next corner);\n\
              outline_dart {x, y, width, depth} (a V cut into the outline nearest x,y, its legs sewn); dart {start: [x,y], end: [x,y], width} (a diamond dart inside);\n\
@@ -391,14 +391,9 @@ fn color_arg(value: &str) -> Result<[u8; 3]> {
 }
 
 fn preset(name: &str) -> Result<Fabric> {
-    match name {
-        "cotton" => Ok(Fabric::cotton()),
-        "silk" => Ok(Fabric::silk()),
-        "denim" => Ok(Fabric::denim()),
-        _ => Err(format!(
-            "no fabric called \"{name}\"; try cotton, silk or denim"
-        )),
-    }
+    Fabric::preset(name).ok_or_else(|| {
+        format!("no fabric called \"{name}\"; try cotton, silk, denim, satin, velvet, jersey or chiffon")
+    })
 }
 
 fn create_garment(s: &mut Session, args: &Value) -> Result<Outcome> {
@@ -719,15 +714,23 @@ fn edit_one(s: &mut Session, op: &Value) -> Result<String> {
                 fabric.color = color_arg(color)?;
             }
             if let Some(texture) = str_arg(op, "texture") {
-                fabric.texture = match texture {
-                    "flat" => FabricTexture::Flat,
-                    "plain" => FabricTexture::Plain,
-                    "twill" => FabricTexture::Twill,
-                    _ => return Err("texture should be flat, plain or twill".into()),
-                };
+                fabric.texture = FabricTexture::parse(texture)
+                    .ok_or("texture should be flat, plain, twill, satin, jersey, rib or velvet")?;
             }
             if let Some(gsm) = num(op, "weight_gsm") {
                 fabric.mass_per_area = gsm.clamp(10.0, 2000.0) / 1000.0;
+            }
+            for (key, value) in [
+                ("roughness", FabricValue::Roughness),
+                ("sheen", FabricValue::Sheen),
+                ("thickness_mm", FabricValue::Thickness),
+                ("opacity", FabricValue::Opacity),
+                ("translucency", FabricValue::Translucency),
+                ("weave_mm", FabricValue::Repeat),
+            ] {
+                if let Some(x) = num(op, key) {
+                    fabric = value.set(&fabric, x);
+                }
             }
             s.execute(SetFabric::new(id, fabric));
             format!("set {}'s fabric", id.0)

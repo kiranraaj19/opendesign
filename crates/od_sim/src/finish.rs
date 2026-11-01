@@ -9,12 +9,13 @@
 //! jagged polyline, and the cloth a sheet of paper. Here the pieces are
 //! welded into one surface along their seams, so Loop subdivision and the
 //! normals run straight across them; each face remembers its piece, so it
-//! still gets its own fabric.
+//! still gets its own fabric, and where each corner lies on its flat
+//! piece, so fabric textures follow the pattern across the weld.
 
 use std::collections::HashMap;
 use std::ops::Range;
 
-use glam::Vec3;
+use glam::{Vec2, Vec3};
 use od_render::mesh::Mesh;
 
 /// How far to finish the cloth.
@@ -50,6 +51,17 @@ pub struct Piece<'a, K> {
     pub faces: &'a [[u32; 3]],
     /// Cloth thickness in metres.
     pub thickness: f32,
+    /// Where each of the piece's particles lies on the flat pattern, in
+    /// mm; empty if unknown.
+    pub flat_mm: &'a [Vec2],
+}
+
+/// One piece finished: its mesh, and where each vertex lies on the flat
+/// pattern in mm (see [`od_render::view::PlacedPattern::flat_mm`]).
+#[derive(Debug, Clone, Default)]
+pub struct Finished {
+    pub mesh: Mesh,
+    pub flat_mm: Vec<Vec2>,
 }
 
 /// Each piece's finished mesh, keyed like `pieces`. `positions` are every
@@ -59,7 +71,7 @@ pub fn finish<K: Copy + Eq + std::hash::Hash>(
     pieces: &[Piece<'_, K>],
     seams: &[(usize, usize)],
     settings: &Finish,
-) -> HashMap<K, Mesh> {
+) -> HashMap<K, Finished> {
     let welded = weld(positions, seams);
     let signs = orientations(positions, pieces, &welded);
 
@@ -78,9 +90,14 @@ pub fn finish<K: Copy + Eq + std::hash::Hash>(
             if a == b || b == c || c == a {
                 continue; // Collapsed by welding.
             }
-            surface
-                .faces
-                .push(if *sign { [a, b, c] } else { [a, c, b] });
+            let [ua, ub, uc] = face.map(|v| p.flat_mm.get(v as usize).copied().unwrap_or_default());
+            if *sign {
+                surface.faces.push([a, b, c]);
+                surface.flat.push([ua, ub, uc]);
+            } else {
+                surface.faces.push([a, c, b]);
+                surface.flat.push([ua, uc, ub]);
+            }
             surface.piece.push(piece);
         }
     }
@@ -118,18 +135,18 @@ pub fn finish<K: Copy + Eq + std::hash::Hash>(
     let mut meshes = HashMap::new();
     for (i, p) in pieces.iter().enumerate() {
         let mut out = Shell::new(p.thickness);
-        for (face, _) in surface
+        for ((face, flat), _) in surface
             .faces
             .iter()
+            .zip(&surface.flat)
             .zip(&surface.piece)
             .filter(|(_, &k)| k == i)
         {
-            out.face(face, &surface.positions, &normals);
-            for (a, b) in edges(face) {
+            out.face(face, flat, &surface.positions, &normals);
+            for (k, (a, b)) in edges(face).into_iter().enumerate() {
                 if is_open(a, b) {
                     out.edge(
-                        a,
-                        b,
+                        [(a, flat[k]), (b, flat[(k + 1) % 3])],
                         &surface.positions,
                         &normals,
                         &outward,
@@ -138,8 +155,8 @@ pub fn finish<K: Copy + Eq + std::hash::Hash>(
                 }
             }
         }
-        if !out.mesh.indices.is_empty() {
-            meshes.insert(p.key, out.mesh);
+        if !out.out.mesh.indices.is_empty() {
+            meshes.insert(p.key, out.out);
         }
     }
     meshes
@@ -282,11 +299,13 @@ fn orientations<K>(positions: &[Vec3], pieces: &[Piece<'_, K>], welded: &Welded)
     sign.into_iter().map(|s| s.unwrap_or(true)).collect()
 }
 
-/// A triangle mesh with each face's piece.
+/// A triangle mesh with each face's piece, and where each face's corners
+/// lie on that piece flat.
 #[derive(Debug, Clone, Default)]
 struct Surface {
     positions: Vec<Vec3>,
     faces: Vec<[u32; 3]>,
+    flat: Vec<[Vec2; 3]>,
     piece: Vec<usize>,
 }
 
@@ -344,15 +363,26 @@ impl Surface {
         }
         let mid = |a: u32, b: u32| midpoint[&(a.min(b), a.max(b))];
         let mut faces = Vec::with_capacity(self.faces.len() * 4);
+        let mut flat = Vec::with_capacity(self.faces.len() * 4);
         let mut piece = Vec::with_capacity(self.faces.len() * 4);
-        for (&[a, b, c], &k) in self.faces.iter().zip(&self.piece) {
+        for ((&[a, b, c], &[fa, fb, fc]), &k) in self.faces.iter().zip(&self.flat).zip(&self.piece)
+        {
             let (ab, bc, ca) = (mid(a, b), mid(b, c), mid(c, a));
             faces.extend([[a, ab, ca], [ab, b, bc], [ca, bc, c], [ab, bc, ca]]);
+            // The flat pattern is flat: its midpoints are plain averages.
+            let (fab, fbc, fca) = ((fa + fb) * 0.5, (fb + fc) * 0.5, (fc + fa) * 0.5);
+            flat.extend([
+                [fa, fab, fca],
+                [fab, fb, fbc],
+                [fca, fbc, fc],
+                [fab, fbc, fca],
+            ]);
             piece.extend([k; 4]);
         }
         Self {
             positions,
             faces,
+            flat,
             piece,
         }
     }
@@ -374,10 +404,11 @@ impl Surface {
 /// One piece's output: the cloth's outer and inner faces, a rim joining
 /// them along open edges, and the hem turned back inside.
 struct Shell {
-    mesh: Mesh,
+    out: Finished,
     half: f32,
-    /// Output vertices already made, by (surface vertex, layer).
-    made: HashMap<(u32, u8), u32>,
+    /// Output vertices already made, by surface vertex, layer and flat
+    /// position (bits): a vertex where a piece is sewn to itself has two.
+    made: HashMap<(u32, u8, [u32; 2]), u32>,
 }
 
 /// Which copy of a surface vertex an output vertex is.
@@ -391,45 +422,48 @@ const HEM_TOP: u8 = 5;
 impl Shell {
     fn new(thickness: f32) -> Self {
         Self {
-            mesh: Mesh::default(),
+            out: Finished::default(),
             half: thickness / 2.0,
             made: HashMap::new(),
         }
     }
 
-    fn vertex(&mut self, v: u32, layer: u8, position: Vec3, normal: Vec3) -> u32 {
-        *self.made.entry((v, layer)).or_insert_with(|| {
-            self.mesh.positions.push(position);
-            self.mesh.normals.push(normal);
-            self.mesh.positions.len() as u32 - 1
+    fn vertex(&mut self, (v, flat): (u32, Vec2), layer: u8, position: Vec3, normal: Vec3) -> u32 {
+        let key = (v, layer, [flat.x.to_bits(), flat.y.to_bits()]);
+        let out = &mut self.out;
+        *self.made.entry(key).or_insert_with(|| {
+            out.mesh.positions.push(position);
+            out.mesh.normals.push(normal);
+            out.flat_mm.push(flat);
+            out.mesh.positions.len() as u32 - 1
         })
     }
 
-    fn face(&mut self, face: &[u32; 3], positions: &[Vec3], normals: &[Vec3]) {
-        let outer = face.map(|v| {
-            let (p, n) = (positions[v as usize], normals[v as usize]);
-            self.vertex(v, OUTER, p + n * self.half, n)
+    fn face(&mut self, face: &[u32; 3], flat: &[Vec2; 3], positions: &[Vec3], normals: &[Vec3]) {
+        let corners = [0, 1, 2].map(|k| (face[k], flat[k]));
+        let outer = corners.map(|c| {
+            let (p, n) = (positions[c.0 as usize], normals[c.0 as usize]);
+            self.vertex(c, OUTER, p + n * self.half, n)
         });
-        let inner = face.map(|v| {
-            let (p, n) = (positions[v as usize], normals[v as usize]);
-            self.vertex(v, INNER, p - n * self.half, -n)
+        let inner = corners.map(|c| {
+            let (p, n) = (positions[c.0 as usize], normals[c.0 as usize]);
+            self.vertex(c, INNER, p - n * self.half, -n)
         });
-        self.mesh.indices.extend(outer);
-        self.mesh.indices.extend([inner[0], inner[2], inner[1]]);
+        self.out.mesh.indices.extend(outer);
+        self.out.mesh.indices.extend([inner[0], inner[2], inner[1]]);
     }
 
     /// The rim along open edge a→b (interior on its left seen from the
-    /// normal), and the hem band inside it.
+    /// normal), and the hem band inside it; each end with its flat point.
     fn edge(
         &mut self,
-        a: u32,
-        b: u32,
+        [a, b]: [(u32, Vec2); 2],
         positions: &[Vec3],
         normals: &[Vec3],
         outward: &[Vec3],
         hem_depth: f32,
     ) {
-        let at = |v: u32| {
+        let at = |(v, _): (u32, Vec2)| {
             (
                 positions[v as usize],
                 normals[v as usize],
@@ -439,7 +473,7 @@ impl Shell {
         let (half, hem) = (self.half, hem_depth > 0.0);
         // With a hem the rim is the fold, down to the turned-back layer.
         let inner_offset = if hem { -3.0 * half } else { -half };
-        let rim = |s: &mut Self, v: u32| {
+        let rim = |s: &mut Self, v: (u32, Vec2)| {
             let (p, n, o) = at(v);
             [
                 s.vertex(v, RIM_OUTER, p + n * half, o),
@@ -449,9 +483,9 @@ impl Shell {
         let [ao, ai] = rim(self, a);
         let [bo, bi] = rim(self, b);
         // Seen from outside the edge, a is on the right.
-        self.mesh.indices.extend([ao, ai, bi, ao, bi, bo]);
+        self.out.mesh.indices.extend([ao, ai, bi, ao, bi, bo]);
         if hem {
-            let band = |s: &mut Self, v: u32| {
+            let band = |s: &mut Self, v: (u32, Vec2)| {
                 let (p, n, o) = at(v);
                 let base = p + n * inner_offset;
                 [
@@ -462,7 +496,7 @@ impl Shell {
             let [af, at_] = band(self, a);
             let [bf, bt] = band(self, b);
             // Faces inwards, like the inner shell.
-            self.mesh.indices.extend([af, bt, bf, af, at_, bt]);
+            self.out.mesh.indices.extend([af, bt, bf, af, at_, bt]);
         }
     }
 }
@@ -506,9 +540,10 @@ mod tests {
             range: 0..positions.len(),
             faces: &faces,
             thickness: 0.0,
+            flat_mm: &[],
         }];
         let meshes = finish(&positions, &pieces, &[], &settings(1, 0.0));
-        let mesh = &meshes[&1];
+        let mesh = &meshes[&1].mesh;
         // Outer and inner shells, plus a rim of two triangles per open edge.
         let shell_faces = faces.len() * 4 * 2;
         let rim_faces = 12 * 2 * 2;
@@ -530,8 +565,9 @@ mod tests {
             range: 0..positions.len(),
             faces: &faces,
             thickness: 0.002,
+            flat_mm: &[],
         }];
-        let mesh = &finish(&positions, &pieces, &[], &settings(0, 0.01))[&'a'];
+        let mesh = &finish(&positions, &pieces, &[], &settings(0, 0.01))[&'a'].mesh;
         let zs: Vec<f32> = mesh.positions.iter().map(|p| p.z).collect();
         let (lo, hi) = zs
             .iter()
@@ -569,21 +605,32 @@ mod tests {
         let offset = left.len();
         // The left piece's right column (i = 2) to the right's left (i = 0).
         let seams: Vec<(usize, usize)> = (0..3).map(|j| (j * 3 + 2, offset + j * 3)).collect();
+        // Each piece flat in its own space, both starting at 0 mm.
+        let flat = |p: &[Vec3], x0: f32| -> Vec<Vec2> {
+            p.iter()
+                .map(|q| Vec2::new(q.x - x0, q.y) * 1000.0)
+                .collect()
+        };
+        let (left_flat, right_flat) = (flat(&left, -0.2), flat(&right, 0.003));
         let pieces = [
             Piece {
                 key: 0,
                 range: 0..offset,
                 faces: &left_faces,
                 thickness: 0.0,
+                flat_mm: &left_flat,
             },
             Piece {
                 key: 1,
                 range: offset..positions.len(),
                 faces: &right_faces,
                 thickness: 0.0,
+                flat_mm: &right_flat,
             },
         ];
-        let meshes = finish(&positions, &pieces, &seams, &settings(1, 0.0));
+        let finished = finish(&positions, &pieces, &seams, &settings(1, 0.0));
+        let meshes: HashMap<i32, Mesh> =
+            finished.iter().map(|(k, f)| (*k, f.mesh.clone())).collect();
         let outer_normal = |m: &Mesh| m.normals.iter().find(|n| n.z.abs() > 0.5).copied().unwrap();
         let (a, b) = (outer_normal(&meshes[&0]), outer_normal(&meshes[&1]));
         assert!(a.dot(b) > 0.99, "{a:?} {b:?}");
@@ -596,6 +643,29 @@ mod tests {
         // No rim along the seam: only the outside edges are open.
         let rim = meshes[&0].normals.iter().filter(|n| n.x > 0.9).count();
         assert_eq!(rim, 0, "a rim along the welded seam");
+        // Each piece keeps its own flat coordinates across the weld: the
+        // seam is at 200 mm on the left piece and 0 mm on the right.
+        for (key, seam_mm) in [(0, 200.0), (1, 0.0)] {
+            let f = &finished[&key];
+            assert_eq!(f.flat_mm.len(), f.mesh.positions.len());
+            let (lo, hi) = f
+                .flat_mm
+                .iter()
+                .fold((f32::MAX, f32::MIN), |(l, h), p| (l.min(p.x), h.max(p.x)));
+            assert!(
+                (lo - 0.0).abs() < 1e-2 && (hi - 200.0).abs() < 1e-2,
+                "{key}: {lo}..{hi}"
+            );
+            let at_seam = f
+                .mesh
+                .positions
+                .iter()
+                .zip(&f.flat_mm)
+                .filter(|(p, _)| (p.x - 0.0015).abs() < 1e-4);
+            for (_, flat) in at_seam {
+                assert!((flat.x - seam_mm).abs() < 1e-2, "{key}: {flat:?}");
+            }
+        }
     }
 
     #[test]

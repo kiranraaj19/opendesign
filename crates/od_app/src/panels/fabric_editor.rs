@@ -1,5 +1,5 @@
 //! The fabric editor in Properties: a pattern's fabric's name, colour,
-//! weave and physical values, each change one undo step.
+//! weave, physical values and look in renders, each change one undo step.
 
 use od_core::{EditFabric, Fabric, FabricTexture, FabricValue, PatternId, SetFabric};
 
@@ -94,13 +94,9 @@ fn editor(ui: &mut egui::Ui, s: &mut Session, id: PatternId, fabric: &Fabric) {
 
     ui.horizontal_wrapped(|ui| {
         ui.label("Weave");
-        for (texture, label) in [
-            (FabricTexture::Flat, "Smooth"),
-            (FabricTexture::Plain, "Plain weave"),
-            (FabricTexture::Twill, "Twill"),
-        ] {
+        for texture in FabricTexture::ALL {
             let selected = fabric.texture == texture;
-            if ui.selectable_label(selected, label).clicked() && !selected {
+            if ui.selectable_label(selected, texture.label()).clicked() && !selected {
                 commit = Some((
                     Fabric {
                         texture,
@@ -115,7 +111,7 @@ fn editor(ui: &mut egui::Ui, s: &mut Session, id: PatternId, fabric: &Fabric) {
     egui::Grid::new("fabric_values")
         .num_columns(2)
         .show(ui, |ui| {
-            for value in FabricValue::ALL {
+            for value in FabricValue::ALL.into_iter().filter(|v| !v.is_look()) {
                 if let Some(edited) = value_row(ui, id, fabric, value) {
                     commit = Some((edited, value.label().to_lowercase()));
                 }
@@ -125,6 +121,17 @@ fn editor(ui: &mut egui::Ui, s: &mut Session, id: PatternId, fabric: &Fabric) {
     if !fabric.is_isotropic() {
         ui.weak("Stretches and bends differently along and across the grainline.");
     }
+    ui.label("Look in renders");
+    egui::Grid::new("fabric_look")
+        .num_columns(2)
+        .show(ui, |ui| {
+            for value in FabricValue::ALL.into_iter().filter(|v| v.is_look()) {
+                if let Some(edited) = value_row(ui, id, fabric, value) {
+                    commit = Some((edited, value.label().to_lowercase()));
+                }
+                ui.end_row();
+            }
+        });
 
     ui.horizontal_wrapped(|ui| {
         if ui
@@ -166,12 +173,7 @@ fn value_row(
         _ => current,
     };
     let label = ui.label(value.label()).on_hover_text(value.help());
-    let decimals = if value == FabricValue::Friction { 2 } else { 0 };
-    let speed = if value == FabricValue::Friction {
-        0.01
-    } else {
-        0.5
-    };
+    let (decimals, speed) = value.precision();
     let response = ui
         .add(
             egui::DragValue::new(&mut shown)

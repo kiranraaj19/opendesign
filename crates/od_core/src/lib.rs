@@ -43,9 +43,9 @@ pub use details::{
     AddBinding, Binding, BindingKind, Pucker, SeamDetails, SetBinding, SetPucker, SetZipper, Zipper,
 };
 pub use document::{
-    Arrangement, Axis, Dart, Document, Fabric, FabricTexture, Fold, Grading, InternalLine, Link,
-    Notch, OutlinePoint, Pattern, PatternId, PointKind, SeamEdge, SewingLine, SewingLineId,
-    SizeChart, Tack, TackId, TackPoint, TackTarget, Topstitch, Trim, TrimKind,
+    Arrangement, Axis, Dart, Document, Fabric, FabricLook, FabricTexture, Fold, Grading,
+    InternalLine, Link, Notch, OutlinePoint, Pattern, PatternId, PointKind, SeamEdge, SewingLine,
+    SewingLineId, SizeChart, Tack, TackId, TackPoint, TackTarget, Topstitch, Trim, TrimKind,
 };
 pub use fabric::{EditFabric, FabricValue};
 pub use geometry::Vec2;

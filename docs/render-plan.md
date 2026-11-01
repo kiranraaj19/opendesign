@@ -185,6 +185,67 @@ Goal: cotton, satin, denim and velvet look different under the same light.
 Done when: one turntable of the same dress in five presets shows clearly
 different materials.
 
+**Status: built on `claude/render3-fabric`, stacked on R2.** How it went
+against the steps above:
+- **Shading.** `fs_lit` uses Lambert diffuse, GGX specular (height-
+  correlated Smith, Schlick Fresnel, F0 0.04) and a Charlie sheen lobe
+  with Neubelt visibility, for the key and fill lights. The prefiltered
+  environment gives the specular. For environment sheen, and for the
+  energy the sheen takes from the base, an analytic fit stands in for a
+  lookup table. The live viewport uses the same model, without the
+  environment.
+- **Fabric fields.** These live in `Fabric::look: FabricLook`:
+  `roughness`, `sheen`, `sheen_roughness`, `sheen_tint`, `thickness_mm`,
+  `opacity`, `translucency` and `repeat_mm`. `sheen_tint` (0 for white, 1
+  for the fabric's colour) replaced `sheen_color`, so a recoloured fabric
+  keeps a sensible sheen.
+  - The project format is now v15 (R1/R2 time had already reached v14),
+    and fabric files are v2.
+  - A fabric saved without a look gets `FabricLook::for_texture(weave,
+    weight)` as it loads. No JSON migration is needed for that.
+  - The fabric editor has a "Look in renders" group, and the MCP
+    `fabric` op takes the same values.
+  - `display_thickness` now reads `thickness_mm`.
+- **Weaves.** `material::weave` makes a 256 px colour texture and a
+  detail texture (tangent normal plus a roughness scale in alpha) holding
+  4 repeats.
+  - It covers all seven `FabricTexture`s: plain, 3/1 twill (paler weft,
+    as in denim), 5-harness satin, jersey V loops, 1×1 rib, velvet pile,
+    and a faint plain weave for "flat".
+  - Yarns vary in shade and are slubbed along their length.
+  - Tangents are built per pixel from screen-space derivatives instead
+    of from a vertex attribute.
+  - `material::for_fabric`/`for_pattern` replace the copies in the app
+    and the MCP, and cache generated textures by weave and colour.
+- **Scale.** `PlacedPattern::flat_mm` gives each vertex's position on the
+  flat pattern. The drape provides it, and `od_sim::finish` carries it
+  through welding and subdivision as per-corner values, so a vertex where
+  a piece is sewn to itself gets one per side. Textures are laid along the
+  grainline at `repeat_mm`, with CPU mipmaps (detail mips raise roughness
+  where normals disagree) and 16× anisotropy.
+  - At a full-figure framing a millimetre-scale weave is below a pixel,
+    so the difference between presets comes from roughness, sheen and
+    translucency. The weave shows in close-ups.
+- **Photos.** `material::maps_from_photo` (Sobel normals, brightness to
+  smoothness) is a library function only. Nothing in the document refers
+  to an image yet, so there's no UI or intensity slider.
+- **Translucency and opacity.** A back-light term adds light from behind
+  the cloth (key, fill and the environment from behind).
+  - Opacity below 1 writes a sample mask instead of blending: the share
+    of MSAA samples is set by an ordered 4×4 dither, so no depth sort is
+    needed.
+  - At 4 samples, chiffon shows a fine dot screen up close. Real sorted
+    alpha or OIT is still open.
+- **Presets.** Cotton, silk and denim were retuned, and satin, velvet,
+  jersey and chiffon were added. `Fabric::preset(name)` looks them up.
+- **Not done.** Anisotropic highlights along satin floats. A per-edge
+  hem `finish` (deferred from R2) still isn't in the document.
+- **Seen.** The MCP dress was rendered in all seven presets. Satin,
+  velvet, denim and chiffon are clearly different from each other. Cotton,
+  jersey and silk are closer. The dress template's drape is unsettled
+  after 3 s in every preset; that is a simulation issue, not a shading
+  one.
+
 ## R4: Shadows and ambient occlusion
 
 Goal: depth and contact. The garment sits on the body, and folds have

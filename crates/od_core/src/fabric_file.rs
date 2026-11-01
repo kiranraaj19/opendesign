@@ -2,7 +2,7 @@
 //! so a fabric can be kept and reused across projects.
 //!
 //! ```json
-//! { "format": "opendesign-fabric", "version": 1, "fabric": { ... } }
+//! { "format": "opendesign-fabric", "version": 2, "fabric": { ... } }
 //! ```
 
 use std::fmt;
@@ -16,7 +16,9 @@ use crate::document::Fabric;
 
 pub const EXTENSION: &str = "odfab";
 pub const FORMAT: &str = "opendesign-fabric";
-pub const VERSION: u32 = 1;
+/// 2: fabrics have a [`crate::document::FabricLook`]; version 1 files
+/// load with one made up from the weave.
+pub const VERSION: u32 = 2;
 
 #[derive(Debug)]
 pub enum FabricFileError {
@@ -139,7 +141,7 @@ mod tests {
             from_str("[1, 2]"),
             Err(FabricFileError::NotAFabric)
         ));
-        let newer = to_string(&Fabric::silk()).replace("\"version\": 1", "\"version\": 99");
+        let newer = to_string(&Fabric::silk()).replace("\"version\": 2", "\"version\": 99");
         assert!(matches!(
             from_str(&newer),
             Err(FabricFileError::UnsupportedVersion(99))
@@ -154,5 +156,10 @@ mod tests {
             "friction":0.3,"color":[1,2,3],"texture":"flat"}}"#;
         let f = from_str(text).unwrap();
         assert!(f.is_isotropic());
+        // No look: one is made up from the weave and weight.
+        let look =
+            crate::document::FabricLook::for_texture(crate::document::FabricTexture::Flat, 0.2);
+        assert_eq!(f.look, look);
+        assert!((f.look.thickness_mm - 1.0).abs() < 1e-6);
     }
 }

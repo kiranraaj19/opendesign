@@ -29,6 +29,9 @@ pub struct PlacedPattern<K> {
     pub mesh: Mesh,
     pub outline: Vec<Vec3>,
     pub normal: Vec3,
+    /// Where each of `mesh`'s vertices lies on the flat pattern, in mm,
+    /// for laying fabric textures on; empty if unknown.
+    pub flat_mm: Vec<Vec2>,
 }
 
 /// Lay patterns (outlines in millimetres) out on a ring around the avatar.
@@ -51,11 +54,19 @@ pub fn place_pattern<K>(
     outline: &[Vec2],
     placement: &Placement,
 ) -> Option<PlacedPattern<K>> {
+    let mesh = pattern_mesh(outline, placement)?;
+    // pattern_mesh's vertices are the outline's, once for each face.
+    let flat_mm = if mesh.positions.len() == outline.len() * 2 {
+        outline.iter().chain(outline).copied().collect()
+    } else {
+        Vec::new()
+    };
     Some(PlacedPattern {
         key,
-        mesh: pattern_mesh(outline, placement)?,
+        mesh,
         outline: placement.place(outline),
         normal: placement.normal(),
+        flat_mm,
     })
 }
 
@@ -194,13 +205,10 @@ pub fn compose_frame<K: PartialEq>(input: FrameInput<'_, K>) -> Frame {
             Style::SeeThrough => {
                 frame.add_translucent(&p.mesh, with_alpha(fill, CLOTH_SEE_THROUGH))
             }
-            Style::Solid => match (
-                varying,
-                material.filter(|m| !selected && m.texture.is_some()),
-            ) {
+            Style::Solid => match (varying, material.filter(|_| !selected)) {
                 (Some(colors), _) => frame.add_surface_varying(&p.mesh, colors),
-                (None, Some(textured)) => {
-                    frame.add_textured_surface(&p.mesh, p.normal, textured.clone());
+                (None, Some(material)) => {
+                    frame.add_textured_surface(&p.mesh, p.normal, &p.flat_mm, material.clone());
                 }
                 (None, None) => frame.add_surface(&p.mesh, fill),
             },
@@ -418,7 +426,7 @@ mod tests {
 
     #[test]
     fn fabric_material_tints_or_textures_unselected_patterns() {
-        use crate::material::{plain_weave, Material};
+        use crate::material::{weave, Material};
         let (avatar, placed) = scene();
         let theme = Theme {
             avatar: [0.5; 4],
@@ -435,7 +443,7 @@ mod tests {
         let flat_color: Color = [0.8, 0.1, 0.1, 1.0];
         let textured = Material::textured(
             [0.7, 0.7, 0.9, 1.0],
-            std::sync::Arc::new(plain_weave(1, [200, 190, 170], 4)),
+            std::sync::Arc::new(weave(od_core::FabricTexture::Plain, [200, 190, 170], 1).0),
         );
         let materials = vec![
             Some(Material::flat(flat_color)),
@@ -459,16 +467,20 @@ mod tests {
             pattern_materials: Some(&materials),
             display: Default::default(),
         });
-        // Pattern 0: a flat fabric tint, drawn in the ordinary surfaces batch.
-        assert!(frame.surfaces[..per_pattern]
+        // Pattern 0: a flat fabric tint, drawn with its material.
+        assert_eq!(frame.textured.len(), 1);
+        assert!(frame.textured[0]
+            .vertices
             .iter()
             .all(|v| v.color == flat_color));
         // Pattern 1: selected, so it's the theme's selection colour, not
-        // the fabric's texture or tint, and nothing was added to `textured`.
-        assert!(frame.surfaces[per_pattern..per_pattern * 2]
+        // the fabric's texture or tint; pattern 2 has the theme fill.
+        assert!(frame.surfaces[..per_pattern]
             .iter()
             .all(|v| v.color == theme.selected));
-        assert!(frame.textured.is_empty());
+        assert!(frame.surfaces[per_pattern..]
+            .iter()
+            .all(|v| v.color == theme.pattern));
 
         // Nothing selected this time: the textured fabric goes into its
         // own batch instead of the plain `surfaces` one.
@@ -485,12 +497,13 @@ mod tests {
             pattern_materials: Some(&materials),
             display: Default::default(),
         });
-        assert_eq!(frame.textured.len(), 1);
-        assert_eq!(frame.textured[0].vertices.len(), per_pattern);
-        assert!(frame.textured[0]
+        assert_eq!(frame.textured.len(), 2);
+        assert_eq!(frame.textured[1].vertices.len(), per_pattern);
+        // The texture carries the colour, so the vertices are white.
+        assert!(frame.textured[1]
             .vertices
             .iter()
-            .all(|v| v.color == textured.base_color));
+            .all(|v| v.color == textured.vertex_color() && v.color[0] == 1.0));
     }
 
     #[test]

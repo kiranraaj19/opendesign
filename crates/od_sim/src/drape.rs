@@ -554,6 +554,11 @@ impl Drape {
             .iter()
             .map(|c| (c.a, c.b))
             .collect();
+        let flats: Vec<(PatternId, Vec<glam::Vec2>)> = self
+            .pattern_meshes
+            .iter()
+            .map(|(id, mesh)| (*id, flat_mm(mesh)))
+            .collect();
         let pieces: Vec<Piece<'_, PatternId>> = self
             .pattern_ranges
             .iter()
@@ -567,14 +572,19 @@ impl Drape {
                         .map_or(display_thickness(&Fabric::cotton()), |p| {
                             display_thickness(&p.fabric)
                         }),
+                    flat_mm: flats
+                        .iter()
+                        .find(|(k, _)| k == id)
+                        .map_or(&[], |(_, f)| f.as_slice()),
                 })
             })
             .collect();
         let mut meshes = finish(&positions, &pieces, &seams, settings);
         let mut placed = self.placed_patterns();
         for p in &mut placed {
-            if let Some(mesh) = meshes.remove(&p.key) {
-                p.mesh = mesh;
+            if let Some(finished) = meshes.remove(&p.key) {
+                p.mesh = finished.mesh;
+                p.flat_mm = finished.flat_mm;
             }
         }
         placed
@@ -607,21 +617,33 @@ impl Drape {
                     .iter()
                     .map(|&v| positions[v as usize])
                     .collect();
+                // draped_mesh repeats the particles for the back face.
+                let mut flat = flat_mm(pattern_mesh);
+                flat.extend_from_within(..);
                 Some(PlacedPattern {
                     key: *id,
                     mesh,
                     outline,
                     normal,
+                    flat_mm: flat,
                 })
             })
             .collect()
     }
 }
 
-/// How thick a fabric is drawn, in metres: a little thicker than real
-/// cloth (a few tenths of a millimetre), or it wouldn't show at all.
+/// Each vertex's flat position in mm, as glam's vector.
+fn flat_mm(mesh: &PatternMesh) -> Vec<glam::Vec2> {
+    mesh.vertices
+        .iter()
+        .map(|v| glam::Vec2::new(v.pos.x, v.pos.y))
+        .collect()
+}
+
+/// How thick a fabric is drawn, in metres: its own thickness, but never
+/// under 0.3 mm, or the two faces fight over the same pixels.
 pub fn display_thickness(fabric: &Fabric) -> f32 {
-    0.0006 + fabric.mass_per_area * 0.002
+    fabric.look.thickness_mm.max(0.3) / 1000.0
 }
 
 #[cfg(test)]

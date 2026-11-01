@@ -118,18 +118,9 @@ impl Globals {
         }
         self.rig = [right.x, right.z, back.x, back.z];
         let last_level = lighting.ibl.levels.len().saturating_sub(1) as f32;
-        self.ibl = [
-            lighting.environment_intensity,
-            last_level,
-            FABRIC_ROUGHNESS,
-            0.0,
-        ];
+        self.ibl = [lighting.environment_intensity, last_level, 0.0, 0.0];
     }
 }
-
-/// How rough surfaces are for environment reflections until materials
-/// carry their own roughness: matte, like most woven fabric.
-const FABRIC_ROUGHNESS: f32 = 0.7;
 
 /// sRGB byte to linear light.
 pub fn srgb_to_linear(c: u8) -> f32 {
@@ -254,23 +245,42 @@ impl Frame {
             .extend(mesh.indices.iter().map(|i| i + base));
     }
 
-    /// A surface drawn with its own texture instead of (or on top of) a
-    /// flat fill: `material.base_color` tints the texture (or stands alone
-    /// if it has none). UV coordinates are a simple planar projection onto
-    /// the plane most aligned with `normal`, tiled once per metre — good
-    /// enough for a flat garment piece or an avatar-sized patch, not a
-    /// general unwrap.
-    pub fn add_textured_surface(&mut self, mesh: &Mesh, normal: Vec3, material: Material) {
+    /// A surface drawn with its own material. `flat_mm` is where each
+    /// vertex lies on the flat pattern, in millimetres, which the textures
+    /// are laid on along the material's grain. Without it (a different
+    /// length), they're projected onto the plane most aligned with
+    /// `normal`, which suits a flat piece but not a draped one.
+    pub fn add_textured_surface(
+        &mut self,
+        mesh: &Mesh,
+        normal: Vec3,
+        flat_mm: &[Vec2],
+        material: Material,
+    ) {
         let (right, up) = planar_basis(normal);
+        let (sin, cos) = material.grain_degrees.to_radians().sin_cos();
+        // The grain, and the weft square to it (see Pattern::grain_angle).
+        let (grain, across) = (Vec2::new(-sin, cos), Vec2::new(cos, sin));
+        let scale = 1.0 / material.repeat_mm.max(1e-3);
+        let has_flat = flat_mm.len() == mesh.positions.len();
+        let color = material.vertex_color();
         let vertices = mesh
             .positions
             .iter()
             .zip(&mesh.normals)
-            .map(|(p, n)| LitVertex {
-                position: p.to_array(),
-                normal: n.to_array(),
-                color: material.base_color,
-                uv: [p.dot(right), p.dot(up)],
+            .enumerate()
+            .map(|(i, (p, n))| {
+                let flat = if has_flat {
+                    flat_mm[i]
+                } else {
+                    Vec2::new(p.dot(right), p.dot(up)) * 1000.0
+                };
+                LitVertex {
+                    position: p.to_array(),
+                    normal: n.to_array(),
+                    color,
+                    uv: [flat.dot(across) * scale, flat.dot(grain) * scale],
+                }
             })
             .collect();
         self.textured.push(TexturedSurface {

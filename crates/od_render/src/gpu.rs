@@ -7,6 +7,7 @@ use std::collections::HashMap;
 use wgpu::util::DeviceExt;
 
 use crate::light::Ibl;
+use crate::material::{mip_chain, Material, Surface, TexelKind, TextureImage};
 use crate::scene::{FlatVertex, Frame, Globals, LitVertex};
 
 pub const SHADER: &str = include_str!("scene.wgsl");
@@ -37,14 +38,18 @@ pub struct Renderer {
     shadow_vertices: Growable,
     texture_layout: wgpu::BindGroupLayout,
     sampler: wgpu::Sampler,
+    samples: u32,
     /// Bound for the avatar and the plain `surfaces` batch, which have no
-    /// texture of their own: a solid white pixel, so sampling it in the
-    /// shader is the same as not texturing at all.
+    /// material of their own: a white pixel, a flat detail pixel and
+    /// [`Surface::default`].
     default_texture: wgpu::BindGroup,
-    /// One bind group per distinct [`crate::material::TextureImage::id`]
-    /// seen so far, kept across frames so the same fabric's texture isn't
-    /// re-uploaded to the GPU every frame.
-    texture_cache: HashMap<u64, wgpu::BindGroup>,
+    /// The pixels standing in for a material without a colour or detail
+    /// texture.
+    white: wgpu::TextureView,
+    flat_detail: wgpu::TextureView,
+    /// Every [`TextureImage::id`] uploaded so far, kept across frames so
+    /// the same fabric's texture isn't re-uploaded to the GPU every frame.
+    texture_cache: HashMap<u64, wgpu::TextureView>,
     /// This frame's textured draws, rebuilt in [`Self::prepare`] (their
     /// geometry can change every frame, e.g. while draping).
     textured: Vec<TexturedBatch>,
@@ -153,24 +158,27 @@ impl Renderer {
         let texture_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("od_texture"),
             entries: &[
-                wgpu::BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Texture {
-                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                        view_dimension: wgpu::TextureViewDimension::D2,
-                        multisampled: false,
-                    },
-                    count: None,
-                },
+                texture_entry(0),
                 wgpu::BindGroupLayoutEntry {
                     binding: 1,
                     visibility: wgpu::ShaderStages::FRAGMENT,
                     ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
                     count: None,
                 },
+                texture_entry(2),
+                wgpu::BindGroupLayoutEntry {
+                    binding: 3,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: wgpu::BufferSize::new(size_of::<SurfaceUniform>() as u64),
+                    },
+                    count: None,
+                },
             ],
         });
+        // Fabric seen at a glancing angle stays sharp along the folds.
         let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("od_sampler"),
             address_mode_u: wgpu::AddressMode::Repeat,
@@ -178,16 +186,29 @@ impl Renderer {
             mag_filter: wgpu::FilterMode::Linear,
             min_filter: wgpu::FilterMode::Linear,
             mipmap_filter: wgpu::MipmapFilterMode::Linear,
+            anisotropy_clamp: 16,
             ..Default::default()
         });
-        let default_texture = make_texture_bind_group(
+        let pixel = |id, rgba: [u8; 4]| TextureImage {
+            id,
+            width: 1,
+            height: 1,
+            rgba: rgba.to_vec(),
+        };
+        let white = upload_texture(device, queue, &pixel(0, [255; 4]), TexelKind::Color);
+        let flat_detail = upload_texture(
             device,
             queue,
+            &pixel(0, [128, 128, 255, 128]),
+            TexelKind::Detail,
+        );
+        let samples = targets.samples.max(1);
+        let default_texture = material_bind_group(
+            device,
             &texture_layout,
             &sampler,
-            1,
-            1,
-            &[255, 255, 255, 255],
+            [&white, &flat_detail],
+            &SurfaceUniform::new(&Surface::default(), samples),
         );
         let environment_layout =
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -324,7 +345,10 @@ impl Renderer {
             shadow_vertices: Growable::new("od_shadow", U::VERTEX),
             texture_layout,
             sampler,
+            samples,
             default_texture,
+            white,
+            flat_detail,
             texture_cache: HashMap::new(),
             textured: Vec::new(),
             environment_layout,
@@ -412,24 +436,7 @@ impl Renderer {
             .iter()
             .filter(|t| !t.indices.is_empty())
             .map(|textured| {
-                let bind_group = match &textured.material.texture {
-                    Some(tex) => self
-                        .texture_cache
-                        .entry(tex.id)
-                        .or_insert_with(|| {
-                            make_texture_bind_group(
-                                device,
-                                queue,
-                                &self.texture_layout,
-                                &self.sampler,
-                                tex.width,
-                                tex.height,
-                                &tex.rgba,
-                            )
-                        })
-                        .clone(),
-                    None => self.default_texture.clone(),
-                };
+                let bind_group = self.material_bind_group(device, queue, &textured.material);
                 TexturedBatch {
                     vertices: device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                         label: Some("od_textured"),
@@ -446,6 +453,36 @@ impl Renderer {
                 }
             })
             .collect();
+    }
+
+    /// Group 1 for `material`, uploading its textures the first time
+    /// they're seen.
+    fn material_bind_group(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        material: &Material,
+    ) -> wgpu::BindGroup {
+        let mut view = |image: &Option<std::sync::Arc<TextureImage>>, kind| {
+            image.as_ref().map(|image| {
+                self.texture_cache
+                    .entry(image.id)
+                    .or_insert_with(|| upload_texture(device, queue, image, kind))
+                    .clone()
+            })
+        };
+        let albedo = view(&material.texture, TexelKind::Color);
+        let detail = view(&material.detail, TexelKind::Detail);
+        material_bind_group(
+            device,
+            &self.texture_layout,
+            &self.sampler,
+            [
+                albedo.as_ref().unwrap_or(&self.white),
+                detail.as_ref().unwrap_or(&self.flat_detail),
+            ],
+            &SurfaceUniform::new(&material.surface, self.samples),
+        )
     }
 
     /// Draw into a pass whose viewport is already set to the 3D view.
@@ -730,54 +767,124 @@ enum Kind {
     Shadow,
 }
 
-/// Upload an RGBA8 image and wrap it (plus `sampler`) in a bind group
-/// matching `layout`, group 1's shape in `scene.wgsl`.
-fn make_texture_bind_group(
+fn texture_entry(binding: u32) -> wgpu::BindGroupLayoutEntry {
+    wgpu::BindGroupLayoutEntry {
+        binding,
+        visibility: wgpu::ShaderStages::FRAGMENT,
+        ty: wgpu::BindingType::Texture {
+            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+            view_dimension: wgpu::TextureViewDimension::D2,
+            multisampled: false,
+        },
+        count: None,
+    }
+}
+
+/// `Surface` in `scene.wgsl`: a material's shading values for one draw.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct SurfaceUniform {
+    /// Roughness, sheen roughness, translucency, opacity.
+    params: [f32; 4],
+    /// Sheen colour, and the detail normals' strength.
+    sheen: [f32; 4],
+    /// x: samples per pixel, for covering part of a pixel when not opaque.
+    extra: [f32; 4],
+}
+
+impl SurfaceUniform {
+    fn new(s: &Surface, samples: u32) -> Self {
+        Self {
+            params: [s.roughness, s.sheen_roughness, s.translucency, s.opacity],
+            sheen: [s.sheen[0], s.sheen[1], s.sheen[2], s.normal_strength],
+            extra: [samples as f32, 0.0, 0.0, 0.0],
+        }
+    }
+}
+
+/// Upload an RGBA8 image with its mipmaps: sRGB colour or linear detail
+/// as `kind` says.
+fn upload_texture(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
-    layout: &wgpu::BindGroupLayout,
-    sampler: &wgpu::Sampler,
-    width: u32,
-    height: u32,
-    rgba: &[u8],
-) -> wgpu::BindGroup {
-    let size = wgpu::Extent3d {
-        width: width.max(1),
-        height: height.max(1),
-        depth_or_array_layers: 1,
-    };
+    image: &TextureImage,
+    kind: TexelKind,
+) -> wgpu::TextureView {
+    let chain = mip_chain(image.width, image.height, &image.rgba, kind);
     let texture = device.create_texture(&wgpu::TextureDescriptor {
         label: Some("od_fabric_texture"),
-        size,
-        mip_level_count: 1,
+        size: wgpu::Extent3d {
+            width: chain[0].0,
+            height: chain[0].1,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: chain.len() as u32,
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
-        format: wgpu::TextureFormat::Rgba8UnormSrgb,
+        format: match kind {
+            TexelKind::Color => wgpu::TextureFormat::Rgba8UnormSrgb,
+            TexelKind::Detail => wgpu::TextureFormat::Rgba8Unorm,
+        },
         usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
         view_formats: &[],
     });
-    queue.write_texture(
-        texture.as_image_copy(),
-        rgba,
-        wgpu::TexelCopyBufferLayout {
-            offset: 0,
-            bytes_per_row: Some(4 * size.width),
-            rows_per_image: Some(size.height),
-        },
-        size,
-    );
-    let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+    for (level, (width, height, rgba)) in chain.iter().enumerate() {
+        queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &texture,
+                mip_level: level as u32,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            rgba,
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(4 * width),
+                rows_per_image: Some(*height),
+            },
+            wgpu::Extent3d {
+                width: *width,
+                height: *height,
+                depth_or_array_layers: 1,
+            },
+        );
+    }
+    texture.create_view(&wgpu::TextureViewDescriptor::default())
+}
+
+/// Group 1 of `scene.wgsl`: colour and detail textures, their sampler
+/// and the surface's shading values.
+fn material_bind_group(
+    device: &wgpu::Device,
+    layout: &wgpu::BindGroupLayout,
+    sampler: &wgpu::Sampler,
+    [albedo, detail]: [&wgpu::TextureView; 2],
+    surface: &SurfaceUniform,
+) -> wgpu::BindGroup {
+    let buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        label: Some("od_surface"),
+        contents: bytemuck::bytes_of(surface),
+        usage: wgpu::BufferUsages::UNIFORM,
+    });
     device.create_bind_group(&wgpu::BindGroupDescriptor {
-        label: Some("od_fabric_texture"),
+        label: Some("od_material"),
         layout,
         entries: &[
             wgpu::BindGroupEntry {
                 binding: 0,
-                resource: wgpu::BindingResource::TextureView(&view),
+                resource: wgpu::BindingResource::TextureView(albedo),
             },
             wgpu::BindGroupEntry {
                 binding: 1,
                 resource: wgpu::BindingResource::Sampler(sampler),
+            },
+            wgpu::BindGroupEntry {
+                binding: 2,
+                resource: wgpu::BindingResource::TextureView(detail),
+            },
+            wgpu::BindGroupEntry {
+                binding: 3,
+                resource: buffer.as_entire_binding(),
             },
         ],
     })

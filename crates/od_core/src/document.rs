@@ -337,7 +337,7 @@ impl SewingLine {
 /// How a fabric's surface looks in the 3D view, besides its flat tint: a
 /// hint for [`od_render`] to pick a procedural weave texture. Kept as a tag
 /// here rather than pixels, since `od_core` has no GPU or image dependency.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FabricTexture {
     /// A flat tint with no weave pattern (e.g. silk's smooth surface).
@@ -347,6 +347,120 @@ pub enum FabricTexture {
     Plain,
     /// A coarser diagonal twill weave (e.g. denim).
     Twill,
+    /// Long floats of one thread over several, so the surface is mostly
+    /// smooth parallel yarn that catches the light (e.g. satin).
+    Satin,
+    /// A knit's rows of interlocking V-shaped loops (e.g. T-shirt jersey).
+    Jersey,
+    /// A knit with raised ribs running down the grain (e.g. cuffs).
+    Rib,
+    /// A dense, short pile of fibres standing up off the surface.
+    Velvet,
+}
+
+impl FabricTexture {
+    pub const ALL: [FabricTexture; 7] = [
+        FabricTexture::Flat,
+        FabricTexture::Plain,
+        FabricTexture::Twill,
+        FabricTexture::Satin,
+        FabricTexture::Jersey,
+        FabricTexture::Rib,
+        FabricTexture::Velvet,
+    ];
+
+    /// What the fabric editor calls it.
+    pub fn label(self) -> &'static str {
+        match self {
+            FabricTexture::Flat => "Smooth",
+            FabricTexture::Plain => "Plain weave",
+            FabricTexture::Twill => "Twill",
+            FabricTexture::Satin => "Satin",
+            FabricTexture::Jersey => "Jersey knit",
+            FabricTexture::Rib => "Rib knit",
+            FabricTexture::Velvet => "Velvet pile",
+        }
+    }
+
+    /// Its name in files and the MCP tools.
+    pub fn name(self) -> &'static str {
+        match self {
+            FabricTexture::Flat => "flat",
+            FabricTexture::Plain => "plain",
+            FabricTexture::Twill => "twill",
+            FabricTexture::Satin => "satin",
+            FabricTexture::Jersey => "jersey",
+            FabricTexture::Rib => "rib",
+            FabricTexture::Velvet => "velvet",
+        }
+    }
+
+    pub fn parse(name: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|t| t.name() == name)
+    }
+}
+
+/// How a fabric's surface takes the light in a render, beyond its colour
+/// and weave: what [`od_render::material`] turns into a shading model.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct FabricLook {
+    /// How rough the yarn's surface is, 0..1: low gives a narrow, bright
+    /// highlight (satin, silk), high a broad, dull one (cotton, denim).
+    pub roughness: f32,
+    /// How strongly fibres standing off the surface glow at grazing angles,
+    /// 0..1: brushed cotton a little, velvet a lot.
+    pub sheen: f32,
+    /// How tightly that glow hugs the silhouette, 0..1 (lower is tighter).
+    pub sheen_roughness: f32,
+    /// 0 for a white sheen, 1 for one tinted the fabric's colour.
+    pub sheen_tint: f32,
+    /// How thick the cloth is, in millimetres.
+    pub thickness_mm: f32,
+    /// 1 for opaque cloth; lower lets the body show through (chiffon).
+    pub opacity: f32,
+    /// How much light comes through from behind, 0..1, so thin cloth glows
+    /// when lit from the back.
+    pub translucency: f32,
+    /// How far one repeat of the weave or knit spans, in millimetres.
+    pub repeat_mm: f32,
+}
+
+impl Default for FabricLook {
+    fn default() -> Self {
+        Self::for_texture(FabricTexture::Plain, 0.15)
+    }
+}
+
+impl FabricLook {
+    /// A plausible look for a fabric of this weave and weight (kg per
+    /// m²), for fabrics saved before they had one.
+    pub fn for_texture(texture: FabricTexture, mass_per_area: f32) -> Self {
+        let (roughness, sheen, repeat_mm) = match texture {
+            FabricTexture::Flat => (0.45, 0.2, 1.0),
+            FabricTexture::Plain => (0.85, 0.3, 1.0),
+            FabricTexture::Twill => (0.85, 0.2, 3.0),
+            FabricTexture::Satin => (0.3, 0.1, 1.5),
+            FabricTexture::Jersey => (0.8, 0.35, 1.6),
+            FabricTexture::Rib => (0.8, 0.35, 3.0),
+            FabricTexture::Velvet => (0.95, 1.0, 1.0),
+        };
+        Self {
+            roughness,
+            sheen,
+            sheen_roughness: if texture == FabricTexture::Velvet {
+                0.35
+            } else {
+                0.5
+            },
+            sheen_tint: 0.5,
+            // As thick as the 3D view drew cloth before it had a thickness.
+            thickness_mm: 0.6 + mass_per_area * 2.0,
+            opacity: 1.0,
+            translucency: (0.25 - mass_per_area).clamp(0.0, 0.25),
+            repeat_mm,
+        }
+    }
 }
 
 /// A physical fabric: how heavy and stiff it drapes, and how it looks.
@@ -385,6 +499,7 @@ pub struct Fabric {
     /// Base tint, straight sRGB 0..255.
     pub color: [u8; 3],
     pub texture: FabricTexture,
+    pub look: FabricLook,
 }
 
 impl Fabric {
@@ -400,6 +515,16 @@ impl Fabric {
             friction: 0.3,
             color: [235, 230, 210],
             texture: FabricTexture::Plain,
+            look: FabricLook {
+                roughness: 0.85,
+                sheen: 0.3,
+                sheen_roughness: 0.5,
+                sheen_tint: 0.5,
+                thickness_mm: 0.5,
+                opacity: 1.0,
+                translucency: 0.12,
+                repeat_mm: 0.9,
+            },
         }
     }
 
@@ -415,6 +540,16 @@ impl Fabric {
             friction: 0.1,
             color: [232, 226, 236],
             texture: FabricTexture::Flat,
+            look: FabricLook {
+                roughness: 0.35,
+                sheen: 0.25,
+                sheen_roughness: 0.4,
+                sheen_tint: 0.8,
+                thickness_mm: 0.15,
+                opacity: 1.0,
+                translucency: 0.3,
+                repeat_mm: 0.4,
+            },
         }
     }
 
@@ -430,13 +565,138 @@ impl Fabric {
             friction: 0.5,
             color: [68, 88, 128],
             texture: FabricTexture::Twill,
+            look: FabricLook {
+                roughness: 0.9,
+                sheen: 0.15,
+                sheen_roughness: 0.6,
+                sheen_tint: 0.2,
+                thickness_mm: 0.9,
+                opacity: 1.0,
+                translucency: 0.0,
+                repeat_mm: 3.0,
+            },
+        }
+    }
+
+    pub fn satin() -> Self {
+        Self {
+            name: "Satin".into(),
+            mass_per_area: 0.12,
+            stretch_compliance: 2e-7,
+            weft_stretch_compliance: 3e-7,
+            shear_compliance: 1e-6,
+            bending_compliance: 4e-5,
+            weft_bending_compliance: 5e-5,
+            friction: 0.1,
+            color: [228, 206, 168],
+            texture: FabricTexture::Satin,
+            look: FabricLook {
+                roughness: 0.22,
+                sheen: 0.1,
+                sheen_roughness: 0.4,
+                sheen_tint: 0.8,
+                thickness_mm: 0.3,
+                opacity: 1.0,
+                translucency: 0.12,
+                repeat_mm: 1.6,
+            },
+        }
+    }
+
+    pub fn velvet() -> Self {
+        Self {
+            name: "Velvet".into(),
+            mass_per_area: 0.30,
+            stretch_compliance: 1e-7,
+            weft_stretch_compliance: 2e-7,
+            shear_compliance: 5e-7,
+            bending_compliance: 6e-6,
+            weft_bending_compliance: 8e-6,
+            friction: 0.6,
+            color: [112, 22, 44],
+            texture: FabricTexture::Velvet,
+            look: FabricLook {
+                roughness: 0.95,
+                sheen: 1.0,
+                sheen_roughness: 0.3,
+                sheen_tint: 0.6,
+                thickness_mm: 1.5,
+                opacity: 1.0,
+                translucency: 0.0,
+                repeat_mm: 1.0,
+            },
+        }
+    }
+
+    pub fn jersey() -> Self {
+        Self {
+            name: "Jersey".into(),
+            mass_per_area: 0.18,
+            stretch_compliance: 1e-6,
+            weft_stretch_compliance: 3e-6,
+            shear_compliance: 2e-6,
+            bending_compliance: 2e-5,
+            weft_bending_compliance: 2e-5,
+            friction: 0.4,
+            color: [150, 152, 158],
+            texture: FabricTexture::Jersey,
+            look: FabricLook {
+                roughness: 0.8,
+                sheen: 0.35,
+                sheen_roughness: 0.5,
+                sheen_tint: 0.5,
+                thickness_mm: 0.6,
+                opacity: 1.0,
+                translucency: 0.1,
+                repeat_mm: 1.6,
+            },
+        }
+    }
+
+    pub fn chiffon() -> Self {
+        Self {
+            name: "Chiffon".into(),
+            mass_per_area: 0.035,
+            stretch_compliance: 5e-7,
+            weft_stretch_compliance: 7e-7,
+            shear_compliance: 3e-6,
+            bending_compliance: 2e-4,
+            weft_bending_compliance: 2.5e-4,
+            friction: 0.15,
+            color: [240, 204, 208],
+            texture: FabricTexture::Plain,
+            look: FabricLook {
+                roughness: 0.6,
+                sheen: 0.2,
+                sheen_roughness: 0.4,
+                sheen_tint: 0.7,
+                thickness_mm: 0.1,
+                opacity: 0.45,
+                translucency: 0.5,
+                repeat_mm: 0.6,
+            },
         }
     }
 
     /// The built-in fabrics offered by the properties panel's picker, in
     /// display order.
-    pub fn presets() -> [Fabric; 3] {
-        [Self::cotton(), Self::silk(), Self::denim()]
+    pub fn presets() -> [Fabric; 7] {
+        [
+            Self::cotton(),
+            Self::silk(),
+            Self::denim(),
+            Self::satin(),
+            Self::velvet(),
+            Self::jersey(),
+            Self::chiffon(),
+        ]
+    }
+
+    /// The built-in fabric called `name` (any case), e.g. "cotton".
+    pub fn preset(name: &str) -> Option<Fabric> {
+        Self::presets()
+            .into_iter()
+            .find(|f| f.name.eq_ignore_ascii_case(name))
     }
 }
 

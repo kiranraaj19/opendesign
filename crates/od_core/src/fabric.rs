@@ -5,7 +5,7 @@
 use serde::Deserialize;
 
 use crate::command::Command;
-use crate::document::{Document, Fabric, FabricTexture, Pattern, PatternId};
+use crate::document::{Document, Fabric, FabricLook, FabricTexture, Pattern, PatternId};
 use crate::geometry::Vec2;
 
 /// What a saved [`Fabric`] may contain. Fabrics saved before stretch and
@@ -26,6 +26,10 @@ pub(crate) struct FabricFields {
     friction: f32,
     color: [u8; 3],
     texture: FabricTexture,
+    /// Missing from fabrics saved before renders had materials: they get
+    /// [`FabricLook::for_texture`].
+    #[serde(default)]
+    look: Option<FabricLook>,
 }
 
 impl From<FabricFields> for Fabric {
@@ -41,6 +45,9 @@ impl From<FabricFields> for Fabric {
             friction: f.friction,
             color: f.color,
             texture: f.texture,
+            look: f
+                .look
+                .unwrap_or_else(|| FabricLook::for_texture(f.texture, f.mass_per_area)),
         }
     }
 }
@@ -137,6 +144,18 @@ pub enum FabricValue {
     BendWeft,
     /// Friction coefficient, 0..1.
     Friction,
+    /// How rough the yarn's surface looks in renders, 0..1.
+    Roughness,
+    /// How much it glows at grazing angles, 0..1.
+    Sheen,
+    /// Thickness, mm.
+    Thickness,
+    /// How opaque it is, 0..1.
+    Opacity,
+    /// How much light shows through from behind, 0..1.
+    Translucency,
+    /// Size of one repeat of the weave or knit, mm.
+    Repeat,
 }
 
 /// Softest and firmest stretch and shear compliances the editor offers.
@@ -157,7 +176,7 @@ fn compliance(firmness: f32, (soft, firm): (f32, f32)) -> f32 {
 }
 
 impl FabricValue {
-    pub const ALL: [FabricValue; 7] = [
+    pub const ALL: [FabricValue; 13] = [
         FabricValue::Weight,
         FabricValue::StretchWarp,
         FabricValue::StretchWeft,
@@ -165,7 +184,41 @@ impl FabricValue {
         FabricValue::BendWarp,
         FabricValue::BendWeft,
         FabricValue::Friction,
+        FabricValue::Roughness,
+        FabricValue::Sheen,
+        FabricValue::Thickness,
+        FabricValue::Opacity,
+        FabricValue::Translucency,
+        FabricValue::Repeat,
     ];
+
+    /// Whether it changes only how the fabric looks, not how it drapes.
+    pub fn is_look(self) -> bool {
+        matches!(
+            self,
+            FabricValue::Roughness
+                | FabricValue::Sheen
+                | FabricValue::Thickness
+                | FabricValue::Opacity
+                | FabricValue::Translucency
+                | FabricValue::Repeat
+        )
+    }
+
+    /// How many decimals the editor shows, and how far a drag moves it
+    /// per pixel.
+    pub fn precision(self) -> (usize, f32) {
+        match self {
+            FabricValue::Friction
+            | FabricValue::Roughness
+            | FabricValue::Sheen
+            | FabricValue::Opacity
+            | FabricValue::Translucency
+            | FabricValue::Thickness => (2, 0.01),
+            FabricValue::Repeat => (1, 0.05),
+            _ => (0, 0.5),
+        }
+    }
 
     /// What the editor calls it.
     pub fn label(self) -> &'static str {
@@ -177,6 +230,12 @@ impl FabricValue {
             FabricValue::BendWarp => "Bending stiffness along grain",
             FabricValue::BendWeft => "Bending stiffness across grain",
             FabricValue::Friction => "Friction",
+            FabricValue::Roughness => "Roughness",
+            FabricValue::Sheen => "Sheen",
+            FabricValue::Thickness => "Thickness",
+            FabricValue::Opacity => "Opacity",
+            FabricValue::Translucency => "Translucency",
+            FabricValue::Repeat => "Weave size",
         }
     }
 
@@ -201,6 +260,20 @@ impl FabricValue {
             }
             FabricValue::BendWeft => "How much it resists folding across the grainline",
             FabricValue::Friction => "How much it grips other surfaces, 0 to 1",
+            FabricValue::Roughness => {
+                "How rough the yarn's surface is: low for a narrow, bright highlight \
+                 (satin, silk), high for a broad, dull one (cotton, denim)"
+            }
+            FabricValue::Sheen => {
+                "How much fibres standing off the surface glow at grazing angles: \
+                 a little for brushed cotton, a lot for velvet"
+            }
+            FabricValue::Thickness => "How thick the cloth is drawn in renders",
+            FabricValue::Opacity => {
+                "1 is opaque; lower lets what's behind show through, as chiffon"
+            }
+            FabricValue::Translucency => "How much light comes through thin cloth lit from behind",
+            FabricValue::Repeat => "How far one repeat of the weave or knit spans on the cloth",
         }
     }
 
@@ -208,7 +281,12 @@ impl FabricValue {
     pub fn suffix(self) -> &'static str {
         match self {
             FabricValue::Weight => " g/m²",
-            FabricValue::Friction => "",
+            FabricValue::Thickness | FabricValue::Repeat => " mm",
+            FabricValue::Friction
+            | FabricValue::Roughness
+            | FabricValue::Sheen
+            | FabricValue::Opacity
+            | FabricValue::Translucency => "",
             _ => " / 100",
         }
     }
@@ -216,7 +294,13 @@ impl FabricValue {
     pub fn range(self) -> std::ops::RangeInclusive<f32> {
         match self {
             FabricValue::Weight => 10.0..=1500.0,
-            FabricValue::Friction => 0.0..=1.0,
+            FabricValue::Friction
+            | FabricValue::Roughness
+            | FabricValue::Sheen
+            | FabricValue::Translucency => 0.0..=1.0,
+            FabricValue::Opacity => 0.05..=1.0,
+            FabricValue::Thickness => 0.05..=5.0,
+            FabricValue::Repeat => 0.1..=20.0,
             _ => 0.0..=100.0,
         }
     }
@@ -231,6 +315,12 @@ impl FabricValue {
             FabricValue::BendWarp => firmness(fabric.bending_compliance, BEND_RANGE),
             FabricValue::BendWeft => firmness(fabric.weft_bending_compliance, BEND_RANGE),
             FabricValue::Friction => fabric.friction,
+            FabricValue::Roughness => fabric.look.roughness,
+            FabricValue::Sheen => fabric.look.sheen,
+            FabricValue::Thickness => fabric.look.thickness_mm,
+            FabricValue::Opacity => fabric.look.opacity,
+            FabricValue::Translucency => fabric.look.translucency,
+            FabricValue::Repeat => fabric.look.repeat_mm,
         }
     }
 
@@ -248,6 +338,12 @@ impl FabricValue {
             FabricValue::BendWarp => f.bending_compliance = compliance(value, BEND_RANGE),
             FabricValue::BendWeft => f.weft_bending_compliance = compliance(value, BEND_RANGE),
             FabricValue::Friction => f.friction = value,
+            FabricValue::Roughness => f.look.roughness = value,
+            FabricValue::Sheen => f.look.sheen = value,
+            FabricValue::Thickness => f.look.thickness_mm = value,
+            FabricValue::Opacity => f.look.opacity = value,
+            FabricValue::Translucency => f.look.translucency = value,
+            FabricValue::Repeat => f.look.repeat_mm = value,
         }
         f
     }

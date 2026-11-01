@@ -3,14 +3,14 @@
 //! optionally as a strain heatmap, or a flat sheet of every pattern piece.
 
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::Mutex;
 
 use od_core::document::TOLERANCE;
-use od_core::{Fabric, FabricTexture, PatternId};
+use od_core::PatternId;
 use od_render::camera::{OrbitCamera, ViewPreset};
 use od_render::glam::{Vec2, Vec3};
 use od_render::light::{Environment, LightPreset, Lighting};
-use od_render::material::{plain_weave, twill_weave, Material};
+use od_render::material::Material;
 use od_render::mesh::Aabb;
 use od_render::pattern::Placement;
 use od_render::render::{render_still, StillSettings, ToneMap};
@@ -195,7 +195,7 @@ pub fn render(s: &mut Session, req: &Request) -> Result<(Vec<u8>, String), Strin
     }
     let materials: Vec<Option<Material>> = placed
         .iter()
-        .map(|p| s.doc.pattern(p.key).map(|pat| material(&pat.fabric)))
+        .map(|p| s.doc.pattern(p.key).map(od_render::material::for_pattern))
         .collect();
 
     let show_avatar = req.avatar && req.view != View::Sheet;
@@ -325,26 +325,6 @@ fn strain_color(strain: f32) -> Color {
     };
     let c = |i: usize| a[i] + (b[i] - a[i]) * u;
     [c(0), c(1), c(2), 1.0]
-}
-
-/// A fabric's look, as the app draws it.
-fn material(fabric: &Fabric) -> Material {
-    let [r, g, b] = fabric.color;
-    let base = linear([r, g, b, 255]);
-    // FNV-1a of the look, so the same fabric reuses one texture.
-    let key = format!("{}/{:?}/{:?}", fabric.name, fabric.color, fabric.texture);
-    let id = key.bytes().fold(0xcbf2_9ce4_8422_2325_u64, |h, b| {
-        (h ^ u64::from(b)).wrapping_mul(0x0100_0000_01b3)
-    });
-    match fabric.texture {
-        FabricTexture::Flat => Material::flat(base),
-        FabricTexture::Plain => {
-            Material::textured(base, Arc::new(plain_weave(id, fabric.color, 4)))
-        }
-        FabricTexture::Twill => {
-            Material::textured(base, Arc::new(twill_weave(id, fabric.color, 4)))
-        }
-    }
 }
 
 /// The app's light and dark theme colours.
